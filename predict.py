@@ -326,12 +326,16 @@ def _collect_market_columns() -> List[str]:
     cols += ["P_1X2_H", "P_1X2_D", "P_1X2_A"]
     cols += ["P_BTTS_Y", "P_BTTS_N"]
 
-    # Over/Under Total Goals
-    for l in OU_LINES:
+    # Over/Under Total Goals (Extended)
+    for l in ["0_5", "1_5", "2_5", "3_5", "4_5", "5_5"]:
         cols += [f"P_OU_{l}_O", f"P_OU_{l}_U"]
 
     # Goal Range
     cols += [f"P_GR_{k}" for k in ["0","1","2","3","4","5+"]]
+
+    # Exact Total Goals
+    for i in ["0", "1", "2", "3", "4", "5", "6+"]:
+        cols += [f"P_ExactTotal_{i}_Y", f"P_ExactTotal_{i}_N"]
 
     # Correct Score
     for i in range(6):
@@ -339,20 +343,57 @@ def _collect_market_columns() -> List[str]:
             cols.append(f"P_CS_{i}_{j}")
     cols.append("P_CS_Other")
 
+    # Draw No Bet
+    cols += ["P_DNB_H_Y", "P_DNB_H_N", "P_DNB_A_Y", "P_DNB_A_N"]
+
+    # To Score
+    cols += ["P_HomeToScore_Y", "P_HomeToScore_N"]
+    cols += ["P_AwayToScore_Y", "P_AwayToScore_N"]
+
     # Half-time Markets
     cols += ["P_HT_H", "P_HT_D", "P_HT_A"]
     cols += [f"P_HTFT_{a}_{b}" for a in ["H","D","A"] for b in ["H","D","A"]]
-    cols += ["P_HT_OU_0_5_O", "P_HT_OU_0_5_U", "P_HT_OU_1_5_O", "P_HT_OU_1_5_U"]
+    cols += ["P_HT_OU_0_5_O", "P_HT_OU_0_5_U", "P_HT_OU_1_5_O", "P_HT_OU_1_5_U", "P_HT_OU_2_5_O", "P_HT_OU_2_5_U"]
     cols += ["P_HT_BTTS_Y", "P_HT_BTTS_N"]
+
+    # Second Half Markets
+    cols += ["P_2H_OU_0_5_O", "P_2H_OU_0_5_U", "P_2H_OU_1_5_O", "P_2H_OU_1_5_U", "P_2H_OU_2_5_O", "P_2H_OU_2_5_U"]
+    cols += ["P_2H_BTTS_Y", "P_2H_BTTS_N"]
+
+    # Half Comparison
+    cols += ["P_HigherHalf_1H", "P_HigherHalf_2H", "P_HigherHalf_EQ"]
+    cols += ["P_GoalsBothHalves_Y", "P_GoalsBothHalves_N"]
+    cols += ["P_HomeScoresBothHalves_Y", "P_HomeScoresBothHalves_N"]
+    cols += ["P_AwayScoresBothHalves_Y", "P_AwayScoresBothHalves_N"]
+
+    # Win Half Markets
+    cols += ["P_HomeWinEitherHalf_Y", "P_HomeWinEitherHalf_N"]
+    cols += ["P_AwayWinEitherHalf_Y", "P_AwayWinEitherHalf_N"]
+    cols += ["P_HomeWinBothHalves_Y", "P_HomeWinBothHalves_N"]
+    cols += ["P_AwayWinBothHalves_Y", "P_AwayWinBothHalves_N"]
+
+    # First to Score
+    cols += ["P_FirstToScore_H", "P_FirstToScore_A", "P_FirstToScore_None"]
 
     # Team Goals Over/Under
     for l in ["0_5","1_5","2_5","3_5"]:
         cols += [f"P_HomeTG_{l}_O", f"P_HomeTG_{l}_U"]
         cols += [f"P_AwayTG_{l}_O", f"P_AwayTG_{l}_U"]
 
-    # Asian Handicap
-    for l in AH_LINES:
+    # Exact Team Goals
+    for i in ["0", "1", "2", "3+"]:
+        cols += [f"P_HomeExact_{i}_Y", f"P_HomeExact_{i}_N"]
+        cols += [f"P_AwayExact_{i}_Y", f"P_AwayExact_{i}_N"]
+
+    # Asian Handicap (Extended)
+    for l in ["-2_0", "-1_5", "-1_0", "-0_5", "0_0", "+0_5", "+1_0", "+1_5", "+2_0"]:
         cols += [f"P_AH_{l}_H", f"P_AH_{l}_A", f"P_AH_{l}_P"]
+
+    # European Handicap
+    for l in ["m1", "m2", "p1", "p2"]:
+        cols += [f"P_EH_{l}_H_Y", f"P_EH_{l}_H_N"]
+        cols += [f"P_EH_{l}_D_Y", f"P_EH_{l}_D_N"]
+        cols += [f"P_EH_{l}_A_Y", f"P_EH_{l}_A_N"]
 
     # Double Chance
     cols += ["P_DC_1X_Y", "P_DC_1X_N"]
@@ -367,26 +408,59 @@ def _collect_market_columns() -> List[str]:
     cols += ["P_HomeCS_Y", "P_HomeCS_N"]
     cols += ["P_AwayCS_Y", "P_AwayCS_N"]
 
+    # No Goal
+    cols += ["P_NoGoal_Y", "P_NoGoal_N"]
+
     # Win by Margin
+    cols += ["P_HomeWinBy1_Y", "P_HomeWinBy1_N"]
+    cols += ["P_HomeWinBy2_Y", "P_HomeWinBy2_N"]
+    cols += ["P_HomeWinBy3+_Y", "P_HomeWinBy3+_N"]
+    cols += ["P_AwayWinBy1_Y", "P_AwayWinBy1_N"]
+    cols += ["P_AwayWinBy2_Y", "P_AwayWinBy2_N"]
+    cols += ["P_AwayWinBy3+_Y", "P_AwayWinBy3+_N"]
     cols += ["P_HomeWin2+_Y", "P_HomeWin2+_N"]
     cols += ["P_AwayWin2+_Y", "P_AwayWin2+_N"]
 
     # Odd/Even
     cols += ["P_TotalOddEven_Odd", "P_TotalOddEven_Even"]
+    cols += ["P_HomeOddEven_Odd", "P_HomeOddEven_Even"]
+    cols += ["P_AwayOddEven_Odd", "P_AwayOddEven_Even"]
 
     # Multi-Goal
     cols += ["P_Match2+Goals_Y", "P_Match2+Goals_N"]
     cols += ["P_Match3+Goals_Y", "P_Match3+Goals_N"]
+    cols += ["P_Match4+Goals_Y", "P_Match4+Goals_N"]
+    cols += ["P_Match5+Goals_Y", "P_Match5+Goals_N"]
 
     # Result & BTTS Combos
     cols += ["P_HomeWin_BTTS_Y_Y", "P_HomeWin_BTTS_Y_N"]
+    cols += ["P_HomeWin_BTTS_N_Y", "P_HomeWin_BTTS_N_N"]
     cols += ["P_AwayWin_BTTS_Y_Y", "P_AwayWin_BTTS_Y_N"]
+    cols += ["P_AwayWin_BTTS_N_Y", "P_AwayWin_BTTS_N_N"]
     cols += ["P_Draw_BTTS_Y_Y", "P_Draw_BTTS_Y_N"]
+    cols += ["P_Draw_BTTS_N_Y", "P_Draw_BTTS_N_N"]
 
     # Result & O/U Combos
     cols += ["P_HomeWin_O25_Y", "P_HomeWin_O25_N"]
+    cols += ["P_HomeWin_U25_Y", "P_HomeWin_U25_N"]
     cols += ["P_AwayWin_O25_Y", "P_AwayWin_O25_N"]
+    cols += ["P_AwayWin_U25_Y", "P_AwayWin_U25_N"]
     cols += ["P_Draw_O25_Y", "P_Draw_O25_N"]
+    cols += ["P_Draw_U25_Y", "P_Draw_U25_N"]
+
+    # Double Chance + O/U Combos
+    cols += ["P_DC1X_O25_Y", "P_DC1X_O25_N"]
+    cols += ["P_DC1X_U25_Y", "P_DC1X_U25_N"]
+    cols += ["P_DCX2_O25_Y", "P_DCX2_O25_N"]
+    cols += ["P_DCX2_U25_Y", "P_DCX2_U25_N"]
+    cols += ["P_DC12_O25_Y", "P_DC12_O25_N"]
+    cols += ["P_DC12_U25_Y", "P_DC12_U25_N"]
+
+    # Double Chance + BTTS Combos
+    cols += ["P_DC1X_BTTS_Y_Y", "P_DC1X_BTTS_Y_N"]
+    cols += ["P_DC1X_BTTS_N_Y", "P_DC1X_BTTS_N_N"]
+    cols += ["P_DCX2_BTTS_Y_Y", "P_DCX2_BTTS_Y_N"]
+    cols += ["P_DCX2_BTTS_N_Y", "P_DCX2_BTTS_N_N"]
 
     return cols
 

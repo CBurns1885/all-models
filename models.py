@@ -112,12 +112,12 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
 # --------------------------------------------------------------------------------------
 # Targets definition
 # --------------------------------------------------------------------------------------
-OU_LINES = ["0_5","1_5","2_5","3_5","4_5"]
-AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
+OU_LINES = ["0_5","1_5","2_5","3_5","4_5","5_5"]
+AH_LINES = ["-2_0","-1_5","-1_0","-0_5","0_0","+0_5","+1_0","+1_5","+2_0"]
 TEAM_GOAL_LINES = ["0_5","1_5","2_5","3_5"]
 
 def _all_targets() -> List[str]:
-    """Define all betting market targets for training"""
+    """Define all betting market targets for training - COMPREHENSIVE"""
     t = [
         # Core Markets
         "y_1X2",
@@ -128,19 +128,61 @@ def _all_targets() -> List[str]:
         # Over/Under Total Goals
         *(f"y_OU_{l}" for l in OU_LINES),
 
+        # Exact Total Goals
+        "y_ExactTotal_0", "y_ExactTotal_1", "y_ExactTotal_2",
+        "y_ExactTotal_3", "y_ExactTotal_4", "y_ExactTotal_5", "y_ExactTotal_6+",
+
+        # Draw No Bet
+        "y_DNB_H", "y_DNB_A",
+
+        # To Score
+        "y_HomeToScore", "y_AwayToScore",
+
         # Half-time Markets
         "y_HT",
         "y_HTFT",
         "y_HT_OU_0_5",
         "y_HT_OU_1_5",
+        "y_HT_OU_2_5",
         "y_HT_BTTS",
+
+        # Second Half Markets
+        "y_2H_OU_0_5",
+        "y_2H_OU_1_5",
+        "y_2H_OU_2_5",
+        "y_2H_BTTS",
+
+        # Half Comparison
+        "y_HigherHalf",
+        "y_GoalsBothHalves",
+        "y_HomeScoresBothHalves",
+        "y_AwayScoresBothHalves",
+
+        # Win Half Markets
+        "y_HomeWinEitherHalf",
+        "y_AwayWinEitherHalf",
+        "y_HomeWinBothHalves",
+        "y_AwayWinBothHalves",
+
+        # First to Score
+        "y_FirstToScore",
 
         # Team Goals Over/Under
         *(f"y_HomeTG_{l}" for l in TEAM_GOAL_LINES),
         *(f"y_AwayTG_{l}" for l in TEAM_GOAL_LINES),
 
-        # Asian Handicap
+        # Exact Team Goals
+        "y_HomeExact_0", "y_HomeExact_1", "y_HomeExact_2", "y_HomeExact_3+",
+        "y_AwayExact_0", "y_AwayExact_1", "y_AwayExact_2", "y_AwayExact_3+",
+
+        # Asian Handicap (Extended)
         *(f"y_AH_{l}" for l in AH_LINES),
+
+        # European Handicap
+        "y_EH_m1_H", "y_EH_m1_D", "y_EH_m1_A",
+        "y_EH_m2_H", "y_EH_m2_D", "y_EH_m2_A",
+        "y_EH_p1_H", "y_EH_p1_D", "y_EH_p1_A",
+        "y_EH_p2_H", "y_EH_p2_D", "y_EH_p2_A",
 
         # Double Chance
         "y_DC_1X",
@@ -152,27 +194,43 @@ def _all_targets() -> List[str]:
         "y_AwayWTN",
         "y_HomeCS",
         "y_AwayCS",
+        "y_NoGoal",
 
         # Win by Margin
+        "y_HomeWinBy1", "y_HomeWinBy2", "y_HomeWinBy3+",
+        "y_AwayWinBy1", "y_AwayWinBy2", "y_AwayWinBy3+",
         "y_HomeWin2+",
         "y_AwayWin2+",
 
         # Odd/Even
         "y_TotalOddEven",
+        "y_HomeOddEven",
+        "y_AwayOddEven",
 
         # Multi-Goal
         "y_Match2+Goals",
         "y_Match3+Goals",
+        "y_Match4+Goals",
+        "y_Match5+Goals",
 
         # Result & BTTS Combos
-        "y_HomeWin_BTTS_Y",
-        "y_AwayWin_BTTS_Y",
-        "y_Draw_BTTS_Y",
+        "y_HomeWin_BTTS_Y", "y_HomeWin_BTTS_N",
+        "y_AwayWin_BTTS_Y", "y_AwayWin_BTTS_N",
+        "y_Draw_BTTS_Y", "y_Draw_BTTS_N",
 
         # Result & O/U 2.5 Combos
-        "y_HomeWin_O25",
-        "y_AwayWin_O25",
-        "y_Draw_O25",
+        "y_HomeWin_O25", "y_HomeWin_U25",
+        "y_AwayWin_O25", "y_AwayWin_U25",
+        "y_Draw_O25", "y_Draw_U25",
+
+        # Double Chance + O/U Combos
+        "y_DC1X_O25", "y_DC1X_U25",
+        "y_DCX2_O25", "y_DCX2_U25",
+        "y_DC12_O25", "y_DC12_U25",
+
+        # Double Chance + BTTS Combos
+        "y_DC1X_BTTS_Y", "y_DC1X_BTTS_N",
+        "y_DCX2_BTTS_Y", "y_DCX2_BTTS_N",
     ]
     return t
 
