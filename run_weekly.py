@@ -14,13 +14,28 @@ import sys
 import os
 from pathlib import Path
 import datetime
+import argparse
+
+# ============================================================================
+# PARSE ARGUMENTS FIRST
+# ============================================================================
+
+parser = argparse.ArgumentParser(description='Football Prediction System')
+parser.add_argument('--mode', type=int, default=4, choices=[1, 2, 3, 4],
+                    help='Training mode: 1=Full (50 trials), 2=Quick (25), 3=Fast (10), 4=No tuning')
+parser.add_argument('--non-interactive', action='store_true', default=True,
+                    help='Run without interactive prompts')
+parser.add_argument('--use-sample-data', action='store_true',
+                    help='Generate sample data if API unavailable')
+args, _ = parser.parse_known_args()
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
+trial_counts = {1: "50", 2: "25", 3: "10", 4: "0"}
 os.environ["DISABLE_XGB"] = "0"  # Enable XGBoost for better accuracy
-os.environ["OPTUNA_TRIALS"] = "25"
+os.environ["OPTUNA_TRIALS"] = trial_counts.get(args.mode, "0")
 os.environ["N_ESTIMATORS"] = "400"
 os.environ["USE_API_FOOTBALL"] = "1"  # Use API-Football for data
 os.environ["USE_XG_FEATURES"] = "1"   # Use expected goals features
@@ -34,6 +49,7 @@ os.environ["EMAIL_PASSWORD"] = ""
 os.environ["EMAIL_RECIPIENT"] = "christopher_burns@live.co.uk"
 
 TRAINING_START_YEAR = 2023  # More recent data = better accuracy
+NON_INTERACTIVE = args.non_interactive
 
 DEFAULT_LEAGUES = [
     "E0", "E1", "E2", "E3", "EC",  # England
@@ -52,6 +68,7 @@ print("FOOTBALL PREDICTION SYSTEM - WEEKLY RUN")
 print("="*60)
 print(f"Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}")
 print(f"Output: {OUTPUT_DIR}")
+print(f"Mode: {'Non-interactive' if NON_INTERACTIVE else 'Interactive'}")
 
 # ============================================================================
 # STEP 0: DOWNLOAD FIXTURES (API-Football or Fallback)
@@ -95,7 +112,7 @@ if not fixtures_file:
         from simple_fixture_downloader import download_upcoming_fixtures as download_csv
         print("\nUsing football-data.co.uk fallback...")
         fixtures_file = download_csv()
-        
+
         if fixtures_file and fixtures_file.exists():
             print(f"[OK] Downloaded via fallback: {fixtures_file}")
     except Exception as e:
@@ -106,7 +123,7 @@ if not fixtures_file or not Path(fixtures_file).exists():
     fixtures_xlsx = Path("upcoming_fixtures.xlsx")
     fixtures_csv = Path("upcoming_fixtures.csv")
     outputs_csv = OUTPUT_DIR / "upcoming_fixtures.csv"
-    
+
     if outputs_csv.exists():
         fixtures_file = outputs_csv
         print(f"[OK] Using existing: {fixtures_file}")
@@ -117,13 +134,40 @@ if not fixtures_file or not Path(fixtures_file).exists():
         fixtures_file = fixtures_csv
         print(f"[OK] Using manual: {fixtures_file}")
     else:
-        print("[ERROR] ERROR: No fixtures file found!")
-        print("[INFO] Options:")
-        print("   1. Check API-Football connection")
-        print("   2. Check internet connection")
-        print("   3. Manually download from football-data.co.uk/matches.php")
-        input("Press Enter to exit...")
-        sys.exit(1)
+        # Try generating sample data as last resort
+        print("[WARN] No fixtures file found, generating sample data...")
+        try:
+            from sample_data_generator import generate_upcoming_fixtures_file, initialize_database_with_sample_data
+            from api_football_adapter import check_api_football_db
+
+            # Initialize database if needed
+            if not check_api_football_db():
+                print("[INFO] Initializing database with sample data...")
+                initialize_database_with_sample_data(
+                    leagues=['E0', 'E1', 'D1', 'SP1', 'I1', 'F1', 'N1', 'T1'],
+                    seasons=[2023, 2024]
+                )
+
+            # Generate upcoming fixtures
+            fixtures_file = generate_upcoming_fixtures_file(
+                leagues=['E0', 'E1', 'D1', 'SP1', 'I1', 'F1'],
+                output_path=OUTPUT_DIR / "upcoming_fixtures.csv"
+            )
+
+            if fixtures_file and fixtures_file.exists():
+                print(f"[OK] Generated sample fixtures: {fixtures_file}")
+            else:
+                raise RuntimeError("Failed to generate fixtures")
+
+        except Exception as e:
+            print(f"[ERROR] ERROR: No fixtures file found and sample generation failed: {e}")
+            print("[INFO] Options:")
+            print("   1. Check API-Football connection")
+            print("   2. Check internet connection")
+            print("   3. Manually download from football-data.co.uk/matches.php")
+            if not NON_INTERACTIVE:
+                input("Press Enter to exit...")
+            sys.exit(1)
 
 # ============================================================================
 # VALIDATE FIXTURES FILE
@@ -149,7 +193,8 @@ try:
     
     if missing:
         print(f"[ERROR] Missing columns: {missing}")
-        input("Press Enter to exit...")
+        if not NON_INTERACTIVE:
+            input("Press Enter to exit...")
         sys.exit(1)
     
     print(f"[OK] Validated: {len(df)} matches found")
@@ -157,7 +202,8 @@ try:
 
 except Exception as e:
     print(f"[ERROR] Error reading fixtures: {e}")
-    input("Press Enter to exit...")
+    if not NON_INTERACTIVE:
+        input("Press Enter to exit...")
     sys.exit(1)
 
 # ============================================================================
@@ -168,23 +214,28 @@ print("\n" + "="*60)
 print("[CONFIG] CONFIGURATION")
 print("="*60)
 
-print("\nTRAINING MODE:")
-print("  1. Full tuning (50 trials) - Best accuracy, ~2+ hours")
-print("  2. Quick tuning (25 trials) - Good accuracy, ~1 hour")
-print("  3. Fast mode (10 trials) - Decent accuracy, ~30 min")
-print("  4. No tuning - Fastest, ~15 min [RECOMMENDED FOR TESTING]")
+if NON_INTERACTIVE:
+    # Use command-line argument for mode
+    choice = str(args.mode)
+    print(f"\n[AUTO] Using mode {choice} (non-interactive)")
+else:
+    print("\nTRAINING MODE:")
+    print("  1. Full tuning (50 trials) - Best accuracy, ~2+ hours")
+    print("  2. Quick tuning (25 trials) - Good accuracy, ~1 hour")
+    print("  3. Fast mode (10 trials) - Decent accuracy, ~30 min")
+    print("  4. No tuning - Fastest, ~15 min [RECOMMENDED FOR TESTING]")
 
-while True:
-    choice = input("\nChoose (1-4, default=2): ").strip() or "2"
-    if choice in ["1", "2", "3", "4"]:
-        break
-    print("Please enter 1, 2, 3, or 4")
+    while True:
+        choice = input("\nChoose (1-4, default=4): ").strip() or "4"
+        if choice in ["1", "2", "3", "4"]:
+            break
+        print("Please enter 1, 2, 3, or 4")
 
-trial_counts = {"1": "50", "2": "25", "3": "10", "4": "0"}
-os.environ["OPTUNA_TRIALS"] = trial_counts[choice]
+mode_trial_counts = {"1": "50", "2": "25", "3": "10", "4": "0"}
+os.environ["OPTUNA_TRIALS"] = mode_trial_counts[choice]
 
 print(f"\n[OK] Configuration set:")
-print(f"   Tuning: {trial_counts[choice]} trials")
+print(f"   Tuning: {mode_trial_counts[choice]} trials")
 print(f"   Data source: API-Football (enhanced)" if os.environ.get("USE_API_FOOTBALL") == "1" else "   Data source: football-data.co.uk")
 print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}")
 
@@ -439,4 +490,6 @@ except Exception as e:
     traceback.print_exc()
 
 finally:
-    input("\nPress Enter to close...")
+    if not NON_INTERACTIVE:
+        input("\nPress Enter to close...")
+    print("\n[DONE] Pipeline finished.")

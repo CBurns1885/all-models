@@ -319,33 +319,75 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     return pd.concat(rows, ignore_index=True).sort_values(["League","Date","HomeTeam"])
 
 def _collect_market_columns() -> List[str]:
-    """All expected probability column names"""
-    cols = ["P_1X2_H","P_1X2_D","P_1X2_A","P_BTTS_Y","P_BTTS_N"]
-    
+    """All expected probability column names - COMPREHENSIVE VERSION"""
+    cols = []
+
+    # Core Markets
+    cols += ["P_1X2_H", "P_1X2_D", "P_1X2_A"]
+    cols += ["P_BTTS_Y", "P_BTTS_N"]
+
+    # Over/Under Total Goals
     for l in OU_LINES:
         cols += [f"P_OU_{l}_O", f"P_OU_{l}_U"]
-    
-    for l in AH_LINES:
-        cols += [f"P_AH_{l}_H", f"P_AH_{l}_A", f"P_AH_{l}_P"]
-    
+
+    # Goal Range
     cols += [f"P_GR_{k}" for k in ["0","1","2","3","4","5+"]]
-    cols += ["P_HT_H","P_HT_D","P_HT_A"]
-    cols += [f"P_HTFT_{a}_{b}" for a in ["H","D","A"] for b in ["H","D","A"]]
-    
-    for l in ["0_5","1_5","2_5","3_5"]:
-        cols += [f"P_HomeTG_{l}_O",f"P_HomeTG_{l}_U",f"P_AwayTG_{l}_O",f"P_AwayTG_{l}_U"]
-    
-    cols += [f"P_HomeCardsY_{b}" for b in ["0-2","3","4-5","6+"]]
-    cols += [f"P_AwayCardsY_{b}" for b in ["0-2","3","4-5","6+"]]
-    
-    cols += [f"P_HomeCorners_{b}" for b in ["0-3","4-5","6-7","8-9","10+"]]
-    cols += [f"P_AwayCorners_{b}" for b in ["0-3","4-5","6-7","8-9","10+"]]
-    
+
+    # Correct Score
     for i in range(6):
         for j in range(6):
             cols.append(f"P_CS_{i}_{j}")
     cols.append("P_CS_Other")
-    
+
+    # Half-time Markets
+    cols += ["P_HT_H", "P_HT_D", "P_HT_A"]
+    cols += [f"P_HTFT_{a}_{b}" for a in ["H","D","A"] for b in ["H","D","A"]]
+    cols += ["P_HT_OU_0_5_O", "P_HT_OU_0_5_U", "P_HT_OU_1_5_O", "P_HT_OU_1_5_U"]
+    cols += ["P_HT_BTTS_Y", "P_HT_BTTS_N"]
+
+    # Team Goals Over/Under
+    for l in ["0_5","1_5","2_5","3_5"]:
+        cols += [f"P_HomeTG_{l}_O", f"P_HomeTG_{l}_U"]
+        cols += [f"P_AwayTG_{l}_O", f"P_AwayTG_{l}_U"]
+
+    # Asian Handicap
+    for l in AH_LINES:
+        cols += [f"P_AH_{l}_H", f"P_AH_{l}_A", f"P_AH_{l}_P"]
+
+    # Double Chance
+    cols += ["P_DC_1X_Y", "P_DC_1X_N"]
+    cols += ["P_DC_X2_Y", "P_DC_X2_N"]
+    cols += ["P_DC_12_Y", "P_DC_12_N"]
+
+    # Win to Nil
+    cols += ["P_HomeWTN_Y", "P_HomeWTN_N"]
+    cols += ["P_AwayWTN_Y", "P_AwayWTN_N"]
+
+    # Clean Sheets
+    cols += ["P_HomeCS_Y", "P_HomeCS_N"]
+    cols += ["P_AwayCS_Y", "P_AwayCS_N"]
+
+    # Win by Margin
+    cols += ["P_HomeWin2+_Y", "P_HomeWin2+_N"]
+    cols += ["P_AwayWin2+_Y", "P_AwayWin2+_N"]
+
+    # Odd/Even
+    cols += ["P_TotalOddEven_Odd", "P_TotalOddEven_Even"]
+
+    # Multi-Goal
+    cols += ["P_Match2+Goals_Y", "P_Match2+Goals_N"]
+    cols += ["P_Match3+Goals_Y", "P_Match3+Goals_N"]
+
+    # Result & BTTS Combos
+    cols += ["P_HomeWin_BTTS_Y_Y", "P_HomeWin_BTTS_Y_N"]
+    cols += ["P_AwayWin_BTTS_Y_Y", "P_AwayWin_BTTS_Y_N"]
+    cols += ["P_Draw_BTTS_Y_Y", "P_Draw_BTTS_Y_N"]
+
+    # Result & O/U Combos
+    cols += ["P_HomeWin_O25_Y", "P_HomeWin_O25_N"]
+    cols += ["P_AwayWin_O25_Y", "P_AwayWin_O25_N"]
+    cols += ["P_Draw_O25_Y", "P_Draw_O25_N"]
+
     return cols
 
 def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:

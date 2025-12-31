@@ -371,29 +371,38 @@ def _add_market_features(df: pd.DataFrame) -> pd.DataFrame:
 
 OU_LINES = [0.5, 1.5, 2.5, 3.5, 4.5]
 AH_LINES = [-1.0, -0.5, 0.0, 0.5, 1.0]
+TEAM_GOAL_LINES = [0.5, 1.5, 2.5, 3.5]
 
 def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
-    """Add all target variables"""
+    """Add all target variables - COMPREHENSIVE VERSION with all betting markets"""
     out = df.copy()
-    
-    # 1X2
+
+    # Ensure numeric columns
+    out["FTHG"] = pd.to_numeric(out["FTHG"], errors='coerce').fillna(0).astype(int)
+    out["FTAG"] = pd.to_numeric(out["FTAG"], errors='coerce').fillna(0).astype(int)
+    total = out["FTHG"] + out["FTAG"]
+
+    # ===========================================================================
+    # CORE MARKETS
+    # ===========================================================================
+
+    # 1X2 Match Result
     out["y_1X2"] = out["FTR"].astype(str)
-    
-    # BTTS
-    btts = (out["FTHG"].fillna(0) > 0) & (out["FTAG"].fillna(0) > 0)
+
+    # BTTS (Both Teams To Score)
+    btts = (out["FTHG"] > 0) & (out["FTAG"] > 0)
     out["y_BTTS"] = np.where(btts, "Y", "N")
-    
-    # Over/Under
-    total = out["FTHG"].fillna(0) + out["FTAG"].fillna(0)
+
+    # Over/Under Total Goals
     for line in OU_LINES:
         line_str = str(line).replace('.', '_')
         out[f"y_OU_{line_str}"] = np.where(total > line, "O", "U")
-    
-    # Goal range
+
+    # Goal Range (0, 1, 2, 3, 4, 5+)
     bins = pd.cut(total, bins=[-1,0,1,2,3,4,100], labels=["0","1","2","3","4","5+"])
     out["y_GOAL_RANGE"] = bins.astype(str)
-    
-    # Correct score
+
+    # Correct Score (0-0 to 5-5 + Other)
     def get_cs(row):
         h = int(row['FTHG']) if pd.notna(row['FTHG']) else -1
         a = int(row['FTAG']) if pd.notna(row['FTAG']) else -1
@@ -402,14 +411,143 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
         if h <= 5 and a <= 5:
             return f'{h}-{a}'
         return 'Other'
-    
+
     out["y_CS"] = out.apply(get_cs, axis=1)
-    
-    # Half-time
-    if "HTR" in out.columns:
+
+    # ===========================================================================
+    # HALF-TIME MARKETS
+    # ===========================================================================
+
+    # Half-time result (if available)
+    if "HTHG" in out.columns and "HTAG" in out.columns:
+        out["HTHG"] = pd.to_numeric(out["HTHG"], errors='coerce').fillna(0).astype(int)
+        out["HTAG"] = pd.to_numeric(out["HTAG"], errors='coerce').fillna(0).astype(int)
+
+        # HT Result
+        def get_ht_result(row):
+            if row['HTHG'] > row['HTAG']:
+                return 'H'
+            elif row['HTHG'] < row['HTAG']:
+                return 'A'
+            return 'D'
+
+        out["y_HT"] = out.apply(get_ht_result, axis=1)
+
+        # HT/FT combo
+        out["y_HTFT"] = out["y_HT"].astype(str) + "-" + out["FTR"].astype(str)
+
+        # HT Over/Under
+        ht_total = out["HTHG"] + out["HTAG"]
+        out["y_HT_OU_0_5"] = np.where(ht_total > 0.5, "O", "U")
+        out["y_HT_OU_1_5"] = np.where(ht_total > 1.5, "O", "U")
+
+        # HT BTTS
+        ht_btts = (out["HTHG"] > 0) & (out["HTAG"] > 0)
+        out["y_HT_BTTS"] = np.where(ht_btts, "Y", "N")
+    elif "HTR" in out.columns:
+        # Legacy format
         out["y_HT"] = out["HTR"].astype(str)
-        out["y_HTFT"] = out["HTR"].astype(str) + "_" + out["FTR"].astype(str)
-    
+        out["y_HTFT"] = out["HTR"].astype(str) + "-" + out["FTR"].astype(str)
+
+    # ===========================================================================
+    # TEAM GOALS MARKETS
+    # ===========================================================================
+
+    # Home Team Goals Over/Under
+    for line in TEAM_GOAL_LINES:
+        line_str = str(line).replace('.', '_')
+        out[f"y_HomeTG_{line_str}"] = np.where(out["FTHG"] > line, "O", "U")
+
+    # Away Team Goals Over/Under
+    for line in TEAM_GOAL_LINES:
+        line_str = str(line).replace('.', '_')
+        out[f"y_AwayTG_{line_str}"] = np.where(out["FTAG"] > line, "O", "U")
+
+    # ===========================================================================
+    # ASIAN HANDICAP MARKETS
+    # ===========================================================================
+
+    goal_diff = out["FTHG"] - out["FTAG"]
+
+    for line in AH_LINES:
+        if line < 0:
+            line_str = f"-{abs(line)}".replace('.', '_')
+        elif line > 0:
+            line_str = f"+{line}".replace('.', '_')
+        else:
+            line_str = "0_0"
+
+        adjusted = goal_diff - line
+
+        # H = Home covers, A = Away covers, P = Push
+        def ah_result(adj):
+            if adj > 0:
+                return "H"
+            elif adj < 0:
+                return "A"
+            else:
+                return "P"
+
+        out[f"y_AH_{line_str}"] = adjusted.apply(ah_result)
+
+    # ===========================================================================
+    # DOUBLE CHANCE MARKETS
+    # ===========================================================================
+
+    out["y_DC_1X"] = np.where(out["FTR"].isin(["H", "D"]), "Y", "N")
+    out["y_DC_X2"] = np.where(out["FTR"].isin(["D", "A"]), "Y", "N")
+    out["y_DC_12"] = np.where(out["FTR"].isin(["H", "A"]), "Y", "N")
+
+    # ===========================================================================
+    # MARGIN OF VICTORY
+    # ===========================================================================
+
+    # Win to nil
+    out["y_HomeWTN"] = np.where((out["FTR"] == "H") & (out["FTAG"] == 0), "Y", "N")
+    out["y_AwayWTN"] = np.where((out["FTR"] == "A") & (out["FTHG"] == 0), "Y", "N")
+
+    # Win by 2+
+    out["y_HomeWin2+"] = np.where((out["FTR"] == "H") & (goal_diff >= 2), "Y", "N")
+    out["y_AwayWin2+"] = np.where((out["FTR"] == "A") & (goal_diff <= -2), "Y", "N")
+
+    # ===========================================================================
+    # CLEAN SHEETS
+    # ===========================================================================
+
+    out["y_HomeCS"] = np.where(out["FTAG"] == 0, "Y", "N")
+    out["y_AwayCS"] = np.where(out["FTHG"] == 0, "Y", "N")
+
+    # ===========================================================================
+    # ODD/EVEN GOALS
+    # ===========================================================================
+
+    out["y_TotalOddEven"] = np.where(total % 2 == 0, "Even", "Odd")
+
+    # ===========================================================================
+    # MULTI-GOAL MARKET
+    # ===========================================================================
+
+    out["y_Match2+Goals"] = np.where(total >= 2, "Y", "N")
+    out["y_Match3+Goals"] = np.where(total >= 3, "Y", "N")
+
+    # ===========================================================================
+    # RESULT AND BTTS COMBOS
+    # ===========================================================================
+
+    out["y_HomeWin_BTTS_Y"] = np.where((out["FTR"] == "H") & btts, "Y", "N")
+    out["y_AwayWin_BTTS_Y"] = np.where((out["FTR"] == "A") & btts, "Y", "N")
+    out["y_Draw_BTTS_Y"] = np.where((out["FTR"] == "D") & btts, "Y", "N")
+
+    # ===========================================================================
+    # RESULT AND OVER/UNDER COMBOS
+    # ===========================================================================
+
+    over25 = total > 2.5
+
+    out["y_HomeWin_O25"] = np.where((out["FTR"] == "H") & over25, "Y", "N")
+    out["y_AwayWin_O25"] = np.where((out["FTR"] == "A") & over25, "Y", "N")
+    out["y_Draw_O25"] = np.where((out["FTR"] == "D") & over25, "Y", "N")
+
     return out
 
 # -----------------------------

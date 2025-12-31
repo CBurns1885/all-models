@@ -113,18 +113,66 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
 # Targets definition
 # --------------------------------------------------------------------------------------
 OU_LINES = ["0_5","1_5","2_5","3_5","4_5"]
-#AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
+AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
+TEAM_GOAL_LINES = ["0_5","1_5","2_5","3_5"]
 
 def _all_targets() -> List[str]:
+    """Define all betting market targets for training"""
     t = [
-        "y_1X2","y_BTTS","y_GOAL_RANGE","y_CS",
+        # Core Markets
+        "y_1X2",
+        "y_BTTS",
+        "y_GOAL_RANGE",
+        "y_CS",
+
+        # Over/Under Total Goals
         *(f"y_OU_{l}" for l in OU_LINES),
-        #*(f"y_AH_{l}" for l in AH_LINES),
-        "y_HT","y_HTFT",
-       # *(f"y_HomeTG_{l}" for l in ["0_5","1_5","2_5","3_5"]),
-        #*(f"y_AwayTG_{l}" for l in ["0_5","1_5","2_5","3_5"]),
-        #"y_HomeCardsY_BAND","y_AwayCardsY_BAND",
-        #"y_HomeCorners_BAND","y_AwayCorners_BAND",
+
+        # Half-time Markets
+        "y_HT",
+        "y_HTFT",
+        "y_HT_OU_0_5",
+        "y_HT_OU_1_5",
+        "y_HT_BTTS",
+
+        # Team Goals Over/Under
+        *(f"y_HomeTG_{l}" for l in TEAM_GOAL_LINES),
+        *(f"y_AwayTG_{l}" for l in TEAM_GOAL_LINES),
+
+        # Asian Handicap
+        *(f"y_AH_{l}" for l in AH_LINES),
+
+        # Double Chance
+        "y_DC_1X",
+        "y_DC_X2",
+        "y_DC_12",
+
+        # Win to Nil / Clean Sheets
+        "y_HomeWTN",
+        "y_AwayWTN",
+        "y_HomeCS",
+        "y_AwayCS",
+
+        # Win by Margin
+        "y_HomeWin2+",
+        "y_AwayWin2+",
+
+        # Odd/Even
+        "y_TotalOddEven",
+
+        # Multi-Goal
+        "y_Match2+Goals",
+        "y_Match3+Goals",
+
+        # Result & BTTS Combos
+        "y_HomeWin_BTTS_Y",
+        "y_AwayWin_BTTS_Y",
+        "y_Draw_BTTS_Y",
+
+        # Result & O/U 2.5 Combos
+        "y_HomeWin_O25",
+        "y_AwayWin_O25",
+        "y_Draw_O25",
     ]
     return t
 
