@@ -329,8 +329,7 @@ def _build_base_model(name: str, n_classes: int, feature_names: List[str]):
             random_state=RANDOM_SEED
         )
     if name == "lr":
-        return LogisticRegression(max_iter=2000, n_jobs=-1, class_weight="balanced",
-                                  multi_class="multinomial" if n_classes>2 else "auto")
+        return LogisticRegression(max_iter=2000, n_jobs=-1, class_weight="balanced")
     if name == "xgb" and _HAS_XGB:
         return xgb.XGBClassifier(
             n_estimators=n_est, max_depth=6, learning_rate=0.05,
@@ -486,7 +485,6 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
             C = best_params.get("C", 1.0)
             model = LogisticRegression(
                 C=C, max_iter=2000, n_jobs=-1, class_weight="balanced",
-                multi_class="multinomial" if len(classes_)>2 else "auto"
             )
         else:
             raise RuntimeError(f"Tuning not supported for {alg}")
@@ -705,7 +703,7 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         oof_pred[va_idx] = block
 
     # meta-learner on OOF
-    meta = LogisticRegression(max_iter=2000, n_jobs=-1, multi_class="multinomial" if len(classes)>2 else "auto")
+    meta = LogisticRegression(max_iter=2000, n_jobs=-1)
     meta.fit(oof_pred, y_int)
 
     # Calibration on OOF meta outputs

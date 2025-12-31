@@ -34,7 +34,7 @@ class DirichletCalibrator:
     def fit(self, P: np.ndarray, y: np.ndarray):
         self.K = P.shape[1]
         X = np.log(np.clip(P, 1e-12, 1-1e-12))
-        self.lr = LogisticRegression(C=self.C, max_iter=self.max_iter, multi_class="multinomial", n_jobs=-1)
+        self.lr = LogisticRegression(C=self.C, max_iter=self.max_iter, n_jobs=-1)
         self.lr.fit(X, y)
         return self
     def transform(self, P: np.ndarray):
