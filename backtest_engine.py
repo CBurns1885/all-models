@@ -52,7 +52,7 @@ class BacktestEngine:
         df['Date'] = pd.to_datetime(df['Date'])
         df = df.sort_values('Date').reset_index(drop=True)
         
-        print(f"✅ Loaded {len(df)} matches from {df['Date'].min()} to {df['Date'].max()}")
+        print(f"[OK] Loaded {len(df)} matches from {df['Date'].min()} to {df['Date'].max()}")
         return df
     
     def get_test_weeks(self) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
@@ -118,7 +118,7 @@ class BacktestEngine:
                 model.fit(X_train_market, y_train)
                 models[market] = model
             except Exception as e:
-                print(f"   ⚠️ Failed to train {market}: {e}")
+                print(f"   [WARN] Failed to train {market}: {e}")
         
         return models
     
@@ -142,7 +142,7 @@ class BacktestEngine:
                     predictions[col_name] = pred_proba[:, idx]
                 
             except Exception as e:
-                print(f"   ⚠️ Prediction failed for {market}: {e}")
+                print(f"   [WARN] Prediction failed for {market}: {e}")
         
         return predictions
     
@@ -245,7 +245,7 @@ class BacktestEngine:
             train_df, test_df = self.split_train_test(full_df, test_start, test_end)
             
             if train_df is None or len(test_df) == 0:
-                print(f"   ⚠️ Skipping: insufficient data")
+                print(f"   [WARN] Skipping: insufficient data")
                 continue
             
             print(f"   📊 Training: {len(train_df)} matches | Testing: {len(test_df)} matches")
@@ -253,7 +253,7 @@ class BacktestEngine:
             # Train models
             models = self.train_on_period(train_df)
             if not models:
-                print(f"   ⚠️ No models trained")
+                print(f"   [WARN] No models trained")
                 continue
             
             # Generate predictions
@@ -269,7 +269,7 @@ class BacktestEngine:
             # Print quick summary
             for market, stats in period_results.get('markets', {}).items():
                 acc = stats.get('accuracy', 0)
-                print(f"   • {market}: {acc:.1%} accuracy ({stats['correct']}/{stats['total']})")
+                print(f"   * {market}: {acc:.1%} accuracy ({stats['correct']}/{stats['total']})")
         
         # Convert to DataFrame
         self.results = all_results
@@ -323,7 +323,7 @@ class BacktestEngine:
         # Save to file
         output_path = OUTPUT_DIR / "backtest_summary.csv"
         summary_df.to_csv(output_path)
-        print(f"✅ Saved summary: {output_path}")
+        print(f"[OK] Saved summary: {output_path}")
         
         return summary_df
     
@@ -344,7 +344,7 @@ class BacktestEngine:
         output_path = OUTPUT_DIR / "backtest_detailed.csv"
         detailed_df.to_csv(output_path, index=False)
         
-        print(f"✅ Saved detailed results: {output_path}")
+        print(f"[OK] Saved detailed results: {output_path}")
         return output_path
 
 

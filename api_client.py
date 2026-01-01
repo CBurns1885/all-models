@@ -430,8 +430,13 @@ def download_upcoming_fixtures(leagues: List[str] = None, days_ahead: int = 7) -
 
         league_id = API_LEAGUE_MAP[league_code]
 
+        # Determine current season (e.g., 2025 for 2025-2026 season)
+        current_month = today.month
+        current_season = today.year if current_month >= 7 else today.year - 1
+
         params = {
             'league': league_id,
+            'season': current_season,
             'from': today.strftime('%Y-%m-%d'),
             'to': end_date.strftime('%Y-%m-%d')
         }

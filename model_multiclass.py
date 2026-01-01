@@ -62,9 +62,9 @@ class MulticlassMarketModelFull:
             try:
                 model.fit(X, y)
                 self.models[name] = model
-                print(f"  ✓ {name.upper()} (multiclass-full, {self.n_classes} classes)")
+                print(f"  [OK] {name.upper()} (multiclass-full, {self.n_classes} classes)")
             except Exception as e:
-                print(f"  ✗ {name.upper()}: {e}")
+                print(f"  [X] {name.upper()}: {e}")
         
         if not self.models:
             raise RuntimeError(f"No models trained")
