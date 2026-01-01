@@ -23,9 +23,9 @@ import argparse
 parser = argparse.ArgumentParser(description='Football Prediction System')
 parser.add_argument('--mode', type=int, default=4, choices=[1, 2, 3, 4],
                     help='Training mode: 1=Full (50 trials), 2=Quick (25), 3=Fast (10), 4=No tuning')
-parser.add_argument('--speed', type=str, default='balanced', choices=['fast', 'balanced', 'full'],
+parser.add_argument('--speed', type=str, default=None, choices=['fast', 'balanced', 'full'],
                     help='Speed mode: fast (~5min), balanced (~20min), full (~2hrs)')
-parser.add_argument('--non-interactive', action='store_true', default=True,
+parser.add_argument('--non-interactive', action='store_true', default=False,
                     help='Run without interactive prompts')
 parser.add_argument('--use-sample-data', action='store_true',
                     help='Generate sample data if API unavailable')
@@ -34,6 +34,32 @@ args, _ = parser.parse_known_args()
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
+
+# Interactive speed mode selection if not specified via command line
+if args.speed is None:
+    if not args.non_interactive:
+        print("="*60)
+        print("SPEED MODE SELECTION")
+        print("="*60)
+        print("\n  1. FAST     (~5-10 min)  - RF only, core markets")
+        print("  2. BALANCED (~20-30 min) - RF + LightGBM, more markets")
+        print("  3. FULL     (~2-3 hours) - All models, all markets, best accuracy")
+        print("\n  Note: If you've run FULL before, FAST/BALANCED will reuse those models!")
+
+        while True:
+            choice = input("\nChoose speed mode (1-3, default=2): ").strip() or "2"
+            if choice == "1":
+                args.speed = "fast"
+                break
+            elif choice == "2":
+                args.speed = "balanced"
+                break
+            elif choice == "3":
+                args.speed = "full"
+                break
+            print("Please enter 1, 2, or 3")
+    else:
+        args.speed = "balanced"  # Default for non-interactive
 
 # Set speed mode FIRST (controls everything else)
 os.environ["SPEED_MODE"] = args.speed
@@ -291,11 +317,13 @@ try:
 
     run_step(2, "BUILD FEATURES", step2)
 
-    # Step 3: Train/load models
+    # Step 3: Train/load models (with intelligent caching)
     def step3():
-        from models import train_all_targets
-        print("Training all ensemble models (RF, XGB, LGB, CatBoost, DC)...")
-        return train_all_targets()
+        from incremental_trainer import smart_train_or_load
+        print("Checking if models need retraining...")
+        print(f"  Speed mode: {args.speed}")
+        print(f"  Set FORCE_RETRAIN=1 to force full retraining")
+        return smart_train_or_load()
 
     models, err = run_step(3, "TRAIN/LOAD MODELS", step3)
 

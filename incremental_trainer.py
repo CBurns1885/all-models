@@ -33,6 +33,7 @@ def needs_retraining(models_dir: Path = MODEL_ARTIFACTS_DIR, days_threshold: int
         "optuna_trials": os.environ.get("OPTUNA_TRIALS", "0"),
         "n_estimators": os.environ.get("N_ESTIMATORS", "300"),
         "models_only": os.environ.get("MODELS_ONLY", ""),
+        "speed_mode": os.environ.get("SPEED_MODE", "balanced"),  # Track speed mode
         "leagues": current_leagues  # Track which leagues models were trained on
     }
     
@@ -68,6 +69,26 @@ def needs_retraining(models_dir: Path = MODEL_ARTIFACTS_DIR, days_threshold: int
                     print(f"Setting '{key}' changed: {old_settings.get(key)} -> {current_settings.get(key)}")
                     print("Retraining...")
                     return True
+
+            # Special handling for speed_mode: only retrain when UPGRADING quality
+            # Quality order: fast < balanced < full
+            # Downgrading (full→fast) keeps better models, upgrading (fast→full) retrains
+            speed_quality = {"fast": 1, "balanced": 2, "full": 3}
+            old_speed = old_settings.get("speed_mode", "balanced")
+            new_speed = current_settings.get("speed_mode", "balanced")
+
+            if old_speed != new_speed:
+                old_quality = speed_quality.get(old_speed, 2)
+                new_quality = speed_quality.get(new_speed, 2)
+
+                if new_quality > old_quality:
+                    print(f"Speed mode UPGRADED: {old_speed} → {new_speed}")
+                    print("Retraining with better models...")
+                    return True
+                else:
+                    print(f"Speed mode changed: {old_speed} → {new_speed}")
+                    print("Keeping existing higher-quality models (no retraining needed)")
+                    # Don't retrain - existing models are better
         except Exception:
             print("Could not read previous training settings, retraining...")
             return True
@@ -132,6 +153,7 @@ def smart_train_or_load():
                 "optuna_trials": os.environ.get("OPTUNA_TRIALS", "0"),
                 "n_estimators": os.environ.get("N_ESTIMATORS", "300"),
                 "models_only": os.environ.get("MODELS_ONLY", ""),
+                "speed_mode": os.environ.get("SPEED_MODE", "balanced"),
                 "leagues": current_leagues,  # Track which leagues models were trained on
                 "trained_at": datetime.now().isoformat()
             }
