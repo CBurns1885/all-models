@@ -87,6 +87,21 @@ try:
 except ImportError:
     _HAS_MARKET_CONFIG = False
 
+# Import speed configuration for performance optimization
+try:
+    from speed_config import (
+        get_speed_mode, get_speed_config, get_pretuned_params,
+        should_train_market, get_models_for_mode, get_n_folds,
+        get_n_estimators, use_tuning, use_specialized_models,
+        print_speed_info, SpeedMode
+    )
+    _HAS_SPEED_CONFIG = True
+except ImportError:
+    _HAS_SPEED_CONFIG = False
+
+# Global DC cache to avoid refitting
+_DC_PARAMS_CACHE = {}
+
 
 # --------------------------------------------------------------------------------------
 # Data loading
@@ -415,48 +430,94 @@ class TrainedTarget:
 # --------------------------------------------------------------------------------------
 # Build base model zoo
 # --------------------------------------------------------------------------------------
-def _build_base_model(name: str, n_classes: int, feature_names: List[str]):
-    n_est = int(os.environ.get("N_ESTIMATORS", "300"))
-    
+def _build_base_model(name: str, n_classes: int, feature_names: List[str], market_type: str = "binary"):
+    """Build a base model with pre-tuned or default parameters.
+
+    Args:
+        name: Model name (rf, et, xgb, lgb, cat, lr, bnn)
+        n_classes: Number of classes
+        feature_names: Feature names (for compatibility)
+        market_type: "binary", "multiclass", or "ordinal"
+    """
+    # Get n_estimators from speed config or environment
+    if _HAS_SPEED_CONFIG:
+        n_est = get_n_estimators()
+    else:
+        n_est = int(os.environ.get("N_ESTIMATORS", "300"))
+
+    # Get pre-tuned parameters if available
+    if _HAS_SPEED_CONFIG:
+        params = get_pretuned_params(name, market_type)
+    else:
+        params = {}
+
     if name == "rf":
         return RandomForestClassifier(
-            n_estimators=n_est, 
-            max_depth=15 if n_est < 200 else None, 
-            min_samples_leaf=1, 
+            n_estimators=params.get("n_estimators", n_est),
+            max_depth=params.get("max_depth", 12),
+            min_samples_split=params.get("min_samples_split", 5),
+            min_samples_leaf=params.get("min_samples_leaf", 10),
+            max_features=params.get("max_features", "sqrt"),
+            class_weight=params.get("class_weight", "balanced_subsample"),
             n_jobs=-1,
-            class_weight="balanced_subsample", 
             random_state=RANDOM_SEED
         )
     if name == "et":
         return ExtraTreesClassifier(
-            n_estimators=n_est, 
-            max_depth=15 if n_est < 200 else None, 
-            min_samples_leaf=1, 
+            n_estimators=params.get("n_estimators", n_est),
+            max_depth=params.get("max_depth", 12),
+            min_samples_split=params.get("min_samples_split", 4),
+            min_samples_leaf=params.get("min_samples_leaf", 8),
+            max_features=params.get("max_features", "sqrt"),
+            class_weight=params.get("class_weight", "balanced"),
             n_jobs=-1,
-            class_weight="balanced", 
             random_state=RANDOM_SEED
         )
     if name == "lr":
-        return LogisticRegression(max_iter=2000, n_jobs=-1, class_weight="balanced")
+        return LogisticRegression(
+            C=params.get("C", 1.0),
+            max_iter=params.get("max_iter", 1000),
+            n_jobs=-1,
+            class_weight="balanced"
+        )
     if name == "xgb" and _HAS_XGB:
         return xgb.XGBClassifier(
-            n_estimators=n_est, max_depth=6, learning_rate=0.05,
-            subsample=0.9, colsample_bytree=0.9, reg_alpha=1e-4, reg_lambda=1.0,
-            tree_method="hist", random_state=RANDOM_SEED,
-            objective="multi:softprob" if n_classes>2 else "binary:logistic"
+            n_estimators=params.get("n_estimators", n_est),
+            max_depth=params.get("max_depth", 6),
+            learning_rate=params.get("learning_rate", 0.05),
+            subsample=params.get("subsample", 0.8),
+            colsample_bytree=params.get("colsample_bytree", 0.8),
+            reg_alpha=params.get("reg_alpha", 0.1),
+            reg_lambda=params.get("reg_lambda", 1.0),
+            tree_method="hist",
+            random_state=RANDOM_SEED,
+            objective="multi:softprob" if n_classes > 2 else "binary:logistic",
+            n_jobs=-1
         )
     if name == "lgb" and _HAS_LGB:
         return lgb.LGBMClassifier(
-            n_estimators=n_est, num_leaves=64, learning_rate=0.05,
-            subsample=0.9, colsample_bytree=0.9, min_child_samples=25,
-            objective="multiclass" if n_classes>2 else "binary",
-            random_state=RANDOM_SEED, n_jobs=-1
+            n_estimators=params.get("n_estimators", n_est),
+            num_leaves=params.get("num_leaves", 31),
+            learning_rate=params.get("learning_rate", 0.05),
+            min_child_samples=params.get("min_child_samples", 20),
+            subsample=params.get("subsample", 0.8),
+            colsample_bytree=params.get("colsample_bytree", 0.8),
+            reg_alpha=params.get("reg_alpha", 0.1),
+            reg_lambda=params.get("reg_lambda", 0.1),
+            objective="multiclass" if n_classes > 2 else "binary",
+            random_state=RANDOM_SEED,
+            n_jobs=-1,
+            verbose=-1
         )
     if name == "cat" and _HAS_CAT:
         return CatBoostClassifier(
-            iterations=n_est, depth=6, learning_rate=0.05,
-            loss_function="MultiClass" if n_classes>2 else "Logloss",
-            verbose=False, random_state=RANDOM_SEED
+            iterations=params.get("iterations", n_est),
+            depth=params.get("depth", 6),
+            learning_rate=params.get("learning_rate", 0.05),
+            l2_leaf_reg=params.get("l2_leaf_reg", 3.0),
+            loss_function="MultiClass" if n_classes > 2 else "Logloss",
+            verbose=False,
+            random_state=RANDOM_SEED
         )
     if name == "bnn" and _HAS_TORCH:
         epochs = 10 if n_est < 200 else 25
@@ -498,9 +559,16 @@ def _get_market_type(target_col: str) -> str:
             return 'binary'
 
 def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, target_col: str = None) -> object:
+    """Tune a model with Optuna or return pre-tuned model."""
+    market_type = _get_market_type(target_col) if target_col else "binary"
+
+    # Check if we should skip tuning (speed mode)
+    if _HAS_SPEED_CONFIG and not use_tuning():
+        # Return pre-tuned model directly - no Optuna
+        return _build_base_model(alg, len(classes_), [], market_type)
+
     # Determine trials: use market-specific if target_col provided, else use env var
     if target_col and os.environ.get("USE_MARKET_SPECIFIC_TRIALS", "1") == "1":
-        market_type = _get_market_type(target_col)
         n_trials = TRIALS_BY_MARKET_TYPE.get(market_type, {}).get(alg, 25)
         print(f"  [CHART] {target_col} ({market_type}): {alg} using {n_trials} trials")
     else:
@@ -629,13 +697,25 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
 # --------------------------------------------------------------------------------------
 # DC probabilities helper (for OOF & inference)
 # --------------------------------------------------------------------------------------
-def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str, max_goals=8) -> np.ndarray:
+def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str, max_goals=8, use_cache=True) -> np.ndarray:
     """
     Generate Dixon-Coles probability estimates for various market types.
 
     Extended to support additional markets derivable from the score probability grid.
+
+    Args:
+        use_cache: If True, cache DC params globally to avoid refitting
     """
-    params = dc_fit_all(train_df[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
+    global _DC_PARAMS_CACHE
+
+    # Use cached params if available and caching enabled
+    cache_key = len(train_df)  # Simple cache key based on training data size
+    if use_cache and cache_key in _DC_PARAMS_CACHE:
+        params = _DC_PARAMS_CACHE[cache_key]
+    else:
+        params = dc_fit_all(train_df[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
+        if use_cache:
+            _DC_PARAMS_CACHE[cache_key] = params
     out = []
 
     for _, r in rows_df[["League","HomeTeam","AwayTeam"]].iterrows():
@@ -873,12 +953,44 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     X_all = pre.fit_transform(sub)
     feature_names = [*(pre.transformers_[0][2] or []), *(pre.transformers_[1][2] or [])]
 
-    # ===== MARKET-AWARE MODEL SELECTION =====
-    # Use optimal models based on market configuration
-    use_specialized = _HAS_SPECIALIZED and os.environ.get("USE_SPECIALIZED", "1") == "1"
+    # ===== SPEED-AWARE MODEL SELECTION =====
+    # Use speed config to determine models, with market config as secondary
 
-    # Get market configuration for optimal model selection
-    if _HAS_MARKET_CONFIG:
+    # Determine if we should use specialized models
+    if _HAS_SPEED_CONFIG:
+        use_specialized = _HAS_SPECIALIZED and use_specialized_models()
+    else:
+        use_specialized = _HAS_SPECIALIZED and os.environ.get("USE_SPECIALIZED", "1") == "1"
+
+    # Get market type for parameter selection
+    market_type_str = _get_market_type(target_col)
+
+    # Speed-based model selection takes priority
+    if _HAS_SPEED_CONFIG:
+        speed_models = get_models_for_mode()
+        # Filter to available models
+        base_names = []
+        for m in speed_models:
+            if m == "rf":
+                base_names.append("rf")
+            elif m == "et":
+                base_names.append("et")
+            elif m == "lr":
+                base_names.append("lr")
+            elif m == "xgb" and _HAS_XGB:
+                base_names.append("xgb")
+            elif m == "lgb" and _HAS_LGB:
+                base_names.append("lgb")
+            elif m == "cat" and _HAS_CAT:
+                base_names.append("cat")
+            elif m == "bnn" and _HAS_TORCH:
+                base_names.append("bnn")
+
+        speed_mode = get_speed_mode()
+        print(f"  ⚡ Speed mode: {speed_mode.value} -> Models: {base_names}")
+
+    # Fallback to market config or environment-based selection
+    elif _HAS_MARKET_CONFIG:
         market_config = get_market_config(target_col)
         strategy = market_config.strategy
         recommended_models = get_base_models_for_market(target_col, len(classes))
@@ -966,15 +1078,19 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         if name in tuned:
             base_models[name] = tuned[name]
         elif name != "xgb":  # Skip XGBoost if it failed during tuning
-            base_models[name] = _build_base_model(name, n_classes=len(classes), feature_names=feature_names)
+            base_models[name] = _build_base_model(name, n_classes=len(classes), feature_names=feature_names, market_type=market_type_str)
 
     # Add DC pseudo-base if supported
     supports_dc = _dc_supported(target_col)
     if supports_dc:
         base_models["dc"] = "__DC__"
 
-    # Walk-forward OOF
-    ps = make_time_split(len(y_int), n_folds=5)
+    # Walk-forward OOF with speed-aware fold count
+    if _HAS_SPEED_CONFIG:
+        n_folds = get_n_folds()
+    else:
+        n_folds = 5
+    ps = make_time_split(len(y_int), n_folds=n_folds)
     oof_blocks = []
     for fold in np.unique(ps.test_fold):
         tr = ps.test_fold != fold
@@ -1115,11 +1231,29 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
 # Public API: train all targets, save/load, predict_proba
 # --------------------------------------------------------------------------------------
 def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, TrainedTarget]:
+    """Train all target markets with speed-aware optimization."""
+
+    # Print speed configuration at start
+    if _HAS_SPEED_CONFIG:
+        print_speed_info()
+
     df = _load_features()
     models: Dict[str, TrainedTarget] = {}
     models_dir.mkdir(parents=True, exist_ok=True)
 
-    targets = [t for t in _all_targets() if t in df.columns]
+    # Get all available targets
+    all_targets = [t for t in _all_targets() if t in df.columns]
+
+    # Filter targets based on speed mode
+    if _HAS_SPEED_CONFIG:
+        targets = [t for t in all_targets if should_train_market(t)]
+        skipped = len(all_targets) - len(targets)
+        if skipped > 0:
+            print(f"⚡ Skipping {skipped} low-priority markets in current speed mode")
+    else:
+        targets = all_targets
+
+    print(f"📊 Training {len(targets)} markets")
     start_time = time.time()
 
     for i, t in enumerate(targets, 1):
@@ -1132,7 +1266,7 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
             continue
         joblib.dump(trg, models_dir / f"{t}.joblib", compress=3)
         models[t] = trg
-        
+
         # Time estimate
         elapsed = time.time() - start_time
         avg_per_target = elapsed / i
@@ -1142,6 +1276,9 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
     # save manifest
     with open(models_dir / "manifest.json", "w") as f:
         json.dump(sorted(list(models.keys())), f, indent=2)
+
+    total_time = time.time() - start_time
+    print(f"\n✅ Training complete: {len(models)} models in {total_time/60:.1f} minutes")
     return models
 
 

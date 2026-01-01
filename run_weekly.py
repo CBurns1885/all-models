@@ -23,6 +23,8 @@ import argparse
 parser = argparse.ArgumentParser(description='Football Prediction System')
 parser.add_argument('--mode', type=int, default=4, choices=[1, 2, 3, 4],
                     help='Training mode: 1=Full (50 trials), 2=Quick (25), 3=Fast (10), 4=No tuning')
+parser.add_argument('--speed', type=str, default='balanced', choices=['fast', 'balanced', 'full'],
+                    help='Speed mode: fast (~5min), balanced (~20min), full (~2hrs)')
 parser.add_argument('--non-interactive', action='store_true', default=True,
                     help='Run without interactive prompts')
 parser.add_argument('--use-sample-data', action='store_true',
@@ -33,10 +35,18 @@ args, _ = parser.parse_known_args()
 # CONFIGURATION
 # ============================================================================
 
+# Set speed mode FIRST (controls everything else)
+os.environ["SPEED_MODE"] = args.speed
+
+# Legacy mode settings (for backward compatibility)
 trial_counts = {1: "50", 2: "25", 3: "10", 4: "0"}
 os.environ["DISABLE_XGB"] = "0"  # Enable XGBoost for better accuracy
 os.environ["OPTUNA_TRIALS"] = trial_counts.get(args.mode, "0")
-os.environ["N_ESTIMATORS"] = "400"
+
+# Adjust N_ESTIMATORS based on speed mode
+estimator_counts = {"fast": "100", "balanced": "150", "full": "300"}
+os.environ["N_ESTIMATORS"] = estimator_counts.get(args.speed, "150")
+
 os.environ["USE_API_FOOTBALL"] = "1"  # Use API-Football for data
 os.environ["USE_XG_FEATURES"] = "1"   # Use expected goals features
 os.environ["API_FOOTBALL_KEY"] = "0f17fdba78d15a625710f7244a1cc770"
