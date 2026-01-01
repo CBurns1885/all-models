@@ -380,7 +380,7 @@ def print_speed_info():
     config = get_speed_config()
 
     print(f"\n{'='*60}")
-    print(f"⚡ SPEED MODE: {mode.value.upper()}")
+    print(f"[FAST] SPEED MODE: {mode.value.upper()}")
     print(f"{'='*60}")
     print(f"  Models: {', '.join(config.models)}")
     print(f"  CV Folds: {config.n_folds}")
