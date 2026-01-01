@@ -69,8 +69,23 @@ from config import (
 from progress_utils import Timer, heartbeat
 from tuning import make_time_split, objective_factory, CVData
 from ordinal import CORALOrdinal
-from calibration import DirichletCalibrator, TemperatureScaler
+from calibration import (
+    DirichletCalibrator, TemperatureScaler, IsotonicOrdinalCalibrator,
+    BetaCalibrator, get_calibrator_for_market
+)
 from models_dc import fit_all as dc_fit_all, price_match as dc_price_match
+
+# Import market configuration for optimal model selection
+try:
+    from market_config import (
+        get_market_config, get_market_type, get_model_strategy,
+        get_base_models_for_market, get_model_params_for_market,
+        should_use_dc_blend, should_use_isotonic,
+        MarketType, ModelStrategy
+    )
+    _HAS_MARKET_CONFIG = True
+except ImportError:
+    _HAS_MARKET_CONFIG = False
 
 
 # --------------------------------------------------------------------------------------
@@ -244,11 +259,46 @@ ORDINAL_TARGETS = {
 }
 
 # targets where DC can produce probabilities
+# Extended to support more market types that can be derived from score probabilities
 def _dc_supported(t: str) -> bool:
+    """Check if Dixon-Coles can provide probability estimates for this target."""
+    # Core DC-supported markets
+    core_markets = ["y_1X2", "y_BTTS", "y_GOAL_RANGE", "y_CS"]
+
+    # Markets derivable from score grid
+    derivable_prefixes = [
+        "y_OU_",      # Over/Under total goals
+        "y_AH_",      # Asian Handicap
+        "y_HomeTG_",  # Home team goals O/U
+        "y_AwayTG_",  # Away team goals O/U
+        "y_DC_",      # Double Chance (derivable from 1X2)
+        "y_DNB_",     # Draw No Bet (derivable from 1X2)
+    ]
+
+    # Exact goal markets (derivable from score grid)
+    exact_markets = [
+        "y_ExactTotal_0", "y_ExactTotal_1", "y_ExactTotal_2",
+        "y_ExactTotal_3", "y_ExactTotal_4", "y_ExactTotal_5", "y_ExactTotal_6+",
+        "y_HomeExact_0", "y_HomeExact_1", "y_HomeExact_2", "y_HomeExact_3+",
+        "y_AwayExact_0", "y_AwayExact_1", "y_AwayExact_2", "y_AwayExact_3+",
+    ]
+
+    # To Score markets (can derive from team goal probs)
+    to_score_markets = ["y_HomeToScore", "y_AwayToScore"]
+
+    # Clean sheet / WTN markets (derivable)
+    cs_markets = ["y_HomeWTN", "y_AwayWTN", "y_HomeCS", "y_AwayCS", "y_NoGoal"]
+
+    # Multi-goal markets (derivable from total goals distribution)
+    multigoal_markets = ["y_Match2+Goals", "y_Match3+Goals", "y_Match4+Goals", "y_Match5+Goals"]
+
     return (
-        t in ["y_1X2","y_BTTS","y_GOAL_RANGE","y_CS"]
-        or t.startswith("y_OU_")
-        or t.startswith("y_AH_")
+        t in core_markets
+        or t in exact_markets
+        or t in to_score_markets
+        or t in cs_markets
+        or t in multigoal_markets
+        or any(t.startswith(p) for p in derivable_prefixes)
     )
 
 
@@ -425,16 +475,27 @@ TRIALS_BY_MARKET_TYPE = {
 }
 
 def _get_market_type(target_col: str) -> str:
-    """Determine market type for trial optimization"""
-    if target_col in ORDINAL_TARGETS:
-        return 'ordinal'
-    elif any(target_col.startswith(p) for p in ['y_OU_', 'y_BTTS', 'y_AH_']):
-        return 'binary'
-    elif any(target_col == p for p in ['y_1X2', 'y_HT', 'y_HTFT', 'y_GOAL_RANGE']):
-        return 'multiclass'
+    """Determine market type for trial optimization using market configuration."""
+    if _HAS_MARKET_CONFIG:
+        market_type = get_market_type(target_col)
+        if market_type == MarketType.ORDINAL:
+            return 'ordinal'
+        elif market_type in [MarketType.MULTICLASS, MarketType.TERNARY]:
+            return 'multiclass'
+        elif market_type == MarketType.SPARSE:
+            return 'multiclass'  # Treat sparse as multiclass for trial allocation
+        else:
+            return 'binary'
     else:
-        # Default to binary for unknown markets
-        return 'binary'
+        # Legacy fallback
+        if target_col in ORDINAL_TARGETS:
+            return 'ordinal'
+        elif any(target_col.startswith(p) for p in ['y_OU_', 'y_BTTS', 'y_AH_']):
+            return 'binary'
+        elif any(target_col == p for p in ['y_1X2', 'y_HT', 'y_HTFT', 'y_GOAL_RANGE']):
+            return 'multiclass'
+        else:
+            return 'binary'
 
 def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, target_col: str = None) -> object:
     # Determine trials: use market-specific if target_col provided, else use env var
@@ -569,41 +630,214 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
 # DC probabilities helper (for OOF & inference)
 # --------------------------------------------------------------------------------------
 def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str, max_goals=8) -> np.ndarray:
+    """
+    Generate Dixon-Coles probability estimates for various market types.
+
+    Extended to support additional markets derivable from the score probability grid.
+    """
     params = dc_fit_all(train_df[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
     out = []
+
     for _, r in rows_df[["League","HomeTeam","AwayTeam"]].iterrows():
         lg, ht, at = r["League"], r["HomeTeam"], r["AwayTeam"]
         mp = {}
         if lg in params:
             mp = dc_price_match(params[lg], ht, at, max_goals=max_goals)
+
+        vec = None
+
+        # Core markets
         if target == "y_1X2":
-            vec = [mp.get("DC_1X2_H",0.0), mp.get("DC_1X2_D",0.0), mp.get("DC_1X2_A",0.0)]
+            vec = [mp.get("DC_1X2_H", 0.0), mp.get("DC_1X2_D", 0.0), mp.get("DC_1X2_A", 0.0)]
+
         elif target == "y_BTTS":
-            vec = [mp.get("DC_BTTS_N",0.0), mp.get("DC_BTTS_Y",0.0)]
+            vec = [mp.get("DC_BTTS_N", 0.0), mp.get("DC_BTTS_Y", 0.0)]
+
         elif target == "y_GOAL_RANGE":
-            labs = ["0","1","2","3","4","5+"]
-            vec = [mp.get(f"DC_GR_{k}",0.0) for k in labs]
+            labs = ["0", "1", "2", "3", "4", "5+"]
+            vec = [mp.get(f"DC_GR_{k}", 0.0) for k in labs]
+
         elif target == "y_CS":
-            vec = [mp.get(f"DC_CS_{a}_{b}",0.0) for a in range(6) for b in range(6)] + [mp.get("DC_CS_Other",0.0)]
+            vec = [mp.get(f"DC_CS_{a}_{b}", 0.0) for a in range(6) for b in range(6)] + [mp.get("DC_CS_Other", 0.0)]
+
+        # Over/Under total goals
         elif target.startswith("y_OU_"):
             l = target.split("_")[-1]
-            vec = [mp.get(f"DC_OU_{l}_U",0.0), mp.get(f"DC_OU_{l}_O",0.0)]
+            vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
+
+        # Asian Handicap
         elif target.startswith("y_AH_"):
-            l = target.split("_",2)[2]
-            vec = [mp.get(f"DC_AH_{l}_A",0.0), mp.get(f"DC_AH_{l}_P",0.0), mp.get(f"DC_AH_{l}_H",0.0)]
-        else:
-            vec = None
+            l = target.split("_", 2)[2]
+            vec = [mp.get(f"DC_AH_{l}_A", 0.0), mp.get(f"DC_AH_{l}_P", 0.0), mp.get(f"DC_AH_{l}_H", 0.0)]
+
+        # Team Goals Over/Under - derive from score grid
+        elif target.startswith("y_HomeTG_"):
+            line = float(target.split("_")[-1].replace("_", "."))
+            # Calculate P(HomeGoals > line) from score grid
+            p_over = 0.0
+            for h in range(max_goals + 1):
+                if h > line:
+                    for a in range(max_goals + 1):
+                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
+            vec = [1.0 - p_over, p_over]  # [Under, Over]
+
+        elif target.startswith("y_AwayTG_"):
+            line = float(target.split("_")[-1].replace("_", "."))
+            p_over = 0.0
+            for a in range(max_goals + 1):
+                if a > line:
+                    for h in range(max_goals + 1):
+                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
+            vec = [1.0 - p_over, p_over]
+
+        # Double Chance - derive from 1X2
+        elif target == "y_DC_1X":
+            p_h = mp.get("DC_1X2_H", 0.0)
+            p_d = mp.get("DC_1X2_D", 0.0)
+            vec = [1.0 - (p_h + p_d), p_h + p_d]  # [No, Yes]
+
+        elif target == "y_DC_X2":
+            p_d = mp.get("DC_1X2_D", 0.0)
+            p_a = mp.get("DC_1X2_A", 0.0)
+            vec = [1.0 - (p_d + p_a), p_d + p_a]
+
+        elif target == "y_DC_12":
+            p_h = mp.get("DC_1X2_H", 0.0)
+            p_a = mp.get("DC_1X2_A", 0.0)
+            vec = [1.0 - (p_h + p_a), p_h + p_a]
+
+        # Draw No Bet - derive from 1X2 (excluding draws)
+        elif target == "y_DNB_H":
+            p_h = mp.get("DC_1X2_H", 0.0)
+            p_a = mp.get("DC_1X2_A", 0.0)
+            total = p_h + p_a
+            if total > 0:
+                vec = [p_a / total, p_h / total]  # [No (Away wins), Yes (Home wins)]
+            else:
+                vec = [0.5, 0.5]
+
+        elif target == "y_DNB_A":
+            p_h = mp.get("DC_1X2_H", 0.0)
+            p_a = mp.get("DC_1X2_A", 0.0)
+            total = p_h + p_a
+            if total > 0:
+                vec = [p_h / total, p_a / total]
+            else:
+                vec = [0.5, 0.5]
+
+        # Exact Total Goals - derive from goal range
+        elif target.startswith("y_ExactTotal_"):
+            n = target.split("_")[-1]
+            if n == "6+":
+                p_exact = mp.get("DC_GR_5+", 0.0)  # 5+ includes 6+
+            else:
+                p_exact = mp.get(f"DC_GR_{n}", 0.0)
+            vec = [1.0 - p_exact, p_exact]
+
+        # Exact Team Goals - derive from score grid
+        elif target.startswith("y_HomeExact_"):
+            n = target.split("_")[-1]
+            p_exact = 0.0
+            if n == "3+":
+                for h in range(3, max_goals + 1):
+                    for a in range(max_goals + 1):
+                        p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+            else:
+                h = int(n)
+                for a in range(max_goals + 1):
+                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+            vec = [1.0 - p_exact, p_exact]
+
+        elif target.startswith("y_AwayExact_"):
+            n = target.split("_")[-1]
+            p_exact = 0.0
+            if n == "3+":
+                for a in range(3, max_goals + 1):
+                    for h in range(max_goals + 1):
+                        p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+            else:
+                a = int(n)
+                for h in range(max_goals + 1):
+                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+            vec = [1.0 - p_exact, p_exact]
+
+        # To Score markets
+        elif target == "y_HomeToScore":
+            # P(Home scores at least 1) = 1 - P(Home scores 0)
+            p_zero = 0.0
+            for a in range(max_goals + 1):
+                p_zero += mp.get(f"DC_CS_0_{a}", 0.0)
+            vec = [p_zero, 1.0 - p_zero]  # [No, Yes]
+
+        elif target == "y_AwayToScore":
+            p_zero = 0.0
+            for h in range(max_goals + 1):
+                p_zero += mp.get(f"DC_CS_{h}_0", 0.0)
+            vec = [p_zero, 1.0 - p_zero]
+
+        # Clean Sheet / Win to Nil markets
+        elif target == "y_HomeCS":
+            # P(Away scores 0)
+            p_cs = 0.0
+            for h in range(max_goals + 1):
+                p_cs += mp.get(f"DC_CS_{h}_0", 0.0)
+            vec = [1.0 - p_cs, p_cs]
+
+        elif target == "y_AwayCS":
+            p_cs = 0.0
+            for a in range(max_goals + 1):
+                p_cs += mp.get(f"DC_CS_0_{a}", 0.0)
+            vec = [1.0 - p_cs, p_cs]
+
+        elif target == "y_HomeWTN":
+            # P(Home wins AND Away scores 0)
+            p_wtn = 0.0
+            for h in range(1, max_goals + 1):
+                p_wtn += mp.get(f"DC_CS_{h}_0", 0.0)
+            vec = [1.0 - p_wtn, p_wtn]
+
+        elif target == "y_AwayWTN":
+            p_wtn = 0.0
+            for a in range(1, max_goals + 1):
+                p_wtn += mp.get(f"DC_CS_0_{a}", 0.0)
+            vec = [1.0 - p_wtn, p_wtn]
+
+        elif target == "y_NoGoal":
+            p_00 = mp.get("DC_CS_0_0", 0.0)
+            vec = [1.0 - p_00, p_00]
+
+        # Multi-goal markets
+        elif target == "y_Match2+Goals":
+            p_over = mp.get("DC_OU_1_5_O", 0.0)  # 2+ goals = Over 1.5
+            vec = [1.0 - p_over, p_over]
+
+        elif target == "y_Match3+Goals":
+            p_over = mp.get("DC_OU_2_5_O", 0.0)
+            vec = [1.0 - p_over, p_over]
+
+        elif target == "y_Match4+Goals":
+            p_over = mp.get("DC_OU_3_5_O", 0.0)
+            vec = [1.0 - p_over, p_over]
+
+        elif target == "y_Match5+Goals":
+            p_over = mp.get("DC_OU_4_5_O", 0.0)
+            vec = [1.0 - p_over, p_over]
+
         out.append(vec)
+
     first = next((v for v in out if v is not None), None)
     if first is None:
         return np.zeros((len(rows_df), 1))
+
     W = len(first)
     arr = np.zeros((len(rows_df), W))
     for i, v in enumerate(out):
         if v is not None:
             arr[i, :] = v
-    # renormalize safety
-    s = arr.sum(axis=1, keepdims=True); s[s==0]=1.0
+
+    # Renormalize for safety
+    s = arr.sum(axis=1, keepdims=True)
+    s[s == 0] = 1.0
     return arr / s
 
 
@@ -639,70 +873,100 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     X_all = pre.fit_transform(sub)
     feature_names = [*(pre.transformers_[0][2] or []), *(pre.transformers_[1][2] or [])]
 
-    # ===== SPECIALIZED MODEL SELECTION =====
-    # Use optimized models for specific market types
+    # ===== MARKET-AWARE MODEL SELECTION =====
+    # Use optimal models based on market configuration
     use_specialized = _HAS_SPECIALIZED and os.environ.get("USE_SPECIALIZED", "1") == "1"
-    
-    if use_specialized and is_binary_market(target_col):
-        # Binary markets: O/U, BTTS - use specialized binary model
-        print(f"  🎯 Using BINARY specialized model")
-        specialist = BinaryMarketModel(target_col, random_state=RANDOM_SEED)
-        specialist.fit(X_all, y_int)
-        base_models = {"binary_specialist": specialist}
-        
-    elif use_specialized and is_ordinal_market(target_col):
-        # Ordinal markets: Goal Range, CS - use specialized ordinal model
-        print(f"  📊 Using ORDINAL specialized model")
-        specialist = OrdinalMarketModel(target_col, classes, random_state=RANDOM_SEED)
-        specialist.fit(X_all, y_int)
-        base_models = {"ordinal_specialist": specialist}
-        
-    elif use_specialized and is_multiclass_market(target_col):
-        # Multiclass markets: 1X2, HT, HTFT - use specialized multiclass model
-        print(f"  🔢 Using MULTICLASS specialized model")
-        specialist = MulticlassMarketModel(target_col, len(classes), random_state=RANDOM_SEED)
-        specialist.fit(X_all, y_int)
-        base_models = {"multiclass_specialist": specialist}
-        
+
+    # Get market configuration for optimal model selection
+    if _HAS_MARKET_CONFIG:
+        market_config = get_market_config(target_col)
+        strategy = market_config.strategy
+        recommended_models = get_base_models_for_market(target_col, len(classes))
+        model_params = get_model_params_for_market(target_col)
+        print(f"  📊 Market: {market_config.market_type.value}, Strategy: {strategy.value}")
     else:
-        # Standard model selection for other targets or if specialized disabled
-        print(f"  ⚙️ Using standard ensemble models")
-        
-        # Choose base learners based on user choice
-        if os.environ.get("MODELS_ONLY") == "rf":
-            base_names = ["rf"]  # Ultra fast mode
-        else:
-            base_names = ["rf","et","lr"]
-            if _HAS_XGB: base_names.append("xgb")
-            if _HAS_LGB: base_names.append("lgb")
-            if _HAS_CAT: base_names.append("cat")
-            if _HAS_TORCH: base_names.append("bnn")
+        strategy = None
+        recommended_models = ["rf", "et", "lr"]
+        model_params = {}
 
-        # Optuna tune a subset (time-aware CV) with market-specific trials
-        tuned: Dict[str, object] = {}
-        for alg in ["rf","et","xgb","lgb","cat","lr"]:
-            if alg in base_names:
-                with Timer(f"Optuna tune {alg} for {target_col}"):
-                    result = _tune_model(alg, X_all, y_int, np.array(classes), target_col=target_col)
-                    # Only add if not None (XGBoost may return None on error)
-                    if result is not None:
-                        tuned[alg] = result
-                    elif alg == "xgb":
-                        print(f"⚠️  Skipping XGBoost for {target_col} due to previous error")
+    # Determine base learners based on strategy and availability
+    if os.environ.get("MODELS_ONLY") == "rf":
+        base_names = ["rf"]  # Ultra fast mode
+    elif strategy == ModelStrategy.LIGHTWEIGHT if _HAS_MARKET_CONFIG else False:
+        base_names = ["rf", "lr"]
+        print(f"  ⚡ Using LIGHTWEIGHT models (RF + LR)")
+    elif strategy == ModelStrategy.TREE_ENSEMBLE if _HAS_MARKET_CONFIG else False:
+        base_names = ["rf", "et"]
+        if _HAS_XGB: base_names.append("xgb")
+        if _HAS_LGB: base_names.append("lgb")
+        print(f"  🌲 Using TREE ENSEMBLE models")
+    elif strategy == ModelStrategy.BOOSTING if _HAS_MARKET_CONFIG else False:
+        base_names = []
+        if _HAS_XGB: base_names.append("xgb")
+        if _HAS_LGB: base_names.append("lgb")
+        if _HAS_CAT: base_names.append("cat")
+        if not base_names:
+            base_names = ["rf", "et"]  # Fallback if no boosting available
+        print(f"  🚀 Using BOOSTING models")
+    elif strategy == ModelStrategy.POISSON_BASED if _HAS_MARKET_CONFIG else False:
+        base_names = ["rf"]  # DC will do heavy lifting
+        print(f"  📐 Using POISSON-BASED approach (DC dominant)")
+    else:
+        # Full ensemble for FULL_ENSEMBLE or HYBRID strategies
+        base_names = ["rf", "et", "lr"]
+        if _HAS_XGB: base_names.append("xgb")
+        if _HAS_LGB: base_names.append("lgb")
+        if _HAS_CAT: base_names.append("cat")
+        if _HAS_TORCH: base_names.append("bnn")
+        print(f"  🎯 Using FULL ENSEMBLE models")
 
-        # Build base models dict (use tuned where present, else defaults)
-        base_models: Dict[str, object] = {}
-        for name in base_names:
-            if name in tuned:
-                base_models[name] = tuned[name]
-            elif name != "xgb":  # Skip XGBoost if it failed during tuning
-                base_models[name] = _build_base_model(name, n_classes=len(classes), feature_names=feature_names)
+    # Add specialized models to ensemble (not replacing!)
+    base_models: Dict[str, object] = {}
 
-        # If ordinal target, replace tree/linear with CORAL ordinal
-        if target_col in ORDINAL_TARGETS:
-            K = len(ORDINAL_TARGETS[target_col])
-            coral = CORALOrdinal(C=1.0, max_iter=2000)
-            base_models = {"coral": coral}
+    if use_specialized:
+        # Add specialized model as ONE component of the ensemble
+        if is_binary_market(target_col) and len(classes) == 2:
+            print(f"  ➕ Adding binary specialist to ensemble")
+            specialist = BinaryMarketModel(target_col, random_state=RANDOM_SEED)
+            specialist.fit(X_all, y_int)
+            base_models["binary_specialist"] = specialist
+
+        elif is_ordinal_market(target_col):
+            print(f"  ➕ Adding ordinal specialist to ensemble")
+            specialist = OrdinalMarketModel(target_col, classes, random_state=RANDOM_SEED)
+            specialist.fit(X_all, y_int)
+            base_models["ordinal_specialist"] = specialist
+
+        elif is_multiclass_market(target_col):
+            print(f"  ➕ Adding multiclass specialist to ensemble")
+            specialist = MulticlassMarketModel(target_col, len(classes), random_state=RANDOM_SEED)
+            specialist.fit(X_all, y_int)
+            base_models["multiclass_specialist"] = specialist
+
+    # Add CORAL for ordinal targets (as additional component)
+    if target_col in ORDINAL_TARGETS:
+        print(f"  ➕ Adding CORAL ordinal to ensemble")
+        K = len(ORDINAL_TARGETS[target_col])
+        coral = CORALOrdinal(C=1.0, max_iter=2000)
+        base_models["coral"] = coral
+
+    # Optuna tune standard models with market-specific trials
+    tuned: Dict[str, object] = {}
+    for alg in ["rf", "et", "xgb", "lgb", "cat", "lr"]:
+        if alg in base_names:
+            with Timer(f"Optuna tune {alg} for {target_col}"):
+                result = _tune_model(alg, X_all, y_int, np.array(classes), target_col=target_col)
+                if result is not None:
+                    tuned[alg] = result
+                elif alg == "xgb":
+                    print(f"⚠️  Skipping XGBoost for {target_col} due to previous error")
+
+    # Add tuned or default models to ensemble
+    for name in base_names:
+        if name in tuned:
+            base_models[name] = tuned[name]
+        elif name != "xgb":  # Skip XGBoost if it failed during tuning
+            base_models[name] = _build_base_model(name, n_classes=len(classes), feature_names=feature_names)
 
     # Add DC pseudo-base if supported
     supports_dc = _dc_supported(target_col)
@@ -774,7 +1038,22 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     else:
         P_meta_oof = meta.predict_proba(oof_pred)
 
-    if len(classes) > 2:
+    # Use market-aware calibration
+    if _HAS_MARKET_CONFIG:
+        calibrator = get_calibrator_for_market(target_col, len(classes))
+        if isinstance(calibrator, IsotonicOrdinalCalibrator):
+            print(f"  📈 Using ISOTONIC ordinal calibration")
+            calibrator.fit(P_meta_oof, y_int)
+        elif isinstance(calibrator, BetaCalibrator):
+            print(f"  📈 Using BETA calibration")
+            calibrator.fit(P_meta_oof, y_int)
+        elif isinstance(calibrator, DirichletCalibrator):
+            print(f"  📈 Using DIRICHLET calibration")
+            calibrator.fit(P_meta_oof, y_int)
+        else:
+            logits = np.log(np.clip(P_meta_oof, 1e-12, 1-1e-12))
+            calibrator.fit(logits, y_int)
+    elif len(classes) > 2:
         calibrator = DirichletCalibrator(C=1.0, max_iter=2000).fit(P_meta_oof, y_int)
     else:
         # build pseudo logits
@@ -910,6 +1189,10 @@ def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> 
         else:
             P_meta = trg.meta.predict_proba(S)
         if isinstance(trg.calibrator, DirichletCalibrator):
+            P = trg.calibrator.transform(P_meta)
+        elif isinstance(trg.calibrator, IsotonicOrdinalCalibrator):
+            P = trg.calibrator.transform(P_meta)
+        elif isinstance(trg.calibrator, BetaCalibrator):
             P = trg.calibrator.transform(P_meta)
         elif isinstance(trg.calibrator, TemperatureScaler):
             # temperature scaler expects logits; rebuild logits via inverse softmax approx
