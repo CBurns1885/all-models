@@ -472,9 +472,9 @@ def _generate_csv_report(df: pd.DataFrame):
         'Best_Prob': 'Best_Prob_%'
     }, inplace=True)
     
-    # Sort by date
+    # Sort by date, league, and probability (descending)
     df_export['Date'] = pd.to_datetime(df_export['Date'], errors='coerce')
-    df_export = df_export.sort_values('Date')
+    df_export = df_export.sort_values(['Date', 'League', 'Best_Prob_%'], ascending=[True, True, False])
     
     df_export.to_csv(OU_REPORT_CSV, index=False)
     print(f"CSV report: {OU_REPORT_CSV}")
@@ -502,7 +502,7 @@ def _generate_excel_report(df: pd.DataFrame, historical: dict):
         
         # Sort by date
         df_formatted['Date'] = pd.to_datetime(df_formatted['Date'], errors='coerce')
-        df_formatted = df_formatted.sort_values('Date')
+        df_formatted = df_formatted.sort_values(['Date', 'League'], ascending=[True, True])
         
         with pd.ExcelWriter(OU_REPORT_XLSX, engine='openpyxl') as writer:
             # Main predictions sheet

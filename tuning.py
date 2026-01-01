@@ -86,8 +86,7 @@ def objective_factory(alg: str, cvd: CVData):
             elif alg == "et":
                 return ExtraTreesClassifier(n_estimators=300, max_depth=10, random_state=42, n_jobs=-1)
             elif alg == "lr":
-                return LogisticRegression(C=1.0, max_iter=1000, n_jobs=-1, 
-                                        multi_class="multinomial" if K>2 else "auto")
+                return LogisticRegression(C=1.0, max_iter=1000, n_jobs=-1)
             else:
                 return RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)
         return dummy_objective
@@ -116,8 +115,7 @@ def objective_factory(alg: str, cvd: CVData):
         elif alg == "lr":
             C = trial.suggest_float("C", 1e-3, 10.0, log=True)
             return LogisticRegression(
-                C=C, max_iter=2000, n_jobs=-1, class_weight="balanced",
-                multi_class="multinomial" if K>2 else "auto"
+                C=C, max_iter=2000, n_jobs=-1, class_weight="balanced"
             )
         elif alg == "xgb" and _HAS_XGB:
             return xgb.XGBClassifier(

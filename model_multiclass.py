@@ -45,7 +45,6 @@ class MulticlassMarketModelFull:
 
         # Logistic Regression
         models['lr'] = LogisticRegression(
-            multi_class='multinomial',
             solver='lbfgs',
             C=1.0,
             max_iter=500,
