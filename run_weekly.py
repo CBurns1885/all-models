@@ -185,7 +185,7 @@ try:
     # Fix common column issues
     if "Div" in df.columns and "League" not in df.columns:
         df = df.rename(columns={"Div": "League"})
-        print("[FIX] Fixed: Renamed 'Div' → 'League'")
+        print("[FIX] Fixed: Renamed 'Div' -> 'League'")
         df.to_csv(fixtures_file, index=False)
     
     required = ["Date", "League", "HomeTeam", "AwayTeam"]
@@ -456,20 +456,20 @@ try:
     if errors:
         print(f"\n[WARN] {len(errors)} step(s) had errors:")
         for error in errors:
-            print(f"   • {error}")
+            print(f"   * {error}")
         print("\n[INFO] Check outputs folder - some files may still be generated")
     else:
         print("\n[OK] All steps completed successfully!")
     
     print("\n[DATA] Main Files:")
-    print("   • weekly_bets.csv - All predictions")
-    print("   • top50_weighted.html - Top picks (weighted)")
+    print("   * weekly_bets.csv - All predictions")
+    print("   * top50_weighted.html - Top picks (weighted)")
     
     print("\n[FOOTBALL] Specialized Reports:")
-    print("   • ou_analysis.html - Over/Under analysis")
-    print("   • accumulators_safe.html - Conservative 4-fold")
-    print("   • accumulators_mixed.html - Balanced 5-fold")
-    print("   • accumulators_aggressive.html - High-risk 6-fold")
+    print("   * ou_analysis.html - Over/Under analysis")
+    print("   * accumulators_safe.html - Conservative 4-fold")
+    print("   * accumulators_mixed.html - Balanced 5-fold")
+    print("   * accumulators_aggressive.html - High-risk 6-fold")
     
     print("\n" + "="*60)
     print("[INFO] Next Steps:")

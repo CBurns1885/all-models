@@ -65,9 +65,9 @@ class OrdinalMarketModelFull:
         
         try:
             self.model.fit(X, y)
-            print(f"  ✓ RF (ordinal-full, {self.n_classes} classes)")
+            print(f"  [OK] RF (ordinal-full, {self.n_classes} classes)")
         except Exception as e:
-            print(f"  ✗ RF: {e}")
+            print(f"  [X] RF: {e}")
             raise
         
         self.is_fitted = True
