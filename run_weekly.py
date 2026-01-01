@@ -291,11 +291,13 @@ try:
 
     run_step(2, "BUILD FEATURES", step2)
 
-    # Step 3: Train/load models
+    # Step 3: Train/load models (with intelligent caching)
     def step3():
-        from models import train_all_targets
-        print("Training all ensemble models (RF, XGB, LGB, CatBoost, DC)...")
-        return train_all_targets()
+        from incremental_trainer import smart_train_or_load
+        print("Checking if models need retraining...")
+        print(f"  Speed mode: {args.speed}")
+        print(f"  Set FORCE_RETRAIN=1 to force full retraining")
+        return smart_train_or_load()
 
     models, err = run_step(3, "TRAIN/LOAD MODELS", step3)
 
