@@ -989,6 +989,9 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         speed_mode = get_speed_mode()
         print(f"  ⚡ Speed mode: {speed_mode.value} -> Models: {base_names}")
 
+        # Initialize strategy as None when using speed config
+        strategy = None
+
     # Fallback to market config or environment-based selection
     elif _HAS_MARKET_CONFIG:
         market_config = get_market_config(target_col)
