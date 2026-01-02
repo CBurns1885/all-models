@@ -196,16 +196,19 @@ MARKET_CONFIGS = {
 
 
 class MarketBacktester:
-    """Analyze all markets over 4-week period"""
+    """Analyze all markets using walk-forward backtest on historical data"""
 
-    def __init__(self, weeks: int = 4, min_confidence: float = 0.60):
+    def __init__(self, weeks: int = 4, min_confidence: float = 0.60, use_historical: bool = True):
         """
         Args:
             weeks: Number of weeks to analyze
             min_confidence: Minimum confidence threshold (default 60%)
+            use_historical: If True, run walk-forward backtest on historical data
+                          If False, analyze recent predictions (for live tracking)
         """
         self.weeks = weeks
         self.min_confidence = min_confidence
+        self.use_historical = use_historical
         self.results = []
 
     def load_weekly_predictions(self, week_folders: List[Path]) -> pd.DataFrame:
@@ -229,7 +232,7 @@ class MarketBacktester:
         print(f"\n[OK] Total predictions: {len(combined)} across {len(all_preds)} weeks")
         return combined
 
-    def load_actual_results(self) -> pd.DataFrame:
+    def load_actual_results(self, start_date=None, end_date=None) -> pd.DataFrame:
         """Load actual match results from API-Football database"""
         from api_football_adapter import get_fixtures_from_db
 
@@ -240,8 +243,157 @@ class MarketBacktester:
         df = df[df['FTR'].notna()].copy()
         df['Date'] = pd.to_datetime(df['Date'])
 
+        # Filter by date range if specified
+        if start_date:
+            df = df[df['Date'] >= pd.to_datetime(start_date)]
+        if end_date:
+            df = df[df['Date'] <= pd.to_datetime(end_date)]
+
         print(f"[OK] Loaded {len(df)} completed matches with results")
         return df
+
+    def run_historical_backtest(self) -> pd.DataFrame:
+        """
+        Run walk-forward backtest on historical data
+
+        This generates predictions for historical matches and evaluates them
+        against actual results we already know.
+        """
+        from datetime import timedelta
+
+        print("="*60)
+        print(f"WALK-FORWARD HISTORICAL BACKTEST ({self.weeks} weeks)")
+        print("="*60)
+        print(f"Minimum confidence: {self.min_confidence:.0%}")
+        print(f"Markets analyzed: {len(MARKET_CONFIGS)}")
+        print()
+
+        # Load all historical data
+        print("[1/5] Loading historical match results...")
+        all_results = self.load_actual_results()
+
+        # Get the most recent completed matches for our test period
+        all_results = all_results.sort_values('Date', ascending=False)
+
+        # Calculate date range for test period (last N weeks of completed matches)
+        latest_date = all_results['Date'].max()
+        test_start_date = latest_date - timedelta(weeks=self.weeks)
+
+        print(f"[INFO] Test period: {test_start_date.strftime('%Y-%m-%d')} to {latest_date.strftime('%Y-%m-%d')}")
+
+        # Get test matches
+        test_matches = all_results[
+            (all_results['Date'] >= test_start_date) &
+            (all_results['Date'] <= latest_date)
+        ].copy()
+
+        print(f"[OK] Found {len(test_matches)} completed matches in test period")
+
+        if len(test_matches) == 0:
+            print("[ERROR] No completed matches in test period")
+            return pd.DataFrame()
+
+        # Generate predictions for these historical matches
+        print("\n[2/5] Generating predictions for historical matches...")
+        predictions_df = self.generate_historical_predictions(test_matches)
+
+        if predictions_df is None or len(predictions_df) == 0:
+            print("[ERROR] Failed to generate predictions")
+            return pd.DataFrame()
+
+        print(f"[OK] Generated predictions for {len(predictions_df)} matches")
+
+        # Merge predictions with actual results
+        print("\n[3/5] Merging predictions with actual results...")
+        merged = self.merge_predictions_with_results(predictions_df, test_matches)
+
+        if len(merged) == 0:
+            print("[ERROR] No matches found between predictions and results")
+            return pd.DataFrame()
+
+        print(f"[OK] Matched {len(merged)} predictions with results")
+
+        # Evaluate each market
+        print("\n[4/5] Evaluating market performance...")
+        print("="*60)
+
+        market_results = []
+        for market_name, config in MARKET_CONFIGS.items():
+            result = self.evaluate_market(merged, market_name, config)
+            market_results.append(result)
+
+            if 'error' in result:
+                print(f"  {market_name:20s} [SKIP] {result['error']}")
+            else:
+                print(f"  {market_name:20s} [OK] {result['total_predictions']:4d} predictions, {result['accuracy']:5.1%} accuracy, ROI: {result['roi']:+6.1f}%")
+
+        # Convert to DataFrame
+        df_results = pd.DataFrame(market_results)
+
+        # Filter out markets with errors or no predictions
+        df_results = df_results[df_results['total_predictions'] > 0].copy()
+
+        # Sort by accuracy (descending)
+        df_results = df_results.sort_values('accuracy', ascending=False)
+
+        # Save results
+        print("\n[5/5] Saving analysis...")
+        from config import OUTPUT_DIR
+        output_dir = OUTPUT_DIR.parent if OUTPUT_DIR.name.startswith('20') else OUTPUT_DIR
+
+        csv_path = output_dir / "market_backtest_analysis.csv"
+        df_results.to_csv(csv_path, index=False)
+        print(f"[OK] Saved analysis to {csv_path}")
+
+        # Generate HTML report
+        self.generate_html_report(df_results, output_dir)
+
+        return df_results
+
+    def generate_historical_predictions(self, test_matches: pd.DataFrame) -> pd.DataFrame:
+        """
+        Generate predictions for historical matches using the current models
+
+        Args:
+            test_matches: DataFrame of historical matches to predict
+
+        Returns:
+            DataFrame with predictions (P_ columns) for each match
+        """
+        from predict import predict_week
+        import tempfile
+
+        # Create temporary fixtures file from historical matches
+        fixtures = test_matches[['Date', 'League', 'HomeTeam', 'AwayTeam']].copy()
+
+        # Create temp file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
+            temp_fixtures_path = Path(f.name)
+
+        # Write CSV after file is closed
+        fixtures.to_csv(temp_fixtures_path, index=False)
+
+        try:
+            # Generate predictions using current models
+            print(f"  Running prediction pipeline on {len(fixtures)} historical matches...")
+            predict_week(temp_fixtures_path)
+
+            # Load generated predictions
+            from config import OUTPUT_DIR
+            predictions_file = OUTPUT_DIR / "weekly_bets.csv"
+
+            if predictions_file.exists():
+                predictions = pd.read_csv(predictions_file)
+                predictions['Date'] = pd.to_datetime(predictions['Date'])
+                return predictions
+            else:
+                print(f"  [WARN] Predictions file not found at {predictions_file}")
+                return None
+
+        finally:
+            # Cleanup temp file
+            if temp_fixtures_path.exists():
+                temp_fixtures_path.unlink()
 
     def merge_predictions_with_results(self,
                                        predictions: pd.DataFrame,
@@ -681,17 +833,31 @@ class MarketBacktester:
         print(f"[OK] Saved HTML report to {html_path}")
 
 
-def run_market_backtest(weeks: int = 4, min_confidence: float = 0.60):
-    """Run multi-market backtest analysis"""
-    backtester = MarketBacktester(weeks=weeks, min_confidence=min_confidence)
-    results = backtester.run_analysis()
+def run_market_backtest(weeks: int = 4, min_confidence: float = 0.60, use_historical: bool = True):
+    """
+    Run multi-market backtest analysis
+
+    Args:
+        weeks: Number of weeks to analyze
+        min_confidence: Minimum confidence threshold (0.0-1.0)
+        use_historical: If True, run walk-forward backtest on historical data (default)
+                       If False, analyze recent prediction folders
+    """
+    backtester = MarketBacktester(weeks=weeks, min_confidence=min_confidence, use_historical=use_historical)
+
+    if use_historical:
+        # Run walk-forward backtest on historical data
+        results = backtester.run_historical_backtest()
+    else:
+        # Analyze recent prediction folders
+        results = backtester.run_analysis()
 
     if len(results) > 0:
         print("\n" + "="*60)
         print("TOP 10 MARKETS BY ACCURACY")
         print("="*60)
         for idx, row in results.head(10).iterrows():
-            print(f"{list(results.index).index(idx)+1:2d}. {row['market']:20s} - {row['accuracy']:.1%} ({int(row['total_predictions'])} predictions)")
+            print(f"{list(results.index).index(idx)+1:2d}. {row['market']:20s} - {row['accuracy']:.1%} ({int(row['total_predictions'])} predictions, ROI: {row['roi']:+.1f}%)")
 
         print("\n" + "="*60)
         print("ANALYSIS COMPLETE")
@@ -707,8 +873,10 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='Multi-Market Backtest Analysis')
-    parser.add_argument('--weeks', type=int, default=4, help='Number of weeks to analyze')
-    parser.add_argument('--min-confidence', type=float, default=0.60, help='Minimum confidence threshold (0.0-1.0)')
+    parser.add_argument('--weeks', type=int, default=4, help='Number of weeks to analyze (default: 4)')
+    parser.add_argument('--min-confidence', type=float, default=0.60, help='Minimum confidence threshold 0.0-1.0 (default: 0.60)')
+    parser.add_argument('--no-historical', action='store_true', help='Use recent predictions instead of historical backtest')
     args = parser.parse_args()
 
-    run_market_backtest(weeks=args.weeks, min_confidence=args.min_confidence)
+    use_historical = not args.no_historical
+    run_market_backtest(weeks=args.weeks, min_confidence=args.min_confidence, use_historical=use_historical)
