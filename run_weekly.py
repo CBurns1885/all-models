@@ -279,7 +279,7 @@ print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}
 # RUN PIPELINE WITH ERROR RECOVERY
 # ============================================================================
 
-TOTAL_STEPS = 11  # Reduced from 14 (removed duplicate/missing steps)
+TOTAL_STEPS = 12  # Updated to include market splitting step
 errors = []
 
 def run_step(step_num, step_name, func, *args, **kwargs):
@@ -422,8 +422,27 @@ try:
 
     run_step(8, "BUILD ACCUMULATORS", step8)
 
-    # Step 9: Update accuracy database
+    # Step 9: Split by Market
     def step9():
+        from market_splitter import split_predictions
+        csv_path = OUTPUT_DIR / "weekly_bets_full.csv"
+
+        if csv_path.exists():
+            split_predictions(csv_path, OUTPUT_DIR)
+            print("[OK] Market-specific files generated")
+        else:
+            # Try alternate file name
+            csv_path = OUTPUT_DIR / "weekly_bets.csv"
+            if csv_path.exists():
+                split_predictions(csv_path, OUTPUT_DIR)
+                print("[OK] Market-specific files generated")
+            else:
+                raise FileNotFoundError("weekly_bets*.csv not found")
+
+    run_step(9, "SPLIT BY MARKET", step9)
+
+    # Step 10: Update accuracy database
+    def step10():
         try:
             from accuracy_tracker import update_accuracy_database
             update_accuracy_database()
@@ -431,10 +450,10 @@ try:
         except Exception as e:
             print(f"[WARN] Accuracy update skipped: {e}")
 
-    run_step(9, "UPDATE ACCURACY DB", step9)
+    run_step(10, "UPDATE ACCURACY DB", step10)
 
-    # Step 10: Archive outputs
-    def step10():
+    # Step 11: Archive outputs
+    def step11():
         import shutil
         from datetime import datetime
 
@@ -469,10 +488,10 @@ try:
 
         print(f"[OK] Archived {archived_count} files to {archive_dir}")
 
-    run_step(10, "ARCHIVE OUTPUTS", step10)
+    run_step(11, "ARCHIVE OUTPUTS", step11)
 
-    # Step 11: Open outputs folder
-    def step11():
+    # Step 12: Open outputs folder
+    def step12():
         import subprocess
         import platform
 
@@ -481,7 +500,7 @@ try:
         elif platform.system() == "Darwin":
             subprocess.run(["open", str(OUTPUT_DIR)], check=False)
 
-    run_step(11, "OPEN OUTPUTS FOLDER", step11)
+    run_step(12, "OPEN OUTPUTS FOLDER", step12)
     
     # ========================================================================
     # SUCCESS SUMMARY
