@@ -231,12 +231,12 @@ class MarketBacktester:
 
     def load_actual_results(self) -> pd.DataFrame:
         """Load actual match results from API-Football database"""
-        from api_football_adapter import APIFootballAdapter
+        from api_football_adapter import get_fixtures_from_db
 
-        adapter = APIFootballAdapter()
-        df = adapter.get_all_fixtures()
+        # Get all completed matches from database
+        df = get_fixtures_from_db(status='FT')
 
-        # Filter completed matches only
+        # Filter completed matches only (must have result)
         df = df[df['FTR'].notna()].copy()
         df['Date'] = pd.to_datetime(df['Date'])
 
@@ -382,13 +382,27 @@ class MarketBacktester:
         print(f"Markets analyzed: {len(MARKET_CONFIGS)}")
         print()
 
-        # Find week folders
-        week_folders = sorted([f for f in output_dir.iterdir() if f.is_dir() and f.name.startswith('20')])
-        week_folders = week_folders[-self.weeks:]  # Last N weeks
+        # If output_dir is a dated folder, get its parent (outputs/)
+        if output_dir.name.startswith('20'):
+            base_output_dir = output_dir.parent
+            print(f"[INFO] Using base output directory: {base_output_dir}")
+        else:
+            base_output_dir = output_dir
+
+        # Find week folders (dated folders like 2026-01-02)
+        try:
+            week_folders = sorted([f for f in base_output_dir.iterdir() if f.is_dir() and f.name.startswith('20')])
+        except Exception as e:
+            print(f"[ERROR] Could not read output directory: {e}")
+            return pd.DataFrame()
 
         if len(week_folders) == 0:
-            print("[ERROR] No week folders found in outputs/")
+            print(f"[ERROR] No week folders found in {output_dir}")
+            print(f"[INFO] Looking for folders named like: 2026-01-02")
+            print(f"[INFO] Make sure predictions have been generated first")
             return pd.DataFrame()
+
+        week_folders = week_folders[-self.weeks:]  # Last N weeks
 
         print(f"Analyzing weeks: {[f.name for f in week_folders]}\n")
 
@@ -400,7 +414,13 @@ class MarketBacktester:
         merged = self.merge_predictions_with_results(predictions, results)
 
         if len(merged) == 0:
-            print("[ERROR] No matches found between predictions and results")
+            print("\n[ERROR] No matches found between predictions and results")
+            print("[INFO] This happens when:")
+            print("  - Predictions are for upcoming matches (not yet played)")
+            print("  - Match dates/teams don't exactly match between predictions and database")
+            print("  - No completed matches in the selected time period")
+            print("\n[TIP] Wait for matches to complete, then run backtest again")
+            print("[TIP] Or use older prediction folders that have completed matches")
             return pd.DataFrame()
 
         # Evaluate each market
@@ -428,13 +448,13 @@ class MarketBacktester:
         # Sort by accuracy (descending)
         df_results = df_results.sort_values('accuracy', ascending=False)
 
-        # Save results
-        csv_path = output_dir / "market_backtest_analysis.csv"
+        # Save results to base output directory
+        csv_path = base_output_dir / "market_backtest_analysis.csv"
         df_results.to_csv(csv_path, index=False)
         print(f"\n[OK] Saved analysis to {csv_path}")
 
         # Generate HTML report
-        self.generate_html_report(df_results, output_dir)
+        self.generate_html_report(df_results, base_output_dir)
 
         return df_results
 
