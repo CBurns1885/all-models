@@ -1079,21 +1079,34 @@ def predict_week(fixtures_csv: Path) -> Path:
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
 
+    # Calculate max probability across all P_ columns for filtering
+    p_cols = [col for col in df_out.columns if col.startswith('P_')]
+    if p_cols:
+        df_out['MaxConfidence'] = df_out[p_cols].max(axis=1)
+
     # Sort by Date, then League for better readability
     if 'Date' in df_out.columns:
         df_out['Date'] = pd.to_datetime(df_out['Date'], errors='coerce')
         df_out = df_out.sort_values(['Date', 'League'], ascending=[True, True])
         print("[OK] Sorted output by Date and League")
 
-    # Save full version with all columns
+    # Save full version with all columns (NO FILTER - keep everything)
     output_path_full = OUTPUT_DIR / "weekly_bets_full.csv"
     df_out.to_csv(output_path_full, index=False)
-    print(f"\n[OK] Saved full predictions: {output_path_full}")
+    print(f"\n[OK] Saved full predictions: {output_path_full} ({len(df_out)} matches)")
 
-    # Also save as weekly_bets.csv for compatibility with other scripts
+    # Filter for weekly_bets.csv: Keep only predictions with >= 60% confidence
+    if 'MaxConfidence' in df_out.columns:
+        df_filtered = df_out[df_out['MaxConfidence'] >= 0.60].copy()
+        filtered_count = len(df_out) - len(df_filtered)
+        print(f"[FILTER] Removed {filtered_count} matches with confidence < 60%")
+    else:
+        df_filtered = df_out.copy()
+
+    # Save filtered version as weekly_bets.csv for compatibility with other scripts
     output_path = OUTPUT_DIR / "weekly_bets.csv"
-    df_out.to_csv(output_path, index=False)
-    print(f"[OK] Saved predictions: {output_path}")
+    df_filtered.to_csv(output_path, index=False)
+    print(f"[OK] Saved filtered predictions: {output_path} ({len(df_filtered)} matches >= 60% confidence)")
     
     # Generate HTML
     log_header("GENERATE REPORTS")
