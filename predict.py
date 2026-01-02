@@ -1085,10 +1085,15 @@ def predict_week(fixtures_csv: Path) -> Path:
         df_out = df_out.sort_values(['Date', 'League'], ascending=[True, True])
         print("[OK] Sorted output by Date and League")
 
-    # Save
-    output_path = OUTPUT_DIR / "weekly_bets_full.csv"
+    # Save full version with all columns
+    output_path_full = OUTPUT_DIR / "weekly_bets_full.csv"
+    df_out.to_csv(output_path_full, index=False)
+    print(f"\n[OK] Saved full predictions: {output_path_full}")
+
+    # Also save as weekly_bets.csv for compatibility with other scripts
+    output_path = OUTPUT_DIR / "weekly_bets.csv"
     df_out.to_csv(output_path, index=False)
-    print(f"\n[OK] Saved predictions: {output_path}")
+    print(f"[OK] Saved predictions: {output_path}")
     
     # Generate HTML
     log_header("GENERATE REPORTS")
