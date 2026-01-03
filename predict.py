@@ -875,30 +875,37 @@ def calculate_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = None):
-    """Enhanced HTML report with confidence scores"""
+    """Enhanced HTML report - Elite picks (>85% probability) sorted by date and league"""
     prob_cols = [c for c in df.columns if c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_")]
     if not prob_cols:
         print("Warning: No probability columns found")
         return
-    
+
     df2 = df.copy()
     df2["BestProb"] = df2[prob_cols].max(axis=1)
     df2["BestMarket"] = df2[prob_cols].idxmax(axis=1)
-    
+
     # Add confidence if available
     conf_cols = [c for c in df2.columns if c.startswith("CONF_")]
     if conf_cols:
         df2["AvgConfidence"] = df2[conf_cols].mean(axis=1)
     else:
         df2["AvgConfidence"] = 0.5
-    
-    # Filter meaningful predictions
-    meaningful = df2[(df2["BestProb"] > 0.5) & (df2["AvgConfidence"] > 0.5)]
-    
-    if len(meaningful) >= 10:
-        top = meaningful.sort_values(["AvgConfidence", "BestProb"], ascending=[False, False]).head(50)
-    else:
-        top = df2.sort_values("BestProb", ascending=False).head(50)
+
+    # Filter for ELITE predictions only (>85% probability)
+    elite_threshold = 0.85
+    elite = df2[df2["BestProb"] >= elite_threshold].copy()
+
+    # Sort by Date, then League
+    if 'Date' in elite.columns:
+        elite['Date'] = pd.to_datetime(elite['Date'], errors='coerce')
+        elite = elite.sort_values(['Date', 'League'], ascending=[True, True])
+
+    # Count stats
+    total_fixtures = len(df2)
+    elite_count = len(elite)
+    very_high = len(df2[df2["BestProb"] >= 0.90])
+    high_conf = len(df2[(df2["BestProb"] >= 0.75) & (df2["AvgConfidence"] >= 0.70)])
     
     def parse_market(market_name):
         market_name = market_name.replace("BLEND_", "").replace("P_", "").replace("DC_", "")
@@ -933,7 +940,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 <head>
     <meta charset='utf-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <title>🎯 ULTIMATE Predictions - {len(top)} Elite Picks</title>
+    <title>🎯 ELITE Predictions (85%+) - {elite_count} Picks</title>
     <style>
         * {{box-sizing: border-box; margin: 0; padding: 0;}}
         body {{
@@ -1067,26 +1074,26 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 <body>
     <div class='container'>
         <div class='header'>
-            <h1>🎯 ULTIMATE PREDICTIONS</h1>
-            <p style='font-size: 1.2em; opacity: 0.9;'>Maximum Accuracy System - Top {len(top)} Elite Picks</p>
+            <h1>🎯 ELITE PREDICTIONS (85%+)</h1>
+            <p style='font-size: 1.2em; opacity: 0.9;'>All Calibrations Applied - Sorted by Date & League</p>
         </div>
-        
+
         <div class='stats'>
             <div class='stat-box'>
-                <div class='number'>{len(df2)}</div>
+                <div class='number'>{total_fixtures}</div>
                 <div class='label'>Total Fixtures</div>
             </div>
             <div class='stat-box'>
-                <div class='number'>{len(meaningful)}</div>
-                <div class='label'>High Quality</div>
+                <div class='number'>{elite_count}</div>
+                <div class='label'>Elite (85%+)</div>
             </div>
             <div class='stat-box'>
-                <div class='number'>{df2['BestProb'].max():.0%}</div>
-                <div class='label'>Best Probability</div>
+                <div class='number'>{very_high}</div>
+                <div class='label'>Very High (90%+)</div>
             </div>
             <div class='stat-box'>
-                <div class='number'>{df2['AvgConfidence'].mean():.0%}</div>
-                <div class='label'>Avg Confidence</div>
+                <div class='number'>{high_conf}</div>
+                <div class='label'>High Confidence</div>
             </div>
         </div>
         
@@ -1105,30 +1112,28 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
             </thead>
             <tbody>"""
     
-    for i, (_, r) in enumerate(top.iterrows(), 1):
+    for i, (_, r) in enumerate(elite.iterrows(), 1):
         market, selection = parse_market(r['BestMarket'])
         prob = r['BestProb']
         conf = r.get('AvgConfidence', 0.5)
-        
-        # Row styling
-        if prob >= 0.85 and conf >= 0.75:
-            row_class = "elite"
-        elif prob >= 0.75:
-            row_class = "high"
-        elif prob >= 0.65:
-            row_class = "medium"
+
+        # Row styling - all are elite (85%+), differentiate by 90%+ and confidence
+        if prob >= 0.95:
+            row_class = "elite"  # 95%+ = gold tier
+        elif prob >= 0.90:
+            row_class = "high"   # 90-95% = green tier
         else:
-            row_class = ""
-        
+            row_class = "medium" # 85-90% = yellow tier
+
         # Confidence badge
         if conf >= 0.7:
             conf_class = "conf-high"
         else:
             conf_class = "conf-med"
-        
+
         # Source badge
         source = "BLEND" if r['BestMarket'].startswith("BLEND_") else ("DC" if r['BestMarket'].startswith("DC_") else "ML")
-        
+
         html += f"""
                 <tr class='{row_class}'>
                     <td class='rank'>{i}</td>
@@ -1140,21 +1145,31 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
                     <td class='prob'>{prob:.1%}</td>
                     <td><span class='confidence {conf_class}'>{conf:.0%}</span></td>
                 </tr>"""
-    
+
+    # Handle empty elite list
+    if elite_count == 0:
+        html += """
+                <tr>
+                    <td colspan='8' style='text-align: center; padding: 40px; color: #666;'>
+                        No predictions above 85% threshold for these fixtures.
+                        Check weekly_bets_full.csv for all predictions.
+                    </td>
+                </tr>"""
+
     html += """
             </tbody>
         </table>
     </div>
 </body>
 </html>"""
-    
-    out_path = path / "top50_ultimate.html"
+
+    out_path = path / "elite_picks.html"
     out_path.write_text(html, encoding="utf-8")
-    print(f"✅ Wrote ULTIMATE HTML -> {out_path}")
-    
+    print(f"✅ Wrote ELITE HTML ({elite_count} picks 85%+) -> {out_path}")
+
     if secondary_path:
         secondary_path.mkdir(parents=True, exist_ok=True)
-        secondary_out = secondary_path / "top50_ultimate.html"
+        secondary_out = secondary_path / "elite_picks.html"
         secondary_out.write_text(html, encoding="utf-8")
         print(f"✅ Wrote ULTIMATE HTML (copy) -> {secondary_out}")
 
