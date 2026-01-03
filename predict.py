@@ -127,6 +127,8 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
 
     profile = league_profiles[league]
     style = profile.get('style', 'balanced')
+    home_adv = profile.get('home_adv', 0.1)
+    clean_sheet_rate = profile.get('clean_sheet_rate', 0.47)
 
     # Stronger calibration for lower confidence predictions
     confidence = abs(prob - 0.5) * 2  # 0 to 1 scale
@@ -136,6 +138,7 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
     style_boost = {'attacking': 0.08, 'balanced': 0.0, 'defensive': -0.08}
     goal_style_adj = style_boost.get(style, 0.0)
 
+    # ========== GOALS MARKETS ==========
     if 'BTTS_Y' in market:
         league_avg = profile.get('btts_rate', 0.5)
         calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
@@ -175,20 +178,98 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
         # Under markets - inverse of style adjustment
         return max(0.01, min(0.99, prob - goal_style_adj))
 
+    # ========== HOME/AWAY ADVANTAGE CALIBRATION ==========
+
+    # Match result markets
     elif '1X2_H' in market:
-        home_adv = profile.get('home_adv', 0.1)
-        return min(prob * (1 + home_adv * 0.25), 0.95)
+        return min(prob * (1 + home_adv * 0.3), 0.95)
 
     elif '1X2_A' in market:
-        home_adv = profile.get('home_adv', 0.1)
-        return max(prob * (1 - home_adv * 0.25), 0.05)
+        return max(prob * (1 - home_adv * 0.3), 0.05)
 
-    elif 'WTN' in market or 'CS_' in market or 'NoGoal' in market:
-        # Win to Nil, Clean Sheet markets - use clean_sheet_rate
-        clean_sheet_rate = profile.get('clean_sheet_rate', 0.47)
-        calibrated = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
-        # Defensive leagues boost clean sheet probability
-        return max(0.01, min(0.99, calibrated - goal_style_adj * 0.5))
+    elif '1X2_D' in market:
+        # Draw less likely in leagues with high home advantage
+        return max(0.05, min(0.45, prob * (1 - home_adv * 0.15)))
+
+    # Double Chance markets
+    elif 'DC_1X' in market or 'DC1X' in market:
+        # Home or Draw - boosted by home advantage
+        return min(prob * (1 + home_adv * 0.15), 0.95)
+
+    elif 'DC_X2' in market or 'DCX2' in market:
+        # Away or Draw - reduced by home advantage
+        return max(prob * (1 - home_adv * 0.15), 0.15)
+
+    elif 'DC_12' in market or 'DC12' in market:
+        # Home or Away (no draw) - slight boost in high home adv leagues
+        return min(prob * (1 + home_adv * 0.08), 0.95)
+
+    # Draw No Bet
+    elif 'DNB_H' in market:
+        return min(prob * (1 + home_adv * 0.25), 0.90)
+
+    elif 'DNB_A' in market:
+        return max(prob * (1 - home_adv * 0.25), 0.10)
+
+    # Home/Away team goals
+    elif 'HomeTG_' in market or 'HomeExact' in market:
+        # Home team goals - boosted by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob + line_boost))
+
+    elif 'AwayTG_' in market or 'AwayExact' in market:
+        # Away team goals - reduced by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob - line_boost))
+
+    # Team to score
+    elif 'HomeToScore' in market:
+        return min(prob * (1 + home_adv * 0.10), 0.95)
+
+    elif 'AwayToScore' in market:
+        return max(prob * (1 - home_adv * 0.10), 0.20)
+
+    # Win to Nil / Clean Sheet - with home/away distinction
+    elif 'HomeWTN' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.5) * calibration_weight
+        # Home WTN boosted by home advantage
+        return max(0.01, min(0.60, base * (1 + home_adv * 0.20) - goal_style_adj * 0.3))
+
+    elif 'AwayWTN' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.35) * calibration_weight
+        # Away WTN reduced by home advantage
+        return max(0.01, min(0.40, base * (1 - home_adv * 0.20) - goal_style_adj * 0.3))
+
+    elif 'HomeCS' in market:
+        base = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
+        return max(0.01, min(0.65, base * (1 + home_adv * 0.15) - goal_style_adj * 0.4))
+
+    elif 'AwayCS' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.8) * calibration_weight
+        return max(0.01, min(0.55, base * (1 - home_adv * 0.15) - goal_style_adj * 0.4))
+
+    elif 'NoGoal' in market:
+        # 0-0 draw - defensive leagues boost, high home adv reduces
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.15) * calibration_weight
+        return max(0.01, min(0.15, base - goal_style_adj * 0.5))
+
+    # Win by margin - home/away
+    elif 'HomeWin' in market:
+        boost = home_adv * 0.15
+        return max(0.01, min(0.85, prob + boost))
+
+    elif 'AwayWin' in market:
+        boost = home_adv * 0.15
+        return max(0.01, min(0.60, prob - boost))
+
+    # Asian Handicap - home advantage affects line perception
+    elif 'AH_' in market:
+        if '_H' in market or market.endswith('_H'):
+            # Home covers handicap
+            return max(0.01, min(0.85, prob + home_adv * 0.08))
+        elif '_A' in market or market.endswith('_A'):
+            # Away covers handicap
+            return max(0.01, min(0.85, prob - home_adv * 0.08))
 
     return prob
 
