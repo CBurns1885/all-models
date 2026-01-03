@@ -30,26 +30,62 @@ OU_LINES = ["0_5","1_5","2_5","3_5","4_5"]
 AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
 
 # League scoring profiles (learned from historical data)
+# style: 'attacking' (>2.8 avg), 'balanced' (2.5-2.8), 'defensive' (<2.5)
+# clean_sheet_rate: Probability of at least one team keeping a clean sheet
 LEAGUE_PROFILES = {
-    'E0': {'avg_goals': 2.72, 'home_adv': 0.12, 'btts_rate': 0.53, 'over25_rate': 0.52, 'quality': 'elite'},
-    'E1': {'avg_goals': 2.65, 'home_adv': 0.10, 'btts_rate': 0.51, 'over25_rate': 0.50, 'quality': 'high'},
-    'E2': {'avg_goals': 2.58, 'home_adv': 0.11, 'btts_rate': 0.49, 'over25_rate': 0.48, 'quality': 'medium'},
-    'E3': {'avg_goals': 2.61, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.49, 'quality': 'medium'},
-    'EC': {'avg_goals': 2.65, 'home_adv': 0.12, 'btts_rate': 0.51, 'over25_rate': 0.50, 'quality': 'medium'},
-    'SP1': {'avg_goals': 2.48, 'home_adv': 0.15, 'btts_rate': 0.46, 'over25_rate': 0.45, 'quality': 'elite'},
-    'SP2': {'avg_goals': 2.35, 'home_adv': 0.14, 'btts_rate': 0.43, 'over25_rate': 0.41, 'quality': 'high'},
-    'I1': {'avg_goals': 2.68, 'home_adv': 0.11, 'btts_rate': 0.52, 'over25_rate': 0.51, 'quality': 'elite'},
-    'I2': {'avg_goals': 2.45, 'home_adv': 0.12, 'btts_rate': 0.47, 'over25_rate': 0.44, 'quality': 'high'},
-    'D1': {'avg_goals': 3.05, 'home_adv': 0.09, 'btts_rate': 0.58, 'over25_rate': 0.60, 'quality': 'elite'},
-    'D2': {'avg_goals': 2.85, 'home_adv': 0.10, 'btts_rate': 0.55, 'over25_rate': 0.56, 'quality': 'high'},
-    'F1': {'avg_goals': 2.55, 'home_adv': 0.13, 'btts_rate': 0.48, 'over25_rate': 0.47, 'quality': 'elite'},
-    'F2': {'avg_goals': 2.42, 'home_adv': 0.12, 'btts_rate': 0.45, 'over25_rate': 0.43, 'quality': 'high'},
-    'N1': {'avg_goals': 2.95, 'home_adv': 0.08, 'btts_rate': 0.60, 'over25_rate': 0.59, 'quality': 'high'},
-    'B1': {'avg_goals': 2.78, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.53, 'quality': 'high'},
-    'P1': {'avg_goals': 2.52, 'home_adv': 0.16, 'btts_rate': 0.47, 'over25_rate': 0.46, 'quality': 'high'},
-    'SC0': {'avg_goals': 2.65, 'home_adv': 0.11, 'btts_rate': 0.51, 'over25_rate': 0.50, 'quality': 'high'},
-    'SC1': {'avg_goals': 2.58, 'home_adv': 0.13, 'btts_rate': 0.49, 'over25_rate': 0.48, 'quality': 'medium'},
-    'T1': {'avg_goals': 3.10, 'home_adv': 0.14, 'btts_rate': 0.59, 'over25_rate': 0.61, 'quality': 'elite'},
+    # England
+    'E0': {'avg_goals': 2.72, 'home_adv': 0.12, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'elite', 'style': 'balanced'},
+    'E1': {'avg_goals': 2.65, 'home_adv': 0.10, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
+    'E2': {'avg_goals': 2.58, 'home_adv': 0.11, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
+    'E3': {'avg_goals': 2.61, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+    'EC': {'avg_goals': 2.65, 'home_adv': 0.12, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'medium', 'style': 'balanced'},
+
+    # Spain (more defensive, tactical)
+    'SP1': {'avg_goals': 2.48, 'home_adv': 0.15, 'btts_rate': 0.46, 'over25_rate': 0.45, 'over15_rate': 0.70, 'over35_rate': 0.20, 'over45_rate': 0.07, 'clean_sheet_rate': 0.54, 'quality': 'elite', 'style': 'defensive'},
+    'SP2': {'avg_goals': 2.35, 'home_adv': 0.14, 'btts_rate': 0.43, 'over25_rate': 0.41, 'over15_rate': 0.67, 'over35_rate': 0.17, 'over45_rate': 0.06, 'clean_sheet_rate': 0.57, 'quality': 'high', 'style': 'defensive'},
+
+    # Italy (tactically aware, balanced)
+    'I1': {'avg_goals': 2.68, 'home_adv': 0.11, 'btts_rate': 0.52, 'over25_rate': 0.51, 'over15_rate': 0.77, 'over35_rate': 0.27, 'over45_rate': 0.11, 'clean_sheet_rate': 0.48, 'quality': 'elite', 'style': 'balanced'},
+    'I2': {'avg_goals': 2.45, 'home_adv': 0.12, 'btts_rate': 0.47, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
+
+    # Germany (high scoring, end-to-end)
+    'D1': {'avg_goals': 3.05, 'home_adv': 0.09, 'btts_rate': 0.58, 'over25_rate': 0.60, 'over15_rate': 0.85, 'over35_rate': 0.35, 'over45_rate': 0.18, 'clean_sheet_rate': 0.42, 'quality': 'elite', 'style': 'attacking'},
+    'D2': {'avg_goals': 2.85, 'home_adv': 0.10, 'btts_rate': 0.55, 'over25_rate': 0.56, 'over15_rate': 0.82, 'over35_rate': 0.32, 'over45_rate': 0.15, 'clean_sheet_rate': 0.45, 'quality': 'high', 'style': 'attacking'},
+
+    # France (physical, moderate scoring)
+    'F1': {'avg_goals': 2.55, 'home_adv': 0.13, 'btts_rate': 0.48, 'over25_rate': 0.47, 'over15_rate': 0.73, 'over35_rate': 0.23, 'over45_rate': 0.09, 'clean_sheet_rate': 0.52, 'quality': 'elite', 'style': 'balanced'},
+    'F2': {'avg_goals': 2.42, 'home_adv': 0.12, 'btts_rate': 0.45, 'over25_rate': 0.43, 'over15_rate': 0.68, 'over35_rate': 0.18, 'over45_rate': 0.06, 'clean_sheet_rate': 0.55, 'quality': 'high', 'style': 'defensive'},
+
+    # Netherlands (attacking football culture)
+    'N1': {'avg_goals': 2.95, 'home_adv': 0.08, 'btts_rate': 0.60, 'over25_rate': 0.59, 'over15_rate': 0.84, 'over35_rate': 0.34, 'over45_rate': 0.16, 'clean_sheet_rate': 0.40, 'quality': 'high', 'style': 'attacking'},
+
+    # Belgium (high scoring, open games)
+    'B1': {'avg_goals': 2.78, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.53, 'over15_rate': 0.79, 'over35_rate': 0.29, 'over45_rate': 0.13, 'clean_sheet_rate': 0.46, 'quality': 'high', 'style': 'balanced'},
+
+    # Portugal (tactical, strong home advantage)
+    'P1': {'avg_goals': 2.52, 'home_adv': 0.16, 'btts_rate': 0.47, 'over25_rate': 0.46, 'over15_rate': 0.72, 'over35_rate': 0.22, 'over45_rate': 0.08, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
+
+    # Scotland
+    'SC0': {'avg_goals': 2.65, 'home_adv': 0.11, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
+    'SC1': {'avg_goals': 2.58, 'home_adv': 0.13, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
+
+    # Turkey (high scoring, volatile)
+    'T1': {'avg_goals': 3.10, 'home_adv': 0.14, 'btts_rate': 0.59, 'over25_rate': 0.61, 'over15_rate': 0.86, 'over35_rate': 0.36, 'over45_rate': 0.19, 'clean_sheet_rate': 0.41, 'quality': 'elite', 'style': 'attacking'},
+
+    # Greece
+    'G1': {'avg_goals': 2.35, 'home_adv': 0.18, 'btts_rate': 0.42, 'over25_rate': 0.40, 'over15_rate': 0.66, 'over35_rate': 0.16, 'over45_rate': 0.05, 'clean_sheet_rate': 0.58, 'quality': 'medium', 'style': 'defensive'},
+
+    # Austria
+    'A1': {'avg_goals': 2.92, 'home_adv': 0.10, 'btts_rate': 0.56, 'over25_rate': 0.58, 'over15_rate': 0.83, 'over35_rate': 0.33, 'over45_rate': 0.15, 'clean_sheet_rate': 0.44, 'quality': 'medium', 'style': 'attacking'},
+
+    # Switzerland
+    'SWZ': {'avg_goals': 2.75, 'home_adv': 0.09, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'medium', 'style': 'balanced'},
+
+    # Poland
+    'POL': {'avg_goals': 2.62, 'home_adv': 0.12, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+
+    # Russia
+    'RUS': {'avg_goals': 2.45, 'home_adv': 0.14, 'btts_rate': 0.46, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'clean_sheet_rate': 0.54, 'quality': 'medium', 'style': 'defensive'},
 }
 
 def _load_base_features() -> pd.DataFrame:
@@ -85,47 +121,75 @@ def calculate_league_profiles(df: pd.DataFrame) -> Dict:
     return profiles
 
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
-    """Calibrate probability based on league-specific patterns"""
+    """Calibrate probability based on league-specific patterns and style."""
     if league not in league_profiles:
         return prob
-    
+
     profile = league_profiles[league]
-    
+    style = profile.get('style', 'balanced')
+
     # Stronger calibration for lower confidence predictions
     confidence = abs(prob - 0.5) * 2  # 0 to 1 scale
     calibration_weight = 0.3 * (1 - confidence)  # More calibration when less confident
-    
+
+    # Style-based adjustments
+    style_boost = {'attacking': 0.08, 'balanced': 0.0, 'defensive': -0.08}
+    goal_style_adj = style_boost.get(style, 0.0)
+
     if 'BTTS_Y' in market:
         league_avg = profile.get('btts_rate', 0.5)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        # Attacking leagues boost BTTS, defensive leagues reduce it
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.5))
+
+    elif 'BTTS_N' in market:
+        league_avg = 1 - profile.get('btts_rate', 0.5)
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        # Defensive leagues boost BTTS_N
+        return max(0.01, min(0.99, calibrated - goal_style_adj * 0.5))
+
     elif 'OU_0_5_O' in market:
         return min(prob * 1.05, 0.99)  # Boost slightly (0.5 goals is very likely)
-    
+
     elif 'OU_1_5_O' in market:
         league_avg = profile.get('over15_rate', 0.7)
-        return prob * (1 - calibration_weight * 0.5) + league_avg * (calibration_weight * 0.5)
-    
+        calibrated = prob * (1 - calibration_weight * 0.5) + league_avg * (calibration_weight * 0.5)
+        return max(0.01, min(0.99, calibrated + goal_style_adj))
+
     elif 'OU_2_5_O' in market:
         league_avg = profile.get('over25_rate', 0.5)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        return max(0.01, min(0.99, calibrated + goal_style_adj))
+
     elif 'OU_3_5_O' in market:
         league_avg = profile.get('over35_rate', 0.25)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.8))
+
     elif 'OU_4_5_O' in market:
         league_avg = profile.get('over45_rate', 0.15)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.6))
+
+    elif '_U' in market and 'OU_' in market:
+        # Under markets - inverse of style adjustment
+        return max(0.01, min(0.99, prob - goal_style_adj))
+
     elif '1X2_H' in market:
         home_adv = profile.get('home_adv', 0.1)
         return min(prob * (1 + home_adv * 0.25), 0.95)
-    
+
     elif '1X2_A' in market:
         home_adv = profile.get('home_adv', 0.1)
         return max(prob * (1 - home_adv * 0.25), 0.05)
-    
+
+    elif 'WTN' in market or 'CS_' in market or 'NoGoal' in market:
+        # Win to Nil, Clean Sheet markets - use clean_sheet_rate
+        clean_sheet_rate = profile.get('clean_sheet_rate', 0.47)
+        calibrated = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
+        # Defensive leagues boost clean sheet probability
+        return max(0.01, min(0.99, calibrated - goal_style_adj * 0.5))
+
     return prob
 
 def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
