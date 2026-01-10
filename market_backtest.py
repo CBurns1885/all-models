@@ -198,11 +198,11 @@ MARKET_CONFIGS = {
 class MarketBacktester:
     """Analyze all markets using walk-forward backtest on historical data"""
 
-    def __init__(self, weeks: int = 4, min_confidence: float = 0.60, use_historical: bool = True):
+    def __init__(self, weeks: int = 4, min_confidence: float = 0.65, use_historical: bool = True):
         """
         Args:
             weeks: Number of weeks to analyze
-            min_confidence: Minimum confidence threshold (default 60%)
+            min_confidence: Minimum confidence threshold (default 65%)
             use_historical: If True, run walk-forward backtest on historical data
                           If False, analyze recent predictions (for live tracking)
         """
@@ -233,7 +233,7 @@ class MarketBacktester:
         return combined
 
     def load_actual_results(self, start_date=None, end_date=None) -> pd.DataFrame:
-        """Load actual match results from API-Football database"""
+        """Load actual match results from API-Football database and calculate targets"""
         from api_football_adapter import get_fixtures_from_db
 
         # Get all completed matches from database
@@ -249,7 +249,70 @@ class MarketBacktester:
         if end_date:
             df = df[df['Date'] <= pd.to_datetime(end_date)]
 
+        # Calculate target columns from raw match data
+        df = self._calculate_target_columns(df)
+
         print(f"[OK] Loaded {len(df)} completed matches with results")
+        return df
+
+    def _calculate_target_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate all target columns (y_*) from raw match data"""
+        import numpy as np
+
+        # Total goals
+        total = df['FTHG'] + df['FTAG']
+
+        # 1X2 - already have FTR
+        df['y_1X2'] = df['FTR'].astype(str)
+
+        # BTTS
+        btts = (df['FTHG'] > 0) & (df['FTAG'] > 0)
+        df['y_BTTS'] = np.where(btts, 'Y', 'N')
+
+        # Over/Under lines
+        for line in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
+            line_str = str(line).replace('.', '_')
+            df[f'y_OU_{line_str}'] = np.where(total > line, 'O', 'U')
+
+        # Double Chance
+        df['y_DC_1X'] = np.where(df['FTR'].isin(['H', 'D']), 'Y', 'N')
+        df['y_DC_12'] = np.where(df['FTR'].isin(['H', 'A']), 'Y', 'N')
+        df['y_DC_X2'] = np.where(df['FTR'].isin(['D', 'A']), 'Y', 'N')
+
+        # Draw No Bet
+        df['y_DNB_H'] = np.where(df['FTR'] == 'H', 'Y', np.where(df['FTR'] == 'D', 'P', 'N'))
+        df['y_DNB_A'] = np.where(df['FTR'] == 'A', 'Y', np.where(df['FTR'] == 'D', 'P', 'N'))
+
+        # Team to Score
+        df['y_HomeToScore'] = np.where(df['FTHG'] > 0, 'Y', 'N')
+        df['y_AwayToScore'] = np.where(df['FTAG'] > 0, 'Y', 'N')
+
+        # Home Team Goals O/U
+        df['y_HomeTG_0_5'] = np.where(df['FTHG'] > 0.5, 'O', 'U')
+        df['y_HomeTG_1_5'] = np.where(df['FTHG'] > 1.5, 'O', 'U')
+
+        # Away Team Goals O/U
+        df['y_AwayTG_0_5'] = np.where(df['FTAG'] > 0.5, 'O', 'U')
+        df['y_AwayTG_1_5'] = np.where(df['FTAG'] > 1.5, 'O', 'U')
+
+        # Asian Handicap (simplified - just goal difference)
+        goal_diff = df['FTHG'] - df['FTAG']
+        df['y_AH_-0_5'] = np.where(goal_diff > 0.5, 'H', np.where(goal_diff < -0.5, 'A', 'P'))
+        df['y_AH_+0_5'] = np.where(goal_diff > -0.5, 'H', np.where(goal_diff < 0.5, 'A', 'P'))
+        df['y_AH_-1_0'] = np.where(goal_diff > 1, 'H', np.where(goal_diff < -1, 'A', 'P'))
+        df['y_AH_+1_0'] = np.where(goal_diff > -1, 'H', np.where(goal_diff < 1, 'A', 'P'))
+        df['y_AH_0_0'] = np.where(goal_diff > 0, 'H', np.where(goal_diff < 0, 'A', 'P'))
+
+        # Result + BTTS Combinations
+        df['y_HomeWin_BTTS_Y'] = np.where((df['FTR'] == 'H') & btts, 'Y', 'N')
+        df['y_AwayWin_BTTS_Y'] = np.where((df['FTR'] == 'A') & btts, 'Y', 'N')
+        df['y_HomeWin_BTTS_N'] = np.where((df['FTR'] == 'H') & ~btts, 'Y', 'N')
+        df['y_AwayWin_BTTS_N'] = np.where((df['FTR'] == 'A') & ~btts, 'Y', 'N')
+
+        # DC + O/U Combinations
+        df['y_DC1X_O25'] = np.where((df['FTR'].isin(['H', 'D'])) & (total > 2.5), 'Y', 'N')
+        df['y_DCX2_O25'] = np.where((df['FTR'].isin(['D', 'A'])) & (total > 2.5), 'Y', 'N')
+
         return df
 
     def run_historical_backtest(self) -> pd.DataFrame:
@@ -352,48 +415,59 @@ class MarketBacktester:
 
     def generate_historical_predictions(self, test_matches: pd.DataFrame) -> pd.DataFrame:
         """
-        Generate predictions for historical matches using the current models
+        Generate predictions for historical matches using trained models
 
         Args:
-            test_matches: DataFrame of historical matches to predict
+            test_matches: DataFrame of historical matches we want to evaluate
 
         Returns:
-            DataFrame with predictions (P_ columns) for each match
+            DataFrame with predictions (P_ columns) for the test matches
         """
-        from predict import predict_week
         import tempfile
+        import os
+        from predict import predict_week
+        from config import OUTPUT_DIR
 
         # Create temporary fixtures file from historical matches
-        fixtures = test_matches[['Date', 'League', 'HomeTeam', 'AwayTeam']].copy()
+        # This is the format that predict_week expects
+        temp_fixtures = test_matches[['Date', 'League', 'HomeTeam', 'AwayTeam']].copy()
 
-        # Create temp file
+        # Add Time column if it doesn't exist (set to default 15:00 for historical matches)
+        if 'Time' not in temp_fixtures.columns:
+            temp_fixtures['Time'] = '15:00'
+
+        # Create temporary file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False, newline='') as f:
-            temp_fixtures_path = Path(f.name)
+            temp_path = f.name
 
-        # Write CSV after file is closed
-        fixtures.to_csv(temp_fixtures_path, index=False)
+        # Write to CSV
+        temp_fixtures.to_csv(temp_path, index=False)
+        print(f"  Created temporary fixtures file with {len(temp_fixtures)} matches")
 
         try:
-            # Generate predictions using current models
-            print(f"  Running prediction pipeline on {len(fixtures)} historical matches...")
-            predict_week(temp_fixtures_path)
+            # Generate predictions using the trained models
+            print(f"  Generating predictions using trained models...")
+            predict_week(temp_path)
 
-            # Load generated predictions
-            from config import OUTPUT_DIR
-            predictions_file = OUTPUT_DIR / "weekly_bets.csv"
+            # Load the generated predictions
+            predictions_file = OUTPUT_DIR / "weekly_bets_full.csv"
+            if not predictions_file.exists():
+                predictions_file = OUTPUT_DIR / "weekly_bets.csv"
 
-            if predictions_file.exists():
-                predictions = pd.read_csv(predictions_file)
-                predictions['Date'] = pd.to_datetime(predictions['Date'])
-                return predictions
-            else:
-                print(f"  [WARN] Predictions file not found at {predictions_file}")
+            if not predictions_file.exists():
+                print(f"  [ERROR] Predictions not generated at {OUTPUT_DIR}")
                 return None
 
+            predictions = pd.read_csv(predictions_file)
+            predictions['Date'] = pd.to_datetime(predictions['Date'])
+
+            print(f"  [OK] Generated predictions for {len(predictions)} matches")
+            return predictions
+
         finally:
-            # Cleanup temp file
-            if temp_fixtures_path.exists():
-                temp_fixtures_path.unlink()
+            # Clean up temporary file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     def merge_predictions_with_results(self,
                                        predictions: pd.DataFrame,
@@ -874,7 +948,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Multi-Market Backtest Analysis')
     parser.add_argument('--weeks', type=int, default=4, help='Number of weeks to analyze (default: 4)')
-    parser.add_argument('--min-confidence', type=float, default=0.60, help='Minimum confidence threshold 0.0-1.0 (default: 0.60)')
+    parser.add_argument('--min-confidence', type=float, default=0.65, help='Minimum confidence threshold 0.0-1.0 (default: 0.65)')
     parser.add_argument('--no-historical', action='store_true', help='Use recent predictions instead of historical backtest')
     args = parser.parse_args()
 

@@ -42,9 +42,12 @@ except Exception:
 
 try:
     import lightgbm as lgb
-    # Silence LightGBM warnings about splits
-    lgb.set_option('verbosity', -1)
     _HAS_LGB = True
+    # Try to silence warnings (may not work in all versions)
+    try:
+        lgb.set_option('verbosity', -1)
+    except:
+        pass
 except Exception:
     _HAS_LGB = False
 
@@ -987,7 +990,7 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 base_names.append("bnn")
 
         speed_mode = get_speed_mode()
-        print(f"  ⚡ Speed mode: {speed_mode.value} -> Models: {base_names}")
+        print(f"  [SPEED] Speed mode: {speed_mode.value} -> Models: {base_names}")
 
         # Initialize strategy as None when using speed config
         strategy = None
@@ -1005,8 +1008,12 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         model_params = {}
 
     # Determine base learners based on strategy and availability
+    # ONLY if speed_config didn't already set it
     if os.environ.get("MODELS_ONLY") == "rf":
         base_names = ["rf"]  # Ultra fast mode
+    elif _HAS_SPEED_CONFIG and len(base_names) > 0:
+        # Speed config already set base_names, don't override
+        pass
     elif strategy == ModelStrategy.LIGHTWEIGHT if _HAS_MARKET_CONFIG else False:
         base_names = ["rf", "lr"]
         print(f"  [FAST] Using LIGHTWEIGHT models (RF + LR)")
@@ -1027,13 +1034,14 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         base_names = ["rf"]  # DC will do heavy lifting
         print(f"  📐 Using POISSON-BASED approach (DC dominant)")
     else:
-        # Full ensemble for FULL_ENSEMBLE or HYBRID strategies
-        base_names = ["rf", "et", "lr"]
-        if _HAS_XGB: base_names.append("xgb")
-        if _HAS_LGB: base_names.append("lgb")
-        if _HAS_CAT: base_names.append("cat")
-        if _HAS_TORCH: base_names.append("bnn")
-        print(f"  [TARGET] Using FULL ENSEMBLE models")
+        # Full ensemble for FULL_ENSEMBLE or HYBRID strategies (only if not already set)
+        if not (_HAS_SPEED_CONFIG and len(base_names) > 0):
+            base_names = ["rf", "et", "lr"]
+            if _HAS_XGB: base_names.append("xgb")
+            if _HAS_LGB: base_names.append("lgb")
+            if _HAS_CAT: base_names.append("cat")
+            if _HAS_TORCH: base_names.append("bnn")
+            print(f"  [TARGET] Using FULL ENSEMBLE models")
 
     # Add specialized models to ensemble (not replacing!)
     base_models: Dict[str, object] = {}
@@ -1252,11 +1260,11 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
         targets = [t for t in all_targets if should_train_market(t)]
         skipped = len(all_targets) - len(targets)
         if skipped > 0:
-            print(f"⚡ Skipping {skipped} low-priority markets in current speed mode")
+            print(f"[SPEED] Skipping {skipped} low-priority markets in current speed mode")
     else:
         targets = all_targets
 
-    print(f"📊 Training {len(targets)} markets")
+    print(f"[TRAINING] Training {len(targets)} markets")
     start_time = time.time()
 
     for i, t in enumerate(targets, 1):
