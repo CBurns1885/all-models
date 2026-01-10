@@ -311,28 +311,58 @@ class AccuracyTracker:
         return df
     
     def export_accuracy_report(self, output_path: Path = Path("outputs/accuracy_report.csv")):
-        """Export detailed accuracy report"""
+        """Export detailed accuracy report with confidence buckets"""
         conn = sqlite3.connect(self.db_path)
-        
+
+        # Get all predictions with results
         df = pd.read_sql_query("""
-            SELECT 
-                week_id,
+            SELECT
                 league,
                 market,
-                total_predictions,
-                correct_predictions,
-                accuracy,
-                brier_score,
-                profit_loss
-            FROM weekly_accuracy
-            ORDER BY week_id DESC, accuracy DESC
+                predicted_probability,
+                correct
+            FROM predictions
+            WHERE correct IS NOT NULL
         """, conn)
-        
+
         conn.close()
-        
-        df.to_csv(output_path, index=False)
-        print(f"[OK] Exported accuracy report: {output_path}")
-        return df
+
+        if df.empty:
+            print("[WARN] No completed predictions to report")
+            return pd.DataFrame()
+
+        # Create confidence buckets (60%, 65%, 70%, ..., 100%)
+        buckets = list(range(60, 105, 5))  # [60, 65, 70, 75, 80, 85, 90, 95, 100]
+        bucket_labels = [f"{b}%-{b+4}%" for b in buckets[:-1]] + ["100%"]
+
+        # Assign each prediction to a bucket
+        df['confidence_bucket'] = pd.cut(
+            df['predicted_probability'] * 100,
+            bins=[0] + buckets,
+            labels=['<60%'] + bucket_labels,
+            include_lowest=True
+        )
+
+        # Group by league, market, and confidence bucket
+        report = df.groupby(['league', 'market', 'confidence_bucket']).agg({
+            'correct': ['sum', 'count']
+        }).reset_index()
+
+        report.columns = ['League', 'Market', 'Confidence', 'Correct', 'Total']
+        report['Accuracy'] = (report['Correct'] / report['Total'] * 100).round(1)
+
+        # Filter to only show buckets >= 60%
+        report = report[report['Confidence'] != '<60%'].copy()
+
+        # Sort by league, market, and confidence
+        report = report.sort_values(['League', 'Market', 'Confidence'])
+
+        # Save to CSV
+        report.to_csv(output_path, index=False)
+        print(f"[OK] Exported detailed accuracy report: {output_path}")
+        print(f"    {len(report)} league/market/confidence combinations")
+
+        return report
 
 
 # ============================================================================
