@@ -86,6 +86,53 @@ LEAGUE_PROFILES = {
 
     # Russia
     'RUS': {'avg_goals': 2.45, 'home_adv': 0.14, 'btts_rate': 0.46, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'clean_sheet_rate': 0.54, 'quality': 'medium', 'style': 'defensive'},
+
+    # ========== DOMESTIC CUPS (knockout - more unpredictable) ==========
+    # FA Cup (England) - giant killings common, high scoring
+    'FAC': {'avg_goals': 2.85, 'home_adv': 0.08, 'btts_rate': 0.54, 'over25_rate': 0.55, 'over15_rate': 0.80, 'over35_rate': 0.30, 'over45_rate': 0.14, 'clean_sheet_rate': 0.46, 'quality': 'high', 'style': 'attacking', 'is_cup': True},
+
+    # DFB Pokal (Germany) - similar to Bundesliga style
+    'DFB': {'avg_goals': 3.15, 'home_adv': 0.06, 'btts_rate': 0.59, 'over25_rate': 0.62, 'over15_rate': 0.86, 'over35_rate': 0.38, 'over45_rate': 0.20, 'clean_sheet_rate': 0.41, 'quality': 'high', 'style': 'attacking', 'is_cup': True},
+
+    # Copa del Rey (Spain) - tactical but with upsets
+    'CDR': {'avg_goals': 2.55, 'home_adv': 0.10, 'btts_rate': 0.48, 'over25_rate': 0.48, 'over15_rate': 0.73, 'over35_rate': 0.23, 'over45_rate': 0.09, 'clean_sheet_rate': 0.52, 'quality': 'high', 'style': 'balanced', 'is_cup': True},
+
+    # Coppa Italia (Italy) - conservative approach in cups
+    'CIT': {'avg_goals': 2.58, 'home_adv': 0.09, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'high', 'style': 'balanced', 'is_cup': True},
+
+    # Coupe de France (France) - amateur teams cause upsets
+    'CDF': {'avg_goals': 2.72, 'home_adv': 0.07, 'btts_rate': 0.51, 'over25_rate': 0.52, 'over15_rate': 0.77, 'over35_rate': 0.27, 'over45_rate': 0.11, 'clean_sheet_rate': 0.49, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+
+    # KNVB Beker (Netherlands) - Dutch attacking style
+    'KNVB': {'avg_goals': 3.05, 'home_adv': 0.06, 'btts_rate': 0.61, 'over25_rate': 0.61, 'over15_rate': 0.85, 'over35_rate': 0.36, 'over45_rate': 0.18, 'clean_sheet_rate': 0.39, 'quality': 'medium', 'style': 'attacking', 'is_cup': True},
+
+    # Belgian Cup
+    'BEC': {'avg_goals': 2.88, 'home_adv': 0.08, 'btts_rate': 0.55, 'over25_rate': 0.56, 'over15_rate': 0.81, 'over35_rate': 0.31, 'over45_rate': 0.14, 'clean_sheet_rate': 0.45, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+
+    # Taça de Portugal
+    'TCP': {'avg_goals': 2.68, 'home_adv': 0.12, 'btts_rate': 0.49, 'over25_rate': 0.50, 'over15_rate': 0.75, 'over35_rate': 0.26, 'over45_rate': 0.11, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+
+    # Scottish FA Cup
+    'SFC': {'avg_goals': 2.78, 'home_adv': 0.08, 'btts_rate': 0.52, 'over25_rate': 0.53, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.48, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+
+    # Turkish Cup
+    'TFC': {'avg_goals': 3.18, 'home_adv': 0.10, 'btts_rate': 0.60, 'over25_rate': 0.63, 'over15_rate': 0.87, 'over35_rate': 0.38, 'over45_rate': 0.21, 'clean_sheet_rate': 0.40, 'quality': 'medium', 'style': 'attacking', 'is_cup': True},
+
+    # ========== ADDITIONAL EUROPEAN LEAGUES ==========
+    # Denmark Superliga
+    'DEN': {'avg_goals': 2.82, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.55, 'over15_rate': 0.80, 'over35_rate': 0.30, 'over45_rate': 0.13, 'clean_sheet_rate': 0.46, 'quality': 'medium', 'style': 'attacking'},
+
+    # Norway Eliteserien
+    'NOR': {'avg_goals': 2.95, 'home_adv': 0.12, 'btts_rate': 0.57, 'over25_rate': 0.58, 'over15_rate': 0.83, 'over35_rate': 0.33, 'over45_rate': 0.16, 'clean_sheet_rate': 0.43, 'quality': 'medium', 'style': 'attacking'},
+
+    # Sweden Allsvenskan
+    'SWE': {'avg_goals': 2.78, 'home_adv': 0.11, 'btts_rate': 0.53, 'over25_rate': 0.53, 'over15_rate': 0.79, 'over35_rate': 0.29, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'medium', 'style': 'balanced'},
+
+    # Czech First League
+    'CZE': {'avg_goals': 2.65, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+
+    # Croatia HNL
+    'CRO': {'avg_goals': 2.72, 'home_adv': 0.14, 'btts_rate': 0.52, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.48, 'quality': 'medium', 'style': 'balanced'},
 }
 
 def _load_base_features() -> pd.DataFrame:

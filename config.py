@@ -34,26 +34,67 @@ API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
 # League ID Mapping (football-data.co.uk code -> API-Football ID)
 API_LEAGUE_MAP = {
+    # ENGLAND
     'E0': 39,   # Premier League
     'E1': 40,   # Championship
     'E2': 41,   # League One
     'E3': 42,   # League Two
-    'EC': 48,   # EFL Cup
+    'EC': 48,   # EFL Cup (League Cup)
+    'FAC': 45,  # FA Cup
+
+    # GERMANY
     'D1': 78,   # Bundesliga
     'D2': 79,   # 2. Bundesliga
+    'DFB': 81,  # DFB Pokal
+
+    # SPAIN
     'SP1': 140, # La Liga
     'SP2': 141, # La Liga 2
+    'CDR': 143, # Copa del Rey
+
+    # ITALY
     'I1': 135,  # Serie A
     'I2': 136,  # Serie B
+    'CIT': 137, # Coppa Italia
+
+    # FRANCE
     'F1': 61,   # Ligue 1
     'F2': 62,   # Ligue 2
+    'CDF': 66,  # Coupe de France
+
+    # NETHERLANDS
     'N1': 88,   # Eredivisie
+    'KNVB': 90, # KNVB Beker (Dutch Cup)
+
+    # BELGIUM
     'B1': 144,  # Jupiler Pro League
+    'BEC': 147, # Belgian Cup
+
+    # PORTUGAL
     'P1': 94,   # Primeira Liga
+    'TCP': 96,  # Taça de Portugal
+
+    # SCOTLAND
     'SC0': 179, # Scottish Premiership
     'SC1': 180, # Scottish Championship
+    'SFC': 70,  # Scottish FA Cup
+
+    # TURKEY
     'T1': 203,  # Süper Lig
-    # European competitions
+    'TFC': 206, # Turkish Cup
+
+    # ADDITIONAL LEAGUES
+    'G1': 197,  # Greece Super League
+    'A1': 218,  # Austria Bundesliga
+    'SWZ': 207, # Switzerland Super League
+    'POL': 106, # Poland Ekstraklasa
+    'DEN': 119, # Denmark Superliga
+    'NOR': 103, # Norway Eliteserien
+    'SWE': 113, # Sweden Allsvenskan
+    'CZE': 345, # Czech First League
+    'CRO': 210, # Croatia HNL
+
+    # EUROPEAN COMPETITIONS
     'UCL': 2,   # Champions League
     'UEL': 3,   # Europa League
     'UECL': 848,# Conference League
@@ -98,16 +139,35 @@ def get_current_season() -> int:
 
 # --- Coverage ---
 LEAGUE_CODES = [
-    "E0", "E1", "E2", "E3", "EC",
-    "D1", "D2", 
-    "SP1", "SP2",
-    "I1", "I2",
-    "F1", "F2", 
-    "N1", "B1", "P1", "SC0", "SC1", "T1",
+    # England (leagues + cups)
+    "E0", "E1", "E2", "E3", "EC", "FAC",
+    # Germany (leagues + cup)
+    "D1", "D2", "DFB",
+    # Spain (leagues + cup)
+    "SP1", "SP2", "CDR",
+    # Italy (leagues + cup)
+    "I1", "I2", "CIT",
+    # France (leagues + cup)
+    "F1", "F2", "CDF",
+    # Netherlands (league + cup)
+    "N1", "KNVB",
+    # Belgium (league + cup)
+    "B1", "BEC",
+    # Portugal (league + cup)
+    "P1", "TCP",
+    # Scotland (leagues + cup)
+    "SC0", "SC1", "SFC",
+    # Turkey (league + cup)
+    "T1", "TFC",
+    # Additional leagues
+    "G1", "A1", "SWZ", "POL", "DEN", "NOR", "SWE", "CZE", "CRO",
 ]
 
 # Priority leagues (better data quality, higher volume)
 PRIORITY_LEAGUES = ["E0", "E1", "D1", "SP1", "I1", "F1"]
+
+# Domestic cups (knockout tournaments - different prediction dynamics)
+DOMESTIC_CUPS = ["EC", "FAC", "DFB", "CDR", "CIT", "CDF", "KNVB", "BEC", "TCP", "SFC", "TFC"]
 
 # --- Data sources ---
 FOOTBALL_DATA_CSV_BASE = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"

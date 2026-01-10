@@ -88,12 +88,28 @@ TRAINING_START_YEAR = 2023  # More recent data = better accuracy
 NON_INTERACTIVE = args.non_interactive
 
 DEFAULT_LEAGUES = [
-    "E0", "E1", "E2", "E3", "EC",  # England
-    "D1", "D2",                     # Germany
-    "SP1", "SP2",                   # Spain
-    "I1", "I2",                     # Italy
-    "F1", "F2",                     # France
-    "N1", "B1", "P1", "SC0", "T1"  # Other
+    # England (leagues + cups)
+    "E0", "E1", "E2", "E3", "EC", "FAC",
+    # Germany (leagues + cup)
+    "D1", "D2", "DFB",
+    # Spain (leagues + cup)
+    "SP1", "SP2", "CDR",
+    # Italy (leagues + cup)
+    "I1", "I2", "CIT",
+    # France (leagues + cup)
+    "F1", "F2", "CDF",
+    # Netherlands (league + cup)
+    "N1", "KNVB",
+    # Belgium (league + cup)
+    "B1", "BEC",
+    # Portugal (league + cup)
+    "P1", "TCP",
+    # Scotland (leagues + cup)
+    "SC0", "SC1", "SFC",
+    # Turkey (league + cup)
+    "T1", "TFC",
+    # Additional European leagues
+    "G1", "A1", "SWZ", "POL", "DEN", "NOR", "SWE", "CZE", "CRO",
 ]
 
 # Import config after setting env vars
