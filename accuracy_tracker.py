@@ -387,12 +387,237 @@ def get_current_weights() -> Dict[str, float]:
     """Get current market weights for prediction weighting"""
     tracker = AccuracyTracker()
     weights_df = tracker.get_market_rankings()
-    
+
     if weights_df.empty:
         return {}
-    
+
     # Return as dictionary: market -> weight
     return dict(zip(weights_df['market'], weights_df['weight']))
+
+
+def generate_weekly_accuracy_report(week_id: Optional[str] = None, output_dir: Path = None):
+    """
+    Generate a detailed weekly accuracy report showing each prediction's result.
+
+    Args:
+        week_id: Week to report on (default: last week)
+        output_dir: Output directory for HTML report
+
+    Outputs:
+        - accuracy_report_<week>.html - Full HTML report
+        - accuracy_report_<week>.csv - CSV data
+    """
+    if output_dir is None:
+        output_dir = Path("outputs") / datetime.now().strftime("%Y-%m-%d")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tracker = AccuracyTracker()
+    conn = sqlite3.connect(tracker.db_path)
+
+    # Default to last week
+    if week_id is None:
+        last_week = datetime.now() - timedelta(days=7)
+        week_id = last_week.strftime('%Y-W%W')
+
+    print(f"\n📊 WEEKLY ACCURACY REPORT - {week_id}")
+    print("=" * 60)
+
+    # Get all predictions for the week with results
+    query = """
+        SELECT
+            match_date,
+            league,
+            home_team,
+            away_team,
+            market,
+            predicted_outcome,
+            predicted_probability,
+            actual_outcome,
+            correct
+        FROM predictions
+        WHERE week_id = ?
+        ORDER BY match_date, league, home_team
+    """
+
+    df = pd.read_sql_query(query, conn, params=(week_id,))
+
+    if df.empty:
+        print(f"No predictions found for week {week_id}")
+        conn.close()
+        return None
+
+    # Calculate summary stats
+    total = len(df)
+    with_results = df[df['actual_outcome'].notna()]
+    pending = len(df) - len(with_results)
+    correct = with_results['correct'].sum() if len(with_results) > 0 else 0
+    accuracy = (correct / len(with_results) * 100) if len(with_results) > 0 else 0
+
+    print(f"Total predictions: {total}")
+    print(f"With results: {len(with_results)}")
+    print(f"Pending: {pending}")
+    print(f"Correct: {int(correct)}")
+    print(f"Accuracy: {accuracy:.1f}%")
+
+    # Accuracy by market type
+    if len(with_results) > 0:
+        print("\n📈 ACCURACY BY MARKET:")
+        market_stats = with_results.groupby('market').agg({
+            'correct': ['sum', 'count'],
+            'predicted_probability': 'mean'
+        }).round(3)
+        market_stats.columns = ['Correct', 'Total', 'Avg Prob']
+        market_stats['Accuracy'] = (market_stats['Correct'] / market_stats['Total'] * 100).round(1)
+        market_stats = market_stats.sort_values('Accuracy', ascending=False)
+        print(market_stats.to_string())
+
+        print("\n🏆 ACCURACY BY LEAGUE:")
+        league_stats = with_results.groupby('league').agg({
+            'correct': ['sum', 'count']
+        }).round(3)
+        league_stats.columns = ['Correct', 'Total']
+        league_stats['Accuracy'] = (league_stats['Correct'] / league_stats['Total'] * 100).round(1)
+        league_stats = league_stats.sort_values('Accuracy', ascending=False)
+        print(league_stats.to_string())
+    else:
+        market_stats = pd.DataFrame()
+        league_stats = pd.DataFrame()
+
+    # Generate HTML report
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset='utf-8'>
+    <title>Weekly Accuracy Report - {week_id}</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial; padding: 20px; background: #f5f5f5; }}
+        .container {{ max-width: 1400px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+        h1 {{ color: #667eea; margin-bottom: 5px; }}
+        .subtitle {{ color: #666; margin-bottom: 30px; }}
+        .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 30px; }}
+        .stat-box {{ background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 20px; border-radius: 10px; text-align: center; }}
+        .stat-box .number {{ font-size: 2em; font-weight: bold; }}
+        .stat-box .label {{ font-size: 0.9em; opacity: 0.9; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
+        th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #eee; }}
+        th {{ background: #f8f9fa; color: #667eea; font-weight: 600; position: sticky; top: 0; }}
+        .correct {{ background: #d4edda; }}
+        .incorrect {{ background: #f8d7da; }}
+        .pending {{ background: #fff3cd; }}
+        .prob {{ font-weight: bold; }}
+        .market-summary {{ margin: 20px 0; padding: 15px; background: #f8f9fa; border-radius: 8px; }}
+        .market-summary h3 {{ margin-top: 0; color: #667eea; }}
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <h1>📊 Weekly Accuracy Report</h1>
+        <p class='subtitle'>Week: {week_id} | Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+
+        <div class='stats'>
+            <div class='stat-box'>
+                <div class='number'>{total}</div>
+                <div class='label'>Total Predictions</div>
+            </div>
+            <div class='stat-box'>
+                <div class='number'>{int(correct)}</div>
+                <div class='label'>Correct</div>
+            </div>
+            <div class='stat-box'>
+                <div class='number'>{accuracy:.1f}%</div>
+                <div class='label'>Accuracy</div>
+            </div>
+            <div class='stat-box'>
+                <div class='number'>{pending}</div>
+                <div class='label'>Pending</div>
+            </div>
+        </div>
+"""
+
+    if not market_stats.empty:
+        html += """
+        <div class='market-summary'>
+            <h3>📈 Accuracy by Market</h3>
+            <table>
+                <tr><th>Market</th><th>Correct</th><th>Total</th><th>Accuracy</th><th>Avg Prob</th></tr>
+"""
+        for market, row in market_stats.iterrows():
+            acc_class = 'correct' if row['Accuracy'] >= 60 else ('incorrect' if row['Accuracy'] < 50 else '')
+            html += f"<tr class='{acc_class}'><td><strong>{market}</strong></td><td>{int(row['Correct'])}</td><td>{int(row['Total'])}</td><td>{row['Accuracy']:.1f}%</td><td>{row['Avg Prob']:.1%}</td></tr>"
+        html += "</table></div>"
+
+    if not league_stats.empty:
+        html += """
+        <div class='market-summary'>
+            <h3>🏆 Accuracy by League</h3>
+            <table>
+                <tr><th>League</th><th>Correct</th><th>Total</th><th>Accuracy</th></tr>
+"""
+        for league, row in league_stats.iterrows():
+            acc_class = 'correct' if row['Accuracy'] >= 60 else ('incorrect' if row['Accuracy'] < 50 else '')
+            html += f"<tr class='{acc_class}'><td><strong>{league}</strong></td><td>{int(row['Correct'])}</td><td>{int(row['Total'])}</td><td>{row['Accuracy']:.1f}%</td></tr>"
+        html += "</table></div>"
+
+    html += """
+        <h3>📋 All Predictions (Line by Line)</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>League</th>
+                    <th>Match</th>
+                    <th>Market</th>
+                    <th>Prediction</th>
+                    <th>Probability</th>
+                    <th>Actual</th>
+                    <th>Result</th>
+                </tr>
+            </thead>
+            <tbody>
+"""
+
+    for _, row in df.iterrows():
+        if pd.isna(row['actual_outcome']):
+            result_class = 'pending'
+            result_text = '⏳ Pending'
+        elif row['correct'] == 1:
+            result_class = 'correct'
+            result_text = '✅ Correct'
+        else:
+            result_class = 'incorrect'
+            result_text = '❌ Wrong'
+
+        html += f"""
+                <tr class='{result_class}'>
+                    <td>{row['match_date']}</td>
+                    <td><strong>{row['league']}</strong></td>
+                    <td>{row['home_team']} vs {row['away_team']}</td>
+                    <td>{row['market']}</td>
+                    <td>{row['predicted_outcome']}</td>
+                    <td class='prob'>{row['predicted_probability']:.1%}</td>
+                    <td>{row['actual_outcome'] if pd.notna(row['actual_outcome']) else '-'}</td>
+                    <td>{result_text}</td>
+                </tr>"""
+
+    html += """
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>"""
+
+    # Save HTML
+    html_path = output_dir / f"accuracy_report_{week_id}.html"
+    html_path.write_text(html, encoding='utf-8')
+    print(f"\n✅ HTML report saved: {html_path}")
+
+    # Also save CSV
+    csv_path = output_dir / f"accuracy_report_{week_id}.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"✅ CSV report saved: {csv_path}")
+
+    conn.close()
+    return df
 
 
 # ============================================================================
@@ -400,18 +625,41 @@ def get_current_weights() -> Dict[str, float]:
 # ============================================================================
 
 if __name__ == "__main__":
+    import sys
+
     print("🎯 Accuracy Tracking System")
-    print("="*50)
-    
+    print("=" * 50)
+
     tracker = AccuracyTracker()
-    
-    print("\nCurrent Market Rankings:")
-    rankings = tracker.get_market_rankings()
-    
-    if not rankings.empty:
-        print(rankings.to_string(index=False))
+
+    # Check for command line arguments
+    if len(sys.argv) > 1:
+        cmd = sys.argv[1].lower()
+
+        if cmd == 'report':
+            # Generate weekly report
+            week_id = sys.argv[2] if len(sys.argv) > 2 else None
+            generate_weekly_accuracy_report(week_id)
+
+        elif cmd == 'rankings':
+            rankings = tracker.get_market_rankings()
+            if not rankings.empty:
+                print(rankings.to_string(index=False))
+            else:
+                print("No data yet")
+
+        else:
+            print(f"Unknown command: {cmd}")
     else:
-        print("No data yet - start logging predictions!")
-    
-    print("\n📊 Export report:")
-    tracker.export_accuracy_report()
+        print("\nUsage:")
+        print("  python accuracy_tracker.py report [week_id]  - Generate weekly accuracy report")
+        print("  python accuracy_tracker.py rankings          - Show market rankings")
+        print("\nCurrent Market Rankings:")
+        rankings = tracker.get_market_rankings()
+        if not rankings.empty:
+            print(rankings.to_string(index=False))
+        else:
+            print("No data yet - start logging predictions!")
+
+        print("\n📊 Export report:")
+        tracker.export_accuracy_report()
