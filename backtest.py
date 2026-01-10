@@ -125,7 +125,7 @@ class BacktestEngine:
             return success
             
         except Exception as e:
-            print(f"   ⚠️ Training failed: {e}")
+            print(f"   [WARN] Training failed: {e}")
             
             # Restore original features
             if backup_features.exists():
@@ -167,11 +167,11 @@ class BacktestEngine:
                 
                 return test_with_preds
             else:
-                print("   ⚠️ Predictions file not generated")
+                print("   [WARN] Predictions file not generated")
                 return test_df
                 
         except Exception as e:
-            print(f"   ⚠️ Prediction failed: {e}")
+            print(f"   [WARN] Prediction failed: {e}")
             temp_fixtures.unlink(missing_ok=True)
             return test_df
     
@@ -322,11 +322,11 @@ class BacktestEngine:
             
             # Check sufficient data
             if len(train_df) < self.min_training_matches:
-                print(f"   ⚠️ Insufficient training data ({len(train_df)} matches)")
+                print(f"   [WARN] Insufficient training data ({len(train_df)} matches)")
                 continue
             
             if len(test_df) == 0:
-                print(f"   ⚠️ No test matches")
+                print(f"   [WARN] No test matches")
                 continue
             
             print(f"   📊 Train: {len(train_df)} matches | Test: {len(test_df)} matches")
@@ -336,7 +336,7 @@ class BacktestEngine:
             success = self.train_models_on_period(train_df)
             
             if not success:
-                print(f"   ❌ Training failed")
+                print(f"   [ERROR] Training failed")
                 continue
             
             # Generate predictions
@@ -353,7 +353,7 @@ class BacktestEngine:
             # Print summary
             print(f"   📈 Results:")
             for market, stats in period_results.get('markets', {}).items():
-                print(f"      • {market}: {stats['accuracy']:.1%} ({stats['correct']}/{stats['total']})")
+                print(f"      * {market}: {stats['accuracy']:.1%} ({stats['correct']}/{stats['total']})")
         
         # Generate summary
         return self.generate_summary()
@@ -361,7 +361,7 @@ class BacktestEngine:
     def generate_summary(self) -> pd.DataFrame:
         """Aggregate results with league breakdowns and combo analysis"""
         if not self.results:
-            print("\n⚠️ No results to summarize")
+            print("\n[WARN] No results to summarize")
             return pd.DataFrame()
         
         print("\n" + "="*60)
@@ -419,17 +419,17 @@ class BacktestEngine:
         good = summary_df[(summary_df['Accuracy_%'] >= 55) & (summary_df['Accuracy_%'] < 60)]
         
         if len(excellent) > 0:
-            print(f"✅ EXCELLENT markets (≥60%): {', '.join(excellent.index.tolist())}")
+            print(f"[OK] EXCELLENT markets (≥60%): {', '.join(excellent.index.tolist())}")
         
         if len(good) > 0:
-            print(f"✅ GOOD markets (55-60%): {', '.join(good.index.tolist())}")
+            print(f"[OK] GOOD markets (55-60%): {', '.join(good.index.tolist())}")
         
         print(f"\n📈 Best overall: {summary_df.index[0]} ({summary_df.iloc[0]['Accuracy_%']:.1f}%)")
         
         # Save
         output_path = OUTPUT_DIR / "backtest_summary.csv"
         summary_df.to_csv(output_path)
-        print(f"\n✅ Saved: {output_path}")
+        print(f"\n[OK] Saved: {output_path}")
         
         return summary_df
     
@@ -511,13 +511,13 @@ class BacktestEngine:
         doubles_df.to_csv(OUTPUT_DIR / "backtest_best_doubles.csv", index=False)
         trebles_df.to_csv(OUTPUT_DIR / "backtest_best_trebles.csv", index=False)
         
-        print("\n✅ Saved combination analysis to outputs/backtest_best_*.csv")
+        print("\n[OK] Saved combination analysis to outputs/backtest_best_*.csv")
         
         print("\n💡 COMBINATION TIPS:")
-        print("   • Look for combinations with >40% hit rate for trebles")
-        print("   • Look for combinations with >60% hit rate for doubles")
-        print("   • Cross-league combos often have better value")
-        print("   • Mix O/U with other markets for decorrelation")
+        print("   * Look for combinations with >40% hit rate for trebles")
+        print("   * Look for combinations with >60% hit rate for doubles")
+        print("   * Cross-league combos often have better value")
+        print("   * Mix O/U with other markets for decorrelation")
     
     def export_detailed_results(self) -> Path:
         """Export period-by-period breakdown"""
@@ -536,7 +536,7 @@ class BacktestEngine:
         output_path = OUTPUT_DIR / "backtest_detailed.csv"
         detailed_df.to_csv(output_path, index=False)
         
-        print(f"✅ Saved detailed: {output_path}")
+        print(f"[OK] Saved detailed: {output_path}")
         return output_path
 
 
@@ -576,8 +576,8 @@ if __name__ == "__main__":
     engine.export_detailed_results()
     
     print("\n" + "="*60)
-    print("✅ BACKTEST COMPLETE")
+    print("[OK] BACKTEST COMPLETE")
     print("="*60)
     print("📂 Check outputs folder for:")
-    print("   • backtest_summary.csv - Overall performance")
-    print("   • backtest_detailed.csv - Period-by-period breakdown")
+    print("   * backtest_summary.csv - Overall performance")
+    print("   * backtest_detailed.csv - Period-by-period breakdown")

@@ -42,9 +42,12 @@ except Exception:
 
 try:
     import lightgbm as lgb
-    # Silence LightGBM warnings about splits
-    lgb.set_option('verbosity', -1)
     _HAS_LGB = True
+    # Try to silence warnings (may not work in all versions)
+    try:
+        lgb.set_option('verbosity', -1)
+    except:
+        pass
 except Exception:
     _HAS_LGB = False
 
@@ -134,7 +137,7 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
                 mode_val = df[col].mode()
                 df[col] = df[col].fillna(mode_val[0] if len(mode_val) > 0 else 'Unknown')
     
-    print(f"✅ NaN values handled")
+    print(f"[OK] NaN values handled")
     
     # Continue with rest of function...
     models: Dict[str, TrainedTarget] = {}
@@ -264,7 +267,7 @@ def _all_targets() -> List[str]:
     ]
     return t
 
-# banded/ordered targets → use ordinal model
+# banded/ordered targets -> use ordinal model
 ORDINAL_TARGETS = {
     "y_GOAL_RANGE": ["0","1","2","3","4","5+"],
     "y_HomeCardsY_BAND": ["0-2","3","4-5","6+"],
@@ -570,7 +573,7 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
     # Determine trials: use market-specific if target_col provided, else use env var
     if target_col and os.environ.get("USE_MARKET_SPECIFIC_TRIALS", "1") == "1":
         n_trials = TRIALS_BY_MARKET_TYPE.get(market_type, {}).get(alg, 25)
-        print(f"  📊 {target_col} ({market_type}): {alg} using {n_trials} trials")
+        print(f"  [CHART] {target_col} ({market_type}): {alg} using {n_trials} trials")
     else:
         n_trials = int(os.environ.get("OPTUNA_TRIALS", "5"))
 
@@ -645,7 +648,7 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
                 )
                 model = xgb.XGBClassifier(**params)
             except Exception as e:
-                print(f"⚠️  XGBoost creation failed: {e}. Skipping XGBoost for this target.")
+                print(f"[WARN]  XGBoost creation failed: {e}. Skipping XGBoost for this target.")
                 return None
         elif alg == "lgb" and _HAS_LGB:
             params = dict(
@@ -682,7 +685,7 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
         except Exception as e:
             # If XGBoost fit fails, log and return None so training continues without it
             if alg == "xgb":
-                print(f"⚠️  XGBoost fit failed: {e}. Skipping XGBoost for this target.")
+                print(f"[WARN]  XGBoost fit failed: {e}. Skipping XGBoost for this target.")
                 return None
             else:
                 # Re-raise for non-XGBoost failures
@@ -929,7 +932,7 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     if sub.empty:
         raise RuntimeError(f"No data for target {target_col}")
     if df[target_col].isna().all():
-        print(f"⚠️ Skipping {target_col} - no data available")
+        print(f"[WARN] Skipping {target_col} - no data available")
         return None
     
     error_count = 0
@@ -943,11 +946,11 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     min_class_count = class_counts.min()
     
     if min_class_count < 5:
-        print(f"⚠️ Skipping {target_col} - class has only {min_class_count} sample(s), need minimum 5 for CV")
+        print(f"[WARN] Skipping {target_col} - class has only {min_class_count} sample(s), need minimum 5 for CV")
         return None
     
     if len(classes) > 50:
-        print(f"⚠️ Skipping {target_col} - too many classes ({len(classes)}), max 50 supported")
+        print(f"[WARN] Skipping {target_col} - too many classes ({len(classes)}), max 50 supported")
         return None
     pre = _preprocessor(sub)
     X_all = pre.fit_transform(sub)
@@ -987,44 +990,58 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 base_names.append("bnn")
 
         speed_mode = get_speed_mode()
-        print(f"  ⚡ Speed mode: {speed_mode.value} -> Models: {base_names}")
+        print(f"  [SPEED] Speed mode: {speed_mode.value} -> Models: {base_names}")
+
+        # Initialize strategy as None when using speed config
+        strategy = None
 
     # Fallback to market config or environment-based selection
     elif _HAS_MARKET_CONFIG:
         market_config = get_market_config(target_col)
         strategy = market_config.strategy
-        print(f"  📊 Market: {market_config.market_type.value}, Strategy: {strategy.value}")
-
-        if os.environ.get("MODELS_ONLY") == "rf":
-            base_names = ["rf"]
-        elif strategy == ModelStrategy.LIGHTWEIGHT:
-            base_names = ["rf", "lr"]
-        elif strategy == ModelStrategy.TREE_ENSEMBLE:
-            base_names = ["rf", "et"]
-            if _HAS_XGB: base_names.append("xgb")
-            if _HAS_LGB: base_names.append("lgb")
-        elif strategy == ModelStrategy.BOOSTING:
-            base_names = []
-            if _HAS_XGB: base_names.append("xgb")
-            if _HAS_LGB: base_names.append("lgb")
-            if _HAS_CAT: base_names.append("cat")
-            if not base_names:
-                base_names = ["rf", "et"]
-        elif strategy == ModelStrategy.POISSON_BASED:
-            base_names = ["rf"]
-        else:
-            base_names = ["rf", "et", "lr"]
-            if _HAS_XGB: base_names.append("xgb")
-            if _HAS_LGB: base_names.append("lgb")
-            if _HAS_CAT: base_names.append("cat")
+        recommended_models = get_base_models_for_market(target_col, len(classes))
+        model_params = get_model_params_for_market(target_col)
+        print(f"  [CHART] Market: {market_config.market_type.value}, Strategy: {strategy.value}")
     else:
-        # Default fallback
-        if os.environ.get("MODELS_ONLY") == "rf":
-            base_names = ["rf"]
-        else:
+        strategy = None
+        recommended_models = ["rf", "et", "lr"]
+        model_params = {}
+
+    # Determine base learners based on strategy and availability
+    # ONLY if speed_config didn't already set it
+    if os.environ.get("MODELS_ONLY") == "rf":
+        base_names = ["rf"]  # Ultra fast mode
+    elif _HAS_SPEED_CONFIG and len(base_names) > 0:
+        # Speed config already set base_names, don't override
+        pass
+    elif strategy == ModelStrategy.LIGHTWEIGHT if _HAS_MARKET_CONFIG else False:
+        base_names = ["rf", "lr"]
+        print(f"  [FAST] Using LIGHTWEIGHT models (RF + LR)")
+    elif strategy == ModelStrategy.TREE_ENSEMBLE if _HAS_MARKET_CONFIG else False:
+        base_names = ["rf", "et"]
+        if _HAS_XGB: base_names.append("xgb")
+        if _HAS_LGB: base_names.append("lgb")
+        print(f"  🌲 Using TREE ENSEMBLE models")
+    elif strategy == ModelStrategy.BOOSTING if _HAS_MARKET_CONFIG else False:
+        base_names = []
+        if _HAS_XGB: base_names.append("xgb")
+        if _HAS_LGB: base_names.append("lgb")
+        if _HAS_CAT: base_names.append("cat")
+        if not base_names:
+            base_names = ["rf", "et"]  # Fallback if no boosting available
+        print(f"  [ROCKET] Using BOOSTING models")
+    elif strategy == ModelStrategy.POISSON_BASED if _HAS_MARKET_CONFIG else False:
+        base_names = ["rf"]  # DC will do heavy lifting
+        print(f"  📐 Using POISSON-BASED approach (DC dominant)")
+    else:
+        # Full ensemble for FULL_ENSEMBLE or HYBRID strategies (only if not already set)
+        if not (_HAS_SPEED_CONFIG and len(base_names) > 0):
             base_names = ["rf", "et", "lr"]
             if _HAS_XGB: base_names.append("xgb")
             if _HAS_LGB: base_names.append("lgb")
+            if _HAS_CAT: base_names.append("cat")
+            if _HAS_TORCH: base_names.append("bnn")
+            print(f"  [TARGET] Using FULL ENSEMBLE models")
 
     # Add specialized models to ensemble (not replacing!)
     base_models: Dict[str, object] = {}
@@ -1032,26 +1049,26 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     if use_specialized:
         # Add specialized model as ONE component of the ensemble
         if is_binary_market(target_col) and len(classes) == 2:
-            print(f"  ➕ Adding binary specialist to ensemble")
+            print(f"  [PLUS] Adding binary specialist to ensemble")
             specialist = BinaryMarketModel(target_col, random_state=RANDOM_SEED)
             specialist.fit(X_all, y_int)
             base_models["binary_specialist"] = specialist
 
         elif is_ordinal_market(target_col):
-            print(f"  ➕ Adding ordinal specialist to ensemble")
+            print(f"  [PLUS] Adding ordinal specialist to ensemble")
             specialist = OrdinalMarketModel(target_col, classes, random_state=RANDOM_SEED)
             specialist.fit(X_all, y_int)
             base_models["ordinal_specialist"] = specialist
 
         elif is_multiclass_market(target_col):
-            print(f"  ➕ Adding multiclass specialist to ensemble")
+            print(f"  [PLUS] Adding multiclass specialist to ensemble")
             specialist = MulticlassMarketModel(target_col, len(classes), random_state=RANDOM_SEED)
             specialist.fit(X_all, y_int)
             base_models["multiclass_specialist"] = specialist
 
     # Add CORAL for ordinal targets (as additional component)
     if target_col in ORDINAL_TARGETS:
-        print(f"  ➕ Adding CORAL ordinal to ensemble")
+        print(f"  [PLUS] Adding CORAL ordinal to ensemble")
         K = len(ORDINAL_TARGETS[target_col])
         coral = CORALOrdinal(C=1.0, max_iter=2000)
         base_models["coral"] = coral
@@ -1065,7 +1082,7 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 if result is not None:
                     tuned[alg] = result
                 elif alg == "xgb":
-                    print(f"⚠️  Skipping XGBoost for {target_col} due to previous error")
+                    print(f"[WARN]  Skipping XGBoost for {target_col} due to previous error")
 
     # Add tuned or default models to ensemble
     for name in base_names:
@@ -1113,10 +1130,10 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
             except Exception as e:
                 # If XGBoost (or any model) fails during CV, skip it and continue
                 if name == "xgb":
-                    print(f"⚠️  XGBoost failed in fold {fold}: {e}. Continuing without XGBoost.")
+                    print(f"[WARN]  XGBoost failed in fold {fold}: {e}. Continuing without XGBoost.")
                     continue
                 else:
-                    print(f"⚠️  Model {name} failed in fold {fold}: {e}. Continuing without this model.")
+                    print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Continuing without this model.")
                     continue
             # align width
             if proba.shape[1] != len(classes):
@@ -1152,13 +1169,13 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     if _HAS_MARKET_CONFIG:
         calibrator = get_calibrator_for_market(target_col, len(classes))
         if isinstance(calibrator, IsotonicOrdinalCalibrator):
-            print(f"  📈 Using ISOTONIC ordinal calibration")
+            print(f"  [TREND] Using ISOTONIC ordinal calibration")
             calibrator.fit(P_meta_oof, y_int)
         elif isinstance(calibrator, BetaCalibrator):
-            print(f"  📈 Using BETA calibration")
+            print(f"  [TREND] Using BETA calibration")
             calibrator.fit(P_meta_oof, y_int)
         elif isinstance(calibrator, DirichletCalibrator):
-            print(f"  📈 Using DIRICHLET calibration")
+            print(f"  [TREND] Using DIRICHLET calibration")
             calibrator.fit(P_meta_oof, y_int)
         else:
             logits = np.log(np.clip(P_meta_oof, 1e-12, 1-1e-12))
@@ -1194,10 +1211,10 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         except Exception as e:
             # If XGBoost (or any model) fails during final fit, skip it and continue
             if name == "xgb":
-                print(f"⚠️  XGBoost failed during final fit: {e}. Continuing without XGBoost.")
+                print(f"[WARN]  XGBoost failed during final fit: {e}. Continuing without XGBoost.")
                 continue
             else:
-                print(f"⚠️  Model {name} failed during final fit: {e}. Continuing without this model.")
+                print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
                 continue
         # align width
         if proba.shape[1] != len(classes):
@@ -1243,11 +1260,11 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
         targets = [t for t in all_targets if should_train_market(t)]
         skipped = len(all_targets) - len(targets)
         if skipped > 0:
-            print(f"⚡ Skipping {skipped} low-priority markets in current speed mode")
+            print(f"[SPEED] Skipping {skipped} low-priority markets in current speed mode")
     else:
         targets = all_targets
 
-    print(f"📊 Training {len(targets)} markets")
+    print(f"[TRAINING] Training {len(targets)} markets")
     start_time = time.time()
 
     for i, t in enumerate(targets, 1):
@@ -1265,11 +1282,8 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
         elapsed = time.time() - start_time
         avg_per_target = elapsed / i
         remaining = avg_per_target * (len(targets) - i)
-        if remaining > 3600:
-            print(f"⏱️ Est. {remaining/3600:.1f}h remaining ({i}/{len(targets)} done)")
-        else:
-            print(f"⏱️ Est. {remaining/60:.0f}min remaining ({i}/{len(targets)} done)")
-
+        print(f"⏱ Est. {remaining/3600:.1f}h remaining ({i}/{len(targets)} done)")
+    
     # save manifest
     with open(models_dir / "manifest.json", "w") as f:
         json.dump(sorted(list(models.keys())), f, indent=2)

@@ -47,7 +47,7 @@ def download_upcoming_fixtures():
         missing = [col for col in required_cols if col not in df.columns]
         
         if missing:
-            print(f"⚠️ Warning: Missing columns: {missing}")
+            print(f"[WARN] Warning: Missing columns: {missing}")
         
         # Add League column if missing (will be 'Div' in the CSV)
         if 'League' not in df.columns and 'Div' in df.columns:
@@ -64,9 +64,9 @@ def download_upcoming_fixtures():
                 future_df.to_csv(OUTPUT_FILE, index=False)
                 print(f"Filtered to {len(future_df)} future matches (removed {len(df) - len(future_df)} past)")
         except Exception as e:
-            print(f"⚠️ Date filtering skipped: {e}")
+            print(f"[WARN] Date filtering skipped: {e}")
         
-        print(f"\n✅ SUCCESS!")
+        print(f"\n[OK] SUCCESS!")
         print(f"   Saved: {OUTPUT_FILE}")
         print(f"   Matches: {len(df)}")
         
@@ -79,7 +79,7 @@ def download_upcoming_fixtures():
         return OUTPUT_FILE
         
     except requests.exceptions.RequestException as e:
-        print(f"\n❌ Download failed: {e}")
+        print(f"\n[ERROR] Download failed: {e}")
         print("\n💡 Manual fallback:")
         print("   1. Go to: https://www.football-data.co.uk/matches.php")
         print("   2. Download the fixtures CSV")
@@ -87,7 +87,7 @@ def download_upcoming_fixtures():
         return None
         
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[ERROR] Error: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -100,6 +100,6 @@ if __name__ == "__main__":
         print(f"\n🎯 Ready to use: {result}")
         print("   Run: python RUN_WEEKLY.py")
     else:
-        print("\n⚠️ Download failed - use manual fallback")
+        print("\n[WARN] Download failed - use manual fallback")
     
     input("\nPress Enter to close...")

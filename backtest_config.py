@@ -128,17 +128,17 @@ def print_backtest_insights(summary: pd.DataFrame, config_name: str):
     best_roi = summary.loc[best_market, 'ROI']
     
     print(f"\n🏆 Best Market: {best_market}")
-    print(f"   • Accuracy: {best_acc:.1%}")
-    print(f"   • ROI: {best_roi:+.1f}%")
-    print(f"   • Matches: {summary.loc[best_market, 'Total_Matches']:.0f}")
+    print(f"   * Accuracy: {best_acc:.1%}")
+    print(f"   * ROI: {best_roi:+.1f}%")
+    print(f"   * Matches: {summary.loc[best_market, 'Total_Matches']:.0f}")
     
     # Worst performing
     worst_market = summary['Accuracy'].idxmin()
     worst_acc = summary.loc[worst_market, 'Accuracy']
     
-    print(f"\n⚠️ Weakest Market: {worst_market}")
-    print(f"   • Accuracy: {worst_acc:.1%}")
-    print(f"   • Needs improvement")
+    print(f"\n[WARN] Weakest Market: {worst_market}")
+    print(f"   * Accuracy: {worst_acc:.1%}")
+    print(f"   * Needs improvement")
     
     # Overall profitability
     total_profit = summary['Total_Profit_Units'].sum()
@@ -146,27 +146,27 @@ def print_backtest_insights(summary: pd.DataFrame, config_name: str):
     overall_roi = (total_profit / total_matches * 100) if total_matches > 0 else 0
     
     print(f"\n💰 Overall Performance:")
-    print(f"   • Total Profit/Loss: {total_profit:+.1f} units")
-    print(f"   • Overall ROI: {overall_roi:+.1f}%")
-    print(f"   • Status: {'PROFITABLE ✅' if total_profit > 0 else 'LOSING ❌'}")
+    print(f"   * Total Profit/Loss: {total_profit:+.1f} units")
+    print(f"   * Overall ROI: {overall_roi:+.1f}%")
+    print(f"   * Status: {'PROFITABLE [OK]' if total_profit > 0 else 'LOSING [ERROR]'}")
     
     # Recommendations
     print(f"\n📋 Recommendations:")
     
     profitable_markets = summary[summary['ROI'] > 0].index.tolist()
     if profitable_markets:
-        print(f"   ✅ Focus on: {', '.join(profitable_markets)}")
+        print(f"   [OK] Focus on: {', '.join(profitable_markets)}")
     
     unprofitable_markets = summary[summary['ROI'] < 0].index.tolist()
     if unprofitable_markets:
-        print(f"   ❌ Avoid/improve: {', '.join(unprofitable_markets)}")
+        print(f"   [ERROR] Avoid/improve: {', '.join(unprofitable_markets)}")
     
     # Calibration check
     avg_brier = summary['Avg_Brier_Score'].mean()
     if avg_brier < 0.2:
-        print(f"   ✅ Well-calibrated predictions (Brier: {avg_brier:.3f})")
+        print(f"   [OK] Well-calibrated predictions (Brier: {avg_brier:.3f})")
     elif avg_brier > 0.3:
-        print(f"   ⚠️ Poor calibration (Brier: {avg_brier:.3f}) - consider recalibration")
+        print(f"   [WARN] Poor calibration (Brier: {avg_brier:.3f}) - consider recalibration")
     
     print("\n" + "="*60)
 
@@ -191,7 +191,7 @@ def compare_multiple_periods():
             summary = run_backtest_with_config(config, period_key)
             all_summaries[period_key] = summary
         except Exception as e:
-            print(f"   ❌ Failed: {e}")
+            print(f"   [ERROR] Failed: {e}")
     
     # Generate comparison report
     print("\n" + "="*60)
@@ -205,10 +205,10 @@ def compare_multiple_periods():
         if not summary.empty:
             avg_acc = summary['Accuracy'].mean()
             total_roi = summary['ROI'].mean()
-            print(f"   • Avg Accuracy: {avg_acc:.1%}")
-            print(f"   • Avg ROI: {total_roi:+.1f}%")
+            print(f"   * Avg Accuracy: {avg_acc:.1%}")
+            print(f"   * Avg ROI: {total_roi:+.1f}%")
         else:
-            print("   • No data")
+            print("   * No data")
 
 
 # ============================================================================
@@ -250,10 +250,10 @@ def main():
         
         run_backtest_with_config(custom_config, 'custom')
     
-    print("\n✅ Backtesting complete!")
+    print("\n[OK] Backtesting complete!")
     print("📂 Results saved in outputs/")
-    print("   • backtest_summary.csv - Overall stats")
-    print("   • backtest_detailed.csv - Period-by-period results")
+    print("   * backtest_summary.csv - Overall stats")
+    print("   * backtest_detailed.csv - Period-by-period results")
 
 
 if __name__ == "__main__":

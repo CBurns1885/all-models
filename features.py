@@ -724,14 +724,38 @@ def build_features(force: bool = False) -> Path:
     # 1. Elo ratings
     print("1. Calculating Elo ratings...")
     if USE_ELO:
-        df = _elo_by_league(df, EloConfig())
+        # Check if Elo columns already exist in historical_matches.parquet
+        existing_elo = [c for c in df.columns if 'elo' in c.lower()]
+
+        if existing_elo:
+            # Use existing Elo columns and rename them
+            print(f"   Using existing Elo columns: {existing_elo}")
+            df = df.rename(columns={
+                'EloHome_pre': 'Elo_Home',
+                'EloAway_pre': 'Elo_Away',
+                'EloDiff_pre': 'Elo_Diff'
+            })
+        else:
+            # Calculate Elo from scratch
+            df = _elo_by_league(df, EloConfig())
+
         print(f"   Added Elo features")
 
     # 2. Rolling form/stats
     print("2. Calculating rolling form...")
     if USE_ROLLING_FORM:
+        # Store Elo columns before reshape (they get lost in pivot)
+        elo_cols = [c for c in df.columns if c.startswith('Elo_')]
+        if elo_cols:
+            elo_data = df[['League', 'Date', 'HomeTeam', 'AwayTeam'] + elo_cols].copy()
+
         side_feats = _build_side_features(df)
         df = _pivot_back(df, side_feats)
+
+        # Re-merge Elo columns if they existed
+        if elo_cols:
+            df = df.merge(elo_data, on=['League', 'Date', 'HomeTeam', 'AwayTeam'], how='left')
+
         print(f"   Added rolling features")
 
     # 3. Contextual features

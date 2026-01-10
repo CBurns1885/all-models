@@ -1,0 +1,262 @@
+Traceback (most recent call last):
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\model_binary.py", line 68, in fit
+    print(f"  \u2713 {name.upper()} (binary-full)")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.2544.0_x64__qbz5n2kfra8p0\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2713' in position 2: character maps to <undefined>
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 254, in run_step
+    result = func(*args, **kwargs)
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 288, in step3
+    return train_all_targets()
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\models.py", line 1130, in train_all_targets
+    trg = _fit_single_target(df, t)
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\models.py", line 931, in _fit_single_target
+    specialist.fit(X_all, y_int)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\model_binary.py", line 70, in fit
+    print(f"  \u2717 {name.upper()}: {e}")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.13_3.13.2544.0_x64__qbz5n2kfra8p0\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2717' in position 2: character maps to <undefined>
+Traceback (most recent call last):
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 254, in run_step
+    result = func(*args, **kwargs)
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 303, in step4
+    predict_week(fixtures_file)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\predict.py", line 1031, in predict_week
+    raise RuntimeError("No trained models found!")
+RuntimeError: No trained models found!
+Traceback (most recent call last):
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 254, in run_step
+    result = func(*args, **kwargs)
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 317, in step5
+    raise FileNotFoundError("weekly_bets.csv not found")
+FileNotFoundError: weekly_bets.csv not found
+Traceback (most recent call last):
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 254, in run_step
+    result = func(*args, **kwargs)
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 330, in step6
+    raise FileNotFoundError("weekly_bets.csv not found")
+FileNotFoundError: weekly_bets.csv not found
+Traceback (most recent call last):
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 254, in run_step
+    result = func(*args, **kwargs)
+  File "D:\Users\Ian\Desktop\Chris Code\all_models\run_weekly.py", line 350, in step7
+    raise FileNotFoundError("weekly_bets.csv not found")
+FileNotFoundError: weekly_bets.csv not found
+[DATA] Output directory: D:\Users\Ian\Desktop\Chris Code\all_models\outputs\2026-01-01
+[DATA] Data source: API-Football (enhanced stats)
+============================================================
+FOOTBALL PREDICTION SYSTEM - WEEKLY RUN
+============================================================
+Date: 2026-01-01 09:36
+Output: D:\Users\Ian\Desktop\Chris Code\all_models\outputs\2026-01-01
+Mode: Non-interactive
+
+[DOWNLOAD] STEP 0: Downloading Fixtures
+========================================
+Testing API-Football connection...
+[OK] API Status: Chris
+   Requests today: 36/7500
+
+[OK] API-Football connected!
+
+================================================
+  Fetching Upcoming Fixtures from API-Football
+================================================
+[OK] Database initialized: D:\Users\Ian\Desktop\Chris Code\data\football_api.db
+[WARN] API errors: ['The Season field is required.']
+  E0: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  E1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  E2: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  E3: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  EC: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  D1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  D2: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  SP1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  SP2: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  I1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  I2: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  F1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  F2: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  N1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  B1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  P1: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  SC0: 0 fixtures
+[WARN] API errors: ['The Season field is required.']
+  T1: 0 fixtures
+[WARN] No fixtures from API, trying fallback...
+
+Using football-data.co.uk fallback...
+============================================================
+DOWNLOADING UPCOMING FIXTURES
+============================================================
+
+Source: https://www.football-data.co.uk/fixtures.csv
+Downloading...
+[WARN] Fallback download failed: 'charmap' codec can't encode character '\u274c' in position 2: character maps to <undefined>
+[OK] Using manual: upcoming_fixtures.csv
+
+[SEARCH] Validating fixtures file...
+[OK] Validated: 40 matches found
+   Leagues: ['E0', 'E1', 'E2', 'E3']
+
+============================================================
+[CONFIG] CONFIGURATION
+============================================================
+
+[AUTO] Using mode 4 (non-interactive)
+
+[OK] Configuration set:
+   Tuning: 0 trials
+   Data source: API-Football (enhanced)
+   Training period: 2023-2026
+
+============================================================
+STEP 1/11 (9%): BUILD HISTORICAL DATABASE
+============================================================
+
+======================================================================================================================================
+  Historical parquet already exists at D:\Users\Ian\Desktop\Chris Code\data\processed\historical_matches.parquet. Skipping download.
+======================================================================================================================================
+[OK] Step 1 complete
+
+============================================================
+STEP 2/11 (18%): BUILD FEATURES
+============================================================
+
+=================================================================================================================
+  Features exist at D:\Users\Ian\Desktop\Chris Code\data\processed\features.parquet. Use force=True to rebuild.
+=================================================================================================================
+[OK] Step 2 complete
+
+============================================================
+STEP 3/11 (27%): TRAIN/LOAD MODELS
+============================================================
+Training all ensemble models (RF, XGB, LGB, CatBoost, DC)...
+
+======================
+  TRAIN y_BTTS (1/7)
+======================
+  [CHART] Market: binary, Strategy: full_ensemble
+  [TARGET] Using FULL ENSEMBLE models
+  [PLUS] Adding binary specialist to ensemble
+[WARN] Step 3 failed: 'charmap' codec can't encode character '\u2717' in position 2: character maps to <undefined>
+   Continuing to next step...
+
+============================================================
+STEP 4/11 (36%): GENERATE PREDICTIONS
+============================================================
+
+========================================
+  [TARGET] ULTIMATE WEEKLY PREDICTIONS
+========================================
+Maximum Accuracy Features:
+  • League-specific calibration
+  • Cross-market constraints
+  • Poisson adjustments
+  • Time-weighted form
+  • Dynamic blend weights
+  • Confidence scoring
+
+[WARN] Step 4 failed: No trained models found!
+   Continuing to next step...
+
+============================================================
+STEP 5/11 (45%): LOG PREDICTIONS
+============================================================
+[WARN] Step 5 failed: weekly_bets.csv not found
+   Continuing to next step...
+
+============================================================
+STEP 6/11 (54%): GENERATE WEIGHTED TOP 50
+============================================================
+[WARN] Step 6 failed: weekly_bets.csv not found
+   Continuing to next step...
+
+============================================================
+STEP 7/11 (63%): O/U ANALYSIS
+============================================================
+[WARN] Step 7 failed: weekly_bets.csv not found
+   Continuing to next step...
+
+============================================================
+STEP 8/11 (72%): BUILD ACCUMULATORS
+============================================================
+[WARN] Accumulator builder not available - skipping
+[OK] Step 8 complete
+
+============================================================
+STEP 9/11 (81%): UPDATE ACCURACY DB
+============================================================
+[WARN] Accuracy update skipped: cannot import name 'update_accuracy_database' from 'accuracy_tracker' (D:\Users\Ian\Desktop\Chris Code\all_models\accuracy_tracker.py)
+[OK] Step 9 complete
+
+============================================================
+STEP 10/11 (90%): ARCHIVE OUTPUTS
+============================================================
+[OK] Archived 0 files to archives\2026-01-01
+[OK] Step 10 complete
+
+============================================================
+STEP 11/11 (100%): OPEN OUTPUTS FOLDER
+============================================================
+[OK] Step 11 complete
+
+============================================================
+[SUCCESS] PIPELINE COMPLETE!
+============================================================
+
+[WARN] 5 step(s) had errors:
+   • Step 3 (TRAIN/LOAD MODELS): 'charmap' codec can't encode character '\u2717' in position 2: character maps to <undefined>
+   • Step 4 (GENERATE PREDICTIONS): No trained models found!
+   • Step 5 (LOG PREDICTIONS): weekly_bets.csv not found
+   • Step 6 (GENERATE WEIGHTED TOP 50): weekly_bets.csv not found
+   • Step 7 (O/U ANALYSIS): weekly_bets.csv not found
+
+[INFO] Check outputs folder - some files may still be generated
+
+[DATA] Main Files:
+   • weekly_bets.csv - All predictions
+   • top50_weighted.html - Top picks (weighted)
+
+[FOOTBALL] Specialized Reports:
+   • ou_analysis.html - Over/Under analysis
+   • accumulators_safe.html - Conservative 4-fold
+   • accumulators_mixed.html - Balanced 5-fold
+   • accumulators_aggressive.html - High-risk 6-fold
+
+============================================================
+[INFO] Next Steps:
+   1. Review top50_weighted.html for best individual bets
+   2. Check ou_analysis.html for O/U opportunities
+   3. Review accumulator files for multi-leg options
+   4. After matches: run update_results.py
+============================================================
+
+[DONE] Pipeline finished.

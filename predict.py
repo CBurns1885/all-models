@@ -940,7 +940,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 <head>
     <meta charset='utf-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <title>🎯 ELITE Predictions (85%+) - {elite_count} Picks</title>
+    <title>[TARGET] ULTIMATE Predictions - {len(top)} Elite Picks</title>
     <style>
         * {{box-sizing: border-box; margin: 0; padding: 0;}}
         body {{
@@ -1074,8 +1074,8 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 <body>
     <div class='container'>
         <div class='header'>
-            <h1>🎯 ELITE PREDICTIONS (85%+)</h1>
-            <p style='font-size: 1.2em; opacity: 0.9;'>All Calibrations Applied - Sorted by Date & League</p>
+            <h1>[TARGET] ULTIMATE PREDICTIONS</h1>
+            <p style='font-size: 1.2em; opacity: 0.9;'>Maximum Accuracy System - Top {len(top)} Elite Picks</p>
         </div>
 
         <div class='stats'>
@@ -1165,25 +1165,25 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 
     out_path = path / "elite_picks.html"
     out_path.write_text(html, encoding="utf-8")
-    print(f"✅ Wrote ELITE HTML ({elite_count} picks 85%+) -> {out_path}")
-
+    print(f"[OK] Wrote ULTIMATE HTML -> {out_path}")
+    
     if secondary_path:
         secondary_path.mkdir(parents=True, exist_ok=True)
         secondary_out = secondary_path / "elite_picks.html"
         secondary_out.write_text(html, encoding="utf-8")
-        print(f"✅ Wrote ULTIMATE HTML (copy) -> {secondary_out}")
+        print(f"[OK] Wrote ULTIMATE HTML (copy) -> {secondary_out}")
 
 def predict_week(fixtures_csv: Path) -> Path:
     """ULTIMATE prediction pipeline"""
     
-    log_header("🎯 ULTIMATE WEEKLY PREDICTIONS")
+    log_header("[TARGET] ULTIMATE WEEKLY PREDICTIONS")
     print("Maximum Accuracy Features:")
-    print("  • League-specific calibration")
-    print("  • Cross-market constraints")
-    print("  • Poisson adjustments")
-    print("  • Time-weighted form")
-    print("  • Dynamic blend weights")
-    print("  • Confidence scoring\n")
+    print("  * League-specific calibration")
+    print("  * Cross-market constraints")
+    print("  * Poisson adjustments")
+    print("  * Time-weighted form")
+    print("  * Dynamic blend weights")
+    print("  * Confidence scoring\n")
     
     # Load models
     models = load_trained_targets()
@@ -1227,9 +1227,9 @@ def predict_week(fixtures_csv: Path) -> Path:
             if col in dc_df.columns:
                 df_out[col] = dc_df[col].values[:len(df_out)]
         
-        print(f"✅ Merged {len(dc_cols)} DC predictions")
+        print(f"[OK] Merged {len(dc_cols)} DC predictions")
     except Exception as e:
-        print(f"⚠️ DC predictions failed: {e}")
+        print(f"[WARN] DC predictions failed: {e}")
     
     # Apply enhanced blending
     log_header("APPLY DYNAMIC BLENDING")
@@ -1239,16 +1239,34 @@ def predict_week(fixtures_csv: Path) -> Path:
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
 
+    # Calculate max probability across all P_ columns for filtering
+    p_cols = [col for col in df_out.columns if col.startswith('P_')]
+    if p_cols:
+        df_out['MaxConfidence'] = df_out[p_cols].max(axis=1)
+
     # Sort by Date, then League for better readability
     if 'Date' in df_out.columns:
         df_out['Date'] = pd.to_datetime(df_out['Date'], errors='coerce')
         df_out = df_out.sort_values(['Date', 'League'], ascending=[True, True])
-        print("✅ Sorted output by Date and League")
+        print("[OK] Sorted output by Date and League")
 
-    # Save
-    output_path = OUTPUT_DIR / "weekly_bets_full.csv"
-    df_out.to_csv(output_path, index=False)
-    print(f"\n✅ Saved predictions: {output_path}")
+    # Save full version with all columns (NO FILTER - keep everything)
+    output_path_full = OUTPUT_DIR / "weekly_bets_full.csv"
+    df_out.to_csv(output_path_full, index=False)
+    print(f"\n[OK] Saved full predictions: {output_path_full} ({len(df_out)} matches)")
+
+    # Filter for weekly_bets.csv: Keep only predictions with >= 60% confidence
+    if 'MaxConfidence' in df_out.columns:
+        df_filtered = df_out[df_out['MaxConfidence'] >= 0.60].copy()
+        filtered_count = len(df_out) - len(df_filtered)
+        print(f"[FILTER] Removed {filtered_count} matches with confidence < 60%")
+    else:
+        df_filtered = df_out.copy()
+
+    # Save filtered version as weekly_bets.csv for compatibility with other scripts
+    output_path = OUTPUT_DIR / "weekly_bets.csv"
+    df_filtered.to_csv(output_path, index=False)
+    print(f"[OK] Saved filtered predictions: {output_path} ({len(df_filtered)} matches >= 60% confidence)")
     
     # Generate HTML
     log_header("GENERATE REPORTS")
@@ -1257,7 +1275,7 @@ def predict_week(fixtures_csv: Path) -> Path:
     
     # Summary
     print(f"\n{'='*60}")
-    print(f"📊 ULTIMATE PREDICTION SUMMARY")
+    print(f"[CHART] ULTIMATE PREDICTION SUMMARY")
     print(f"{'='*60}")
     print(f"Total matches: {len(df_out)}")
     print(f"Leagues: {df_out['League'].unique().tolist() if 'League' in df_out.columns else 'N/A'}")

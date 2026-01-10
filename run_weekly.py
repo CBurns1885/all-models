@@ -221,7 +221,7 @@ try:
     # Fix common column issues
     if "Div" in df.columns and "League" not in df.columns:
         df = df.rename(columns={"Div": "League"})
-        print("[FIX] Fixed: Renamed 'Div' → 'League'")
+        print("[FIX] Fixed: Renamed 'Div' -> 'League'")
         df.to_csv(fixtures_file, index=False)
     
     required = ["Date", "League", "HomeTeam", "AwayTeam"]
@@ -279,7 +279,7 @@ print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}
 # RUN PIPELINE WITH ERROR RECOVERY
 # ============================================================================
 
-TOTAL_STEPS = 11  # Reduced from 14 (removed duplicate/missing steps)
+TOTAL_STEPS = 12  # Updated to include market splitting step
 errors = []
 
 def run_step(step_num, step_name, func, *args, **kwargs):
@@ -422,8 +422,27 @@ try:
 
     run_step(8, "BUILD ACCUMULATORS", step8)
 
-    # Step 9: Update accuracy database
+    # Step 9: Split by Market
     def step9():
+        from market_splitter import split_predictions
+        csv_path = OUTPUT_DIR / "weekly_bets_full.csv"
+
+        if csv_path.exists():
+            split_predictions(csv_path, OUTPUT_DIR)
+            print("[OK] Market-specific files generated")
+        else:
+            # Try alternate file name
+            csv_path = OUTPUT_DIR / "weekly_bets.csv"
+            if csv_path.exists():
+                split_predictions(csv_path, OUTPUT_DIR)
+                print("[OK] Market-specific files generated")
+            else:
+                raise FileNotFoundError("weekly_bets*.csv not found")
+
+    run_step(9, "SPLIT BY MARKET", step9)
+
+    # Step 10: Update accuracy database
+    def step10():
         try:
             from accuracy_tracker import update_accuracy_database
             update_accuracy_database()
@@ -431,10 +450,10 @@ try:
         except Exception as e:
             print(f"[WARN] Accuracy update skipped: {e}")
 
-    run_step(9, "UPDATE ACCURACY DB", step9)
+    run_step(10, "UPDATE ACCURACY DB", step10)
 
-    # Step 10: Archive outputs
-    def step10():
+    # Step 11: Archive outputs
+    def step11():
         import shutil
         from datetime import datetime
 
@@ -469,10 +488,10 @@ try:
 
         print(f"[OK] Archived {archived_count} files to {archive_dir}")
 
-    run_step(10, "ARCHIVE OUTPUTS", step10)
+    run_step(11, "ARCHIVE OUTPUTS", step11)
 
-    # Step 11: Open outputs folder
-    def step11():
+    # Step 12: Open outputs folder
+    def step12():
         import subprocess
         import platform
 
@@ -481,7 +500,7 @@ try:
         elif platform.system() == "Darwin":
             subprocess.run(["open", str(OUTPUT_DIR)], check=False)
 
-    run_step(11, "OPEN OUTPUTS FOLDER", step11)
+    run_step(12, "OPEN OUTPUTS FOLDER", step12)
     
     # ========================================================================
     # SUCCESS SUMMARY
@@ -494,20 +513,20 @@ try:
     if errors:
         print(f"\n[WARN] {len(errors)} step(s) had errors:")
         for error in errors:
-            print(f"   • {error}")
+            print(f"   * {error}")
         print("\n[INFO] Check outputs folder - some files may still be generated")
     else:
         print("\n[OK] All steps completed successfully!")
     
     print("\n[DATA] Main Files:")
-    print("   • weekly_bets.csv - All predictions")
-    print("   • top50_weighted.html - Top picks (weighted)")
+    print("   * weekly_bets.csv - All predictions")
+    print("   * top50_weighted.html - Top picks (weighted)")
     
     print("\n[FOOTBALL] Specialized Reports:")
-    print("   • ou_analysis.html - Over/Under analysis")
-    print("   • accumulators_safe.html - Conservative 4-fold")
-    print("   • accumulators_mixed.html - Balanced 5-fold")
-    print("   • accumulators_aggressive.html - High-risk 6-fold")
+    print("   * ou_analysis.html - Over/Under analysis")
+    print("   * accumulators_safe.html - Conservative 4-fold")
+    print("   * accumulators_mixed.html - Balanced 5-fold")
+    print("   * accumulators_aggressive.html - High-risk 6-fold")
     
     print("\n" + "="*60)
     print("[INFO] Next Steps:")

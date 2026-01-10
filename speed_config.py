@@ -48,20 +48,20 @@ SPEED_CONFIGS: Dict[SpeedMode, SpeedConfig] = {
         n_estimators=100,
         use_tuning=False,
         tuning_trials=0,
-        models=["rf"],  # RF only - fastest
+        models=["lgb"],  # LightGBM only - fast & accurate (SINGLE MODEL)
         use_specialized=False,
         use_dc=True,  # DC is fast and accurate
         skip_rare_markets=True,
         max_depth=10,
-        early_stopping=False,
+        early_stopping=True,
         n_jobs=-1
     ),
     SpeedMode.BALANCED: SpeedConfig(
         n_folds=3,
-        n_estimators=150,
+        n_estimators=200,
         use_tuning=False,  # Use pre-tuned params instead
         tuning_trials=0,
-        models=["rf", "lgb"],  # RF + LightGBM (fast boosting)
+        models=["lgb"],  # LightGBM only (SINGLE MODEL - no ensemble)
         use_specialized=False,
         use_dc=True,
         skip_rare_markets=True,
@@ -70,12 +70,12 @@ SPEED_CONFIGS: Dict[SpeedMode, SpeedConfig] = {
         n_jobs=-1
     ),
     SpeedMode.FULL: SpeedConfig(
-        n_folds=5,
+        n_folds=3,  # Reduced from 5 for speed
         n_estimators=300,
-        use_tuning=True,
-        tuning_trials=15,
-        models=["rf", "et", "xgb", "lgb", "lr"],
-        use_specialized=True,
+        use_tuning=False,  # Use pre-tuned params (skip Optuna for speed)
+        tuning_trials=0,
+        models=["lgb"],  # LightGBM only (SINGLE MODEL - best overall)
+        use_specialized=False,
         use_dc=True,
         skip_rare_markets=False,
         max_depth=None,
@@ -244,7 +244,7 @@ PRETUNED_PARAMS = {
 
 
 # ============================================================================
-# CORE MARKETS - Train these first (highest value)
+# MARKET TIERS - Focused on high-value betting markets
 # ============================================================================
 
 CORE_MARKETS = [
@@ -333,6 +333,34 @@ SECONDARY_MARKETS = [
 ]
 
 # Skip these in BALANCED mode (complex/rare)
+# Tier 1: Core high-value markets (13 markets - ALWAYS train)
+TIER1_CORE_MARKETS = [
+    "y_1X2",              # Match result
+    "y_BTTS",             # Both teams to score
+    "y_OU_0_5", "y_OU_1_5", "y_OU_2_5", "y_OU_3_5", "y_OU_4_5",  # O/U goals
+    "y_DC_1X", "y_DC_12", "y_DC_X2",  # Double chance
+    "y_DNB_H", "y_DNB_A",  # Draw no bet
+    "y_HomeToScore", "y_AwayToScore",  # Team to score
+]
+
+# Tier 2: Advanced value markets (15 markets - train in BALANCED/FULL)
+TIER2_VALUE_MARKETS = [
+    "y_HomeTG_0_5", "y_HomeTG_1_5",  # Home team goals O/U
+    "y_AwayTG_0_5", "y_AwayTG_1_5",  # Away team goals O/U
+    "y_AH_-0_5", "y_AH_+0_5", "y_AH_-1_0", "y_AH_+1_0", "y_AH_0_0",  # Asian handicap
+    "y_HomeWin_BTTS_Y", "y_AwayWin_BTTS_Y",  # Result + BTTS combos
+    "y_HomeWin_BTTS_N", "y_AwayWin_BTTS_N",
+    "y_DC1X_O25", "y_DCX2_O25",  # DC + O/U combos
+]
+
+# Combined tier 1+2 (28 markets total)
+PROFITABLE_MARKETS = TIER1_CORE_MARKETS + TIER2_VALUE_MARKETS
+
+# Legacy names for backward compatibility
+CORE_MARKETS = TIER1_CORE_MARKETS
+SECONDARY_MARKETS = TIER2_VALUE_MARKETS
+
+# Skip these in FAST mode (rarely bet, complex)
 SKIP_IN_FAST_MODE = [
     "y_CS",  # Correct score - 37 classes, very hard
     "y_HTFT",  # 9 classes, needs lots of data
@@ -401,13 +429,14 @@ def should_train_market(target: str) -> bool:
     mode = get_speed_mode()
 
     if mode == SpeedMode.FAST:
-        # Only train core markets
-        return target in CORE_MARKETS
+        # Only train Tier 1 core markets (13 markets)
+        return target in TIER1_CORE_MARKETS
     elif mode == SpeedMode.BALANCED:
-        # Train core + secondary, skip complex
-        return target not in SKIP_IN_FAST_MODE
+        # Train Tier 1 + Tier 2 (28 markets total)
+        return target in PROFITABLE_MARKETS
     else:
-        return True
+        # FULL mode: train all except explicitly skipped
+        return target not in SKIP_IN_FAST_MODE
 
 
 def get_models_for_mode() -> list:
@@ -446,7 +475,7 @@ def print_speed_info():
     config = get_speed_config()
 
     print(f"\n{'='*60}")
-    print(f"⚡ SPEED MODE: {mode.value.upper()}")
+    print(f"[FAST] SPEED MODE: {mode.value.upper()}")
     print(f"{'='*60}")
     print(f"  Models: {', '.join(config.models)}")
     print(f"  CV Folds: {config.n_folds}")

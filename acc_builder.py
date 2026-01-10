@@ -32,7 +32,7 @@ class SeasonalAccumulatorBuilder:
         # Load ONLY current season performance
         self.league_performance = self._load_current_season_performance()
         
-        print(f"✅ Loaded {len(self.df)} upcoming fixtures")
+        print(f"[OK] Loaded {len(self.df)} upcoming fixtures")
         print(f"📅 Season: {self.season_start.date()} onwards")
         print(f"📊 Historical data: {self._get_total_matches()} matches this season")
     
@@ -103,18 +103,18 @@ class SeasonalAccumulatorBuilder:
                 }
             
             if performance:
-                print(f"✅ Current season data loaded for {len(performance)} markets")
+                print(f"[OK] Current season data loaded for {len(performance)} markets")
                 for market, leagues in performance.items():
                     print(f"   {market}: {len(leagues)} leagues tracked")
             else:
-                print("⚠️ No season data yet - using bootstrap values")
+                print("[WARN] No season data yet - using bootstrap values")
                 return self._get_bootstrap_performance()
             
             return performance
             
         except Exception as e:
-            print(f"⚠️ Database error: {e}")
-            print("⚠️ Using bootstrap performance values")
+            print(f"[WARN] Database error: {e}")
+            print("[WARN] Using bootstrap performance values")
             return self._get_bootstrap_performance()
     
     def _get_bootstrap_performance(self) -> Dict:
@@ -243,7 +243,7 @@ class SeasonalAccumulatorBuilder:
         value_bets = self.identify_value_bets()
         
         if len(value_bets) == 0:
-            print("❌ No value bets found this week")
+            print("[ERROR] No value bets found this week")
             return []
         
         if strategy == 'mixed':
@@ -253,7 +253,7 @@ class SeasonalAccumulatorBuilder:
         elif strategy == 'volume':
             return self._build_volume(value_bets, max_accumulators)
         else:
-            print(f"❌ Unknown strategy: {strategy}")
+            print(f"[ERROR] Unknown strategy: {strategy}")
             return []
     
     def _build_mixed(self, value_bets: List[Dict], max_acc: int) -> List[Dict]:
@@ -358,7 +358,7 @@ class SeasonalAccumulatorBuilder:
                 'name': strategy_name,
                 'accumulators': accs
             }
-            print(f"✅ Found {len(accs)} accumulators")
+            print(f"[OK] Found {len(accs)} accumulators")
         
         # Generate HTML
         html = self._generate_html(all_results)
@@ -369,7 +369,7 @@ class SeasonalAccumulatorBuilder:
         with open(output_path, 'w') as f:
             f.write(html)
         
-        print(f"\n✅ Report saved: {output_path}")
+        print(f"\n[OK] Report saved: {output_path}")
         return output_path
     
     def _generate_html(self, results: Dict) -> str:
@@ -410,7 +410,7 @@ class SeasonalAccumulatorBuilder:
         </div>
         
         <div class="warning">
-            ⚠️ <strong>Note:</strong> Accuracies based on current season data only. 
+            [WARN] <strong>Note:</strong> Accuracies based on current season data only. 
             Early season (first 2-3 weeks) uses bootstrap values until sufficient data is collected.
         </div>
 """
@@ -468,4 +468,4 @@ if __name__ == "__main__":
     builder = SeasonalAccumulatorBuilder()
     builder.generate_weekly_report('weekly_accumulators_full.html')
     
-    print("\n✅ DONE! Open outputs/weekly_accumulators.html to view results")
+    print("\n[OK] DONE! Open outputs/weekly_accumulators.html to view results")

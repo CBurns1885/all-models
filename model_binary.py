@@ -65,9 +65,9 @@ class BinaryMarketModelFull:
             try:
                 model.fit(X, y)
                 self.models[name] = model
-                print(f"  ✓ {name.upper()} (binary-full)")
+                print(f"  [OK] {name.upper()} (binary-full)")
             except Exception as e:
-                print(f"  ✗ {name.upper()}: {e}")
+                print(f"  [X] {name.upper()}: {e}")
         
         if not self.models:
             raise RuntimeError(f"No models trained")

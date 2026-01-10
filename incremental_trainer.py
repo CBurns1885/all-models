@@ -66,7 +66,7 @@ def needs_retraining(models_dir: Path = MODEL_ARTIFACTS_DIR, days_threshold: int
             settings_to_check = ["optuna_trials", "n_estimators", "models_only"]
             for key in settings_to_check:
                 if old_settings.get(key) != current_settings.get(key):
-                    print(f"Setting '{key}' changed: {old_settings.get(key)} → {current_settings.get(key)}")
+                    print(f"Setting '{key}' changed: {old_settings.get(key)} -> {current_settings.get(key)}")
                     print("Retraining...")
                     return True
 

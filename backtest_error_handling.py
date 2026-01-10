@@ -78,9 +78,9 @@ class DetailedBacktest:
             if weekly_bets.exists():
                 backup_path = OUTPUT_DIR / f"weekly_bets_backup_{timestamp}.csv"
                 shutil.copy(weekly_bets, backup_path)
-                print(f"✅ Backed up weekly_bets.csv")
+                print(f"[OK] Backed up weekly_bets.csv")
         except Exception as e:
-            print(f"⚠️ Backup error: {e}")
+            print(f"[WARN] Backup error: {e}")
     
     def load_features_data(self) -> pd.DataFrame:
         """Load features"""
@@ -91,10 +91,10 @@ class DetailedBacktest:
             print(f"📂 Loading features...")
             df = pd.read_parquet(FEATURES_PARQUET)
             df['Date'] = pd.to_datetime(df['Date'])
-            print(f"✅ Loaded {len(df)} matches")
+            print(f"[OK] Loaded {len(df)} matches")
             return df
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"[ERROR] Error: {e}")
             raise
     
     def get_weekly_periods(self) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
@@ -145,13 +145,13 @@ class DetailedBacktest:
                 
                 return success
             except Exception as e:
-                print(f"   ⚠️ Training failed: {e}")
+                print(f"   [WARN] Training failed: {e}")
                 if backup_features.exists():
                     shutil.copy(backup_features, FEATURES_PARQUET)
                 return False
                 
         except Exception as e:
-            print(f"   ⚠️ Error: {e}")
+            print(f"   [WARN] Error: {e}")
             return False
     
     def generate_predictions(self, test_df: pd.DataFrame, week_num: int) -> pd.DataFrame:
@@ -180,16 +180,16 @@ class DetailedBacktest:
                     temp_fixtures.unlink(missing_ok=True)
                     return test_with_preds
                 else:
-                    print("   ⚠️ No predictions")
+                    print("   [WARN] No predictions")
                     return test_df
                     
             except Exception as e:
-                print(f"   ⚠️ Prediction failed: {e}")
+                print(f"   [WARN] Prediction failed: {e}")
                 temp_fixtures.unlink(missing_ok=True)
                 return test_df
                 
         except Exception as e:
-            print(f"   ⚠️ Error: {e}")
+            print(f"   [WARN] Error: {e}")
             return test_df
     
     def extract_prediction_details(self, df: pd.DataFrame):
@@ -267,14 +267,14 @@ class DetailedBacktest:
                     test_df = full_df[(full_df['Date'] >= week_start) & (full_df['Date'] < week_end)].copy()
                     
                     if len(train_df) < 100 or len(test_df) == 0:
-                        print(f"   ⚠️ Insufficient data")
+                        print(f"   [WARN] Insufficient data")
                         continue
                     
                     print(f"   📊 {len(test_df)} matches")
                     
                     # Train
                     if not self.train_models(train_df):
-                        print(f"   ❌ Training failed")
+                        print(f"   [ERROR] Training failed")
                         continue
                     
                     # Predict
@@ -283,10 +283,10 @@ class DetailedBacktest:
                     
                     # Extract details
                     self.extract_prediction_details(test_with_preds)
-                    print(f"   ✅ Collected {len(self.all_predictions)} total predictions")
+                    print(f"   [OK] Collected {len(self.all_predictions)} total predictions")
                     
                 except Exception as e:
-                    print(f"   ⚠️ Error: {e}")
+                    print(f"   [WARN] Error: {e}")
                     continue
             
             # Generate analysis
@@ -294,14 +294,14 @@ class DetailedBacktest:
             self.restore_outputs()
             
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"[ERROR] Error: {e}")
             self.restore_outputs()
     
     def generate_detailed_analysis(self):
         """Generate comprehensive analysis"""
         try:
             if not self.all_predictions:
-                print("\n⚠️ No predictions to analyze")
+                print("\n[WARN] No predictions to analyze")
                 return
             
             df = pd.DataFrame(self.all_predictions)
@@ -376,9 +376,9 @@ class DetailedBacktest:
             # Find best league + market combos
             best_combos = league_market[league_market['Accuracy'] >= 0.70].head(10)
             if len(best_combos) > 0:
-                print("\n✅ BEST LEAGUE + MARKET (70%+ accuracy):")
+                print("\n[OK] BEST LEAGUE + MARKET (70%+ accuracy):")
                 for idx, row in best_combos.iterrows():
-                    print(f"   • {idx[0]} - {idx[1]}: {row['Accuracy']*100:.1f}% ({int(row['Correct'])}/{int(row['Total'])})")
+                    print(f"   * {idx[0]} - {idx[1]}: {row['Accuracy']*100:.1f}% ({int(row['Correct'])}/{int(row['Total'])})")
             
             # Find best high confidence bets
             if len(high_conf) > 0:
@@ -386,12 +386,12 @@ class DetailedBacktest:
                 if len(best_high) > 0:
                     print("\n🎯 GOLD STANDARD (85%+ confidence, 80%+ accuracy):")
                     for idx, row in best_high.iterrows():
-                        print(f"   • {idx[0]} - {idx[1]}: {row['Accuracy']*100:.1f}% ({int(row['Correct'])}/{int(row['Total'])})")
+                        print(f"   * {idx[0]} - {idx[1]}: {row['Accuracy']*100:.1f}% ({int(row['Correct'])}/{int(row['Total'])})")
             
-            print("\n✅ Analysis complete! Check backtest_outputs/ for detailed CSVs")
+            print("\n[OK] Analysis complete! Check backtest_outputs/ for detailed CSVs")
             
         except Exception as e:
-            print(f"❌ Analysis error: {e}")
+            print(f"[ERROR] Analysis error: {e}")
             import traceback
             traceback.print_exc()
     
@@ -409,14 +409,14 @@ class DetailedBacktest:
                 
                 if latest_backup:
                     shutil.copy(latest_backup, weekly_bets)
-                    print(f"✅ Restored original weekly_bets.csv")
+                    print(f"[OK] Restored original weekly_bets.csv")
                 else:
                     weekly_bets.unlink()
             
-            print(f"✅ All files saved to: {self.backtest_dir}")
+            print(f"[OK] All files saved to: {self.backtest_dir}")
             
         except Exception as e:
-            print(f"⚠️ Cleanup error: {e}")
+            print(f"[WARN] Cleanup error: {e}")
 
 
 # ============================================================================
@@ -428,10 +428,10 @@ if __name__ == "__main__":
         print("\n⚽ DETAILED BACKTEST ANALYSIS")
         print("="*60)
         print("This will analyze:")
-        print("  • Accuracy by confidence buckets (60-65%, 65-70%, etc.)")
-        print("  • Accuracy by league")
-        print("  • League + Market combinations")
-        print("  • League + Market + Confidence (find gold mines!)")
+        print("  * Accuracy by confidence buckets (60-65%, 65-70%, etc.)")
+        print("  * Accuracy by league")
+        print("  * League + Market combinations")
+        print("  * League + Market + Confidence (find gold mines!)")
         print("="*60)
         
         # Get period
@@ -456,16 +456,16 @@ if __name__ == "__main__":
         
         backtest.run_backtest()
         
-        print("\n✅ COMPLETE!")
+        print("\n[OK] COMPLETE!")
         print("📂 Check outputs/backtest_outputs/ for:")
-        print("   • market_confidence_analysis.csv")
-        print("   • league_market_analysis.csv")
-        print("   • league_market_confidence_analysis.csv")
-        print("   • high_confidence_gold.csv (85%+ bets)")
-        print("   • all_predictions_detailed.csv (raw data)")
+        print("   * market_confidence_analysis.csv")
+        print("   * league_market_analysis.csv")
+        print("   * league_market_confidence_analysis.csv")
+        print("   * high_confidence_gold.csv (85%+ bets)")
+        print("   * all_predictions_detailed.csv (raw data)")
         
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[ERROR] Error: {e}")
         import traceback
         traceback.print_exc()
     

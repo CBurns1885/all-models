@@ -59,6 +59,9 @@ Thumbs.db
 # Logs
 *.log
 
+# CatBoost auto-generated files
+catboost_info/
+
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
