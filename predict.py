@@ -940,7 +940,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 <head>
     <meta charset='utf-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <title>[TARGET] ULTIMATE Predictions - {len(top)} Elite Picks</title>
+    <title>[TARGET] ULTIMATE Predictions - {elite_count} Elite Picks</title>
     <style>
         * {{box-sizing: border-box; margin: 0; padding: 0;}}
         body {{
@@ -1075,7 +1075,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
     <div class='container'>
         <div class='header'>
             <h1>[TARGET] ULTIMATE PREDICTIONS</h1>
-            <p style='font-size: 1.2em; opacity: 0.9;'>Maximum Accuracy System - Top {len(top)} Elite Picks</p>
+            <p style='font-size: 1.2em; opacity: 0.9;'>Maximum Accuracy System - Top {elite_count} Elite Picks</p>
         </div>
 
         <div class='stats'>
