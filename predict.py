@@ -30,26 +30,62 @@ OU_LINES = ["0_5","1_5","2_5","3_5","4_5"]
 AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
 
 # League scoring profiles (learned from historical data)
+# style: 'attacking' (>2.8 avg), 'balanced' (2.5-2.8), 'defensive' (<2.5)
+# clean_sheet_rate: Probability of at least one team keeping a clean sheet
 LEAGUE_PROFILES = {
-    'E0': {'avg_goals': 2.72, 'home_adv': 0.12, 'btts_rate': 0.53, 'over25_rate': 0.52, 'quality': 'elite'},
-    'E1': {'avg_goals': 2.65, 'home_adv': 0.10, 'btts_rate': 0.51, 'over25_rate': 0.50, 'quality': 'high'},
-    'E2': {'avg_goals': 2.58, 'home_adv': 0.11, 'btts_rate': 0.49, 'over25_rate': 0.48, 'quality': 'medium'},
-    'E3': {'avg_goals': 2.61, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.49, 'quality': 'medium'},
-    'EC': {'avg_goals': 2.65, 'home_adv': 0.12, 'btts_rate': 0.51, 'over25_rate': 0.50, 'quality': 'medium'},
-    'SP1': {'avg_goals': 2.48, 'home_adv': 0.15, 'btts_rate': 0.46, 'over25_rate': 0.45, 'quality': 'elite'},
-    'SP2': {'avg_goals': 2.35, 'home_adv': 0.14, 'btts_rate': 0.43, 'over25_rate': 0.41, 'quality': 'high'},
-    'I1': {'avg_goals': 2.68, 'home_adv': 0.11, 'btts_rate': 0.52, 'over25_rate': 0.51, 'quality': 'elite'},
-    'I2': {'avg_goals': 2.45, 'home_adv': 0.12, 'btts_rate': 0.47, 'over25_rate': 0.44, 'quality': 'high'},
-    'D1': {'avg_goals': 3.05, 'home_adv': 0.09, 'btts_rate': 0.58, 'over25_rate': 0.60, 'quality': 'elite'},
-    'D2': {'avg_goals': 2.85, 'home_adv': 0.10, 'btts_rate': 0.55, 'over25_rate': 0.56, 'quality': 'high'},
-    'F1': {'avg_goals': 2.55, 'home_adv': 0.13, 'btts_rate': 0.48, 'over25_rate': 0.47, 'quality': 'elite'},
-    'F2': {'avg_goals': 2.42, 'home_adv': 0.12, 'btts_rate': 0.45, 'over25_rate': 0.43, 'quality': 'high'},
-    'N1': {'avg_goals': 2.95, 'home_adv': 0.08, 'btts_rate': 0.60, 'over25_rate': 0.59, 'quality': 'high'},
-    'B1': {'avg_goals': 2.78, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.53, 'quality': 'high'},
-    'P1': {'avg_goals': 2.52, 'home_adv': 0.16, 'btts_rate': 0.47, 'over25_rate': 0.46, 'quality': 'high'},
-    'SC0': {'avg_goals': 2.65, 'home_adv': 0.11, 'btts_rate': 0.51, 'over25_rate': 0.50, 'quality': 'high'},
-    'SC1': {'avg_goals': 2.58, 'home_adv': 0.13, 'btts_rate': 0.49, 'over25_rate': 0.48, 'quality': 'medium'},
-    'T1': {'avg_goals': 3.10, 'home_adv': 0.14, 'btts_rate': 0.59, 'over25_rate': 0.61, 'quality': 'elite'},
+    # England
+    'E0': {'avg_goals': 2.72, 'home_adv': 0.12, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'elite', 'style': 'balanced'},
+    'E1': {'avg_goals': 2.65, 'home_adv': 0.10, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
+    'E2': {'avg_goals': 2.58, 'home_adv': 0.11, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
+    'E3': {'avg_goals': 2.61, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+    'EC': {'avg_goals': 2.65, 'home_adv': 0.12, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'medium', 'style': 'balanced'},
+
+    # Spain (more defensive, tactical)
+    'SP1': {'avg_goals': 2.48, 'home_adv': 0.15, 'btts_rate': 0.46, 'over25_rate': 0.45, 'over15_rate': 0.70, 'over35_rate': 0.20, 'over45_rate': 0.07, 'clean_sheet_rate': 0.54, 'quality': 'elite', 'style': 'defensive'},
+    'SP2': {'avg_goals': 2.35, 'home_adv': 0.14, 'btts_rate': 0.43, 'over25_rate': 0.41, 'over15_rate': 0.67, 'over35_rate': 0.17, 'over45_rate': 0.06, 'clean_sheet_rate': 0.57, 'quality': 'high', 'style': 'defensive'},
+
+    # Italy (tactically aware, balanced)
+    'I1': {'avg_goals': 2.68, 'home_adv': 0.11, 'btts_rate': 0.52, 'over25_rate': 0.51, 'over15_rate': 0.77, 'over35_rate': 0.27, 'over45_rate': 0.11, 'clean_sheet_rate': 0.48, 'quality': 'elite', 'style': 'balanced'},
+    'I2': {'avg_goals': 2.45, 'home_adv': 0.12, 'btts_rate': 0.47, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
+
+    # Germany (high scoring, end-to-end)
+    'D1': {'avg_goals': 3.05, 'home_adv': 0.09, 'btts_rate': 0.58, 'over25_rate': 0.60, 'over15_rate': 0.85, 'over35_rate': 0.35, 'over45_rate': 0.18, 'clean_sheet_rate': 0.42, 'quality': 'elite', 'style': 'attacking'},
+    'D2': {'avg_goals': 2.85, 'home_adv': 0.10, 'btts_rate': 0.55, 'over25_rate': 0.56, 'over15_rate': 0.82, 'over35_rate': 0.32, 'over45_rate': 0.15, 'clean_sheet_rate': 0.45, 'quality': 'high', 'style': 'attacking'},
+
+    # France (physical, moderate scoring)
+    'F1': {'avg_goals': 2.55, 'home_adv': 0.13, 'btts_rate': 0.48, 'over25_rate': 0.47, 'over15_rate': 0.73, 'over35_rate': 0.23, 'over45_rate': 0.09, 'clean_sheet_rate': 0.52, 'quality': 'elite', 'style': 'balanced'},
+    'F2': {'avg_goals': 2.42, 'home_adv': 0.12, 'btts_rate': 0.45, 'over25_rate': 0.43, 'over15_rate': 0.68, 'over35_rate': 0.18, 'over45_rate': 0.06, 'clean_sheet_rate': 0.55, 'quality': 'high', 'style': 'defensive'},
+
+    # Netherlands (attacking football culture)
+    'N1': {'avg_goals': 2.95, 'home_adv': 0.08, 'btts_rate': 0.60, 'over25_rate': 0.59, 'over15_rate': 0.84, 'over35_rate': 0.34, 'over45_rate': 0.16, 'clean_sheet_rate': 0.40, 'quality': 'high', 'style': 'attacking'},
+
+    # Belgium (high scoring, open games)
+    'B1': {'avg_goals': 2.78, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.53, 'over15_rate': 0.79, 'over35_rate': 0.29, 'over45_rate': 0.13, 'clean_sheet_rate': 0.46, 'quality': 'high', 'style': 'balanced'},
+
+    # Portugal (tactical, strong home advantage)
+    'P1': {'avg_goals': 2.52, 'home_adv': 0.16, 'btts_rate': 0.47, 'over25_rate': 0.46, 'over15_rate': 0.72, 'over35_rate': 0.22, 'over45_rate': 0.08, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
+
+    # Scotland
+    'SC0': {'avg_goals': 2.65, 'home_adv': 0.11, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
+    'SC1': {'avg_goals': 2.58, 'home_adv': 0.13, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
+
+    # Turkey (high scoring, volatile)
+    'T1': {'avg_goals': 3.10, 'home_adv': 0.14, 'btts_rate': 0.59, 'over25_rate': 0.61, 'over15_rate': 0.86, 'over35_rate': 0.36, 'over45_rate': 0.19, 'clean_sheet_rate': 0.41, 'quality': 'elite', 'style': 'attacking'},
+
+    # Greece
+    'G1': {'avg_goals': 2.35, 'home_adv': 0.18, 'btts_rate': 0.42, 'over25_rate': 0.40, 'over15_rate': 0.66, 'over35_rate': 0.16, 'over45_rate': 0.05, 'clean_sheet_rate': 0.58, 'quality': 'medium', 'style': 'defensive'},
+
+    # Austria
+    'A1': {'avg_goals': 2.92, 'home_adv': 0.10, 'btts_rate': 0.56, 'over25_rate': 0.58, 'over15_rate': 0.83, 'over35_rate': 0.33, 'over45_rate': 0.15, 'clean_sheet_rate': 0.44, 'quality': 'medium', 'style': 'attacking'},
+
+    # Switzerland
+    'SWZ': {'avg_goals': 2.75, 'home_adv': 0.09, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'medium', 'style': 'balanced'},
+
+    # Poland
+    'POL': {'avg_goals': 2.62, 'home_adv': 0.12, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+
+    # Russia
+    'RUS': {'avg_goals': 2.45, 'home_adv': 0.14, 'btts_rate': 0.46, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'clean_sheet_rate': 0.54, 'quality': 'medium', 'style': 'defensive'},
 }
 
 def _load_base_features() -> pd.DataFrame:
@@ -85,47 +121,156 @@ def calculate_league_profiles(df: pd.DataFrame) -> Dict:
     return profiles
 
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
-    """Calibrate probability based on league-specific patterns"""
+    """Calibrate probability based on league-specific patterns and style."""
     if league not in league_profiles:
         return prob
-    
+
     profile = league_profiles[league]
-    
+    style = profile.get('style', 'balanced')
+    home_adv = profile.get('home_adv', 0.1)
+    clean_sheet_rate = profile.get('clean_sheet_rate', 0.47)
+
     # Stronger calibration for lower confidence predictions
     confidence = abs(prob - 0.5) * 2  # 0 to 1 scale
     calibration_weight = 0.3 * (1 - confidence)  # More calibration when less confident
-    
+
+    # Style-based adjustments
+    style_boost = {'attacking': 0.08, 'balanced': 0.0, 'defensive': -0.08}
+    goal_style_adj = style_boost.get(style, 0.0)
+
+    # ========== GOALS MARKETS ==========
     if 'BTTS_Y' in market:
         league_avg = profile.get('btts_rate', 0.5)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        # Attacking leagues boost BTTS, defensive leagues reduce it
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.5))
+
+    elif 'BTTS_N' in market:
+        league_avg = 1 - profile.get('btts_rate', 0.5)
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        # Defensive leagues boost BTTS_N
+        return max(0.01, min(0.99, calibrated - goal_style_adj * 0.5))
+
     elif 'OU_0_5_O' in market:
         return min(prob * 1.05, 0.99)  # Boost slightly (0.5 goals is very likely)
-    
+
     elif 'OU_1_5_O' in market:
         league_avg = profile.get('over15_rate', 0.7)
-        return prob * (1 - calibration_weight * 0.5) + league_avg * (calibration_weight * 0.5)
-    
+        calibrated = prob * (1 - calibration_weight * 0.5) + league_avg * (calibration_weight * 0.5)
+        return max(0.01, min(0.99, calibrated + goal_style_adj))
+
     elif 'OU_2_5_O' in market:
         league_avg = profile.get('over25_rate', 0.5)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        return max(0.01, min(0.99, calibrated + goal_style_adj))
+
     elif 'OU_3_5_O' in market:
         league_avg = profile.get('over35_rate', 0.25)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.8))
+
     elif 'OU_4_5_O' in market:
         league_avg = profile.get('over45_rate', 0.15)
-        return prob * (1 - calibration_weight) + league_avg * calibration_weight
-    
+        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.6))
+
+    elif '_U' in market and 'OU_' in market:
+        # Under markets - inverse of style adjustment
+        return max(0.01, min(0.99, prob - goal_style_adj))
+
+    # ========== HOME/AWAY ADVANTAGE CALIBRATION ==========
+
+    # Match result markets
     elif '1X2_H' in market:
-        home_adv = profile.get('home_adv', 0.1)
-        return min(prob * (1 + home_adv * 0.25), 0.95)
-    
+        return min(prob * (1 + home_adv * 0.3), 0.95)
+
     elif '1X2_A' in market:
-        home_adv = profile.get('home_adv', 0.1)
-        return max(prob * (1 - home_adv * 0.25), 0.05)
-    
+        return max(prob * (1 - home_adv * 0.3), 0.05)
+
+    elif '1X2_D' in market:
+        # Draw less likely in leagues with high home advantage
+        return max(0.05, min(0.45, prob * (1 - home_adv * 0.15)))
+
+    # Double Chance markets
+    elif 'DC_1X' in market or 'DC1X' in market:
+        # Home or Draw - boosted by home advantage
+        return min(prob * (1 + home_adv * 0.15), 0.95)
+
+    elif 'DC_X2' in market or 'DCX2' in market:
+        # Away or Draw - reduced by home advantage
+        return max(prob * (1 - home_adv * 0.15), 0.15)
+
+    elif 'DC_12' in market or 'DC12' in market:
+        # Home or Away (no draw) - slight boost in high home adv leagues
+        return min(prob * (1 + home_adv * 0.08), 0.95)
+
+    # Draw No Bet
+    elif 'DNB_H' in market:
+        return min(prob * (1 + home_adv * 0.25), 0.90)
+
+    elif 'DNB_A' in market:
+        return max(prob * (1 - home_adv * 0.25), 0.10)
+
+    # Home/Away team goals
+    elif 'HomeTG_' in market or 'HomeExact' in market:
+        # Home team goals - boosted by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob + line_boost))
+
+    elif 'AwayTG_' in market or 'AwayExact' in market:
+        # Away team goals - reduced by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob - line_boost))
+
+    # Team to score
+    elif 'HomeToScore' in market:
+        return min(prob * (1 + home_adv * 0.10), 0.95)
+
+    elif 'AwayToScore' in market:
+        return max(prob * (1 - home_adv * 0.10), 0.20)
+
+    # Win to Nil / Clean Sheet - with home/away distinction
+    elif 'HomeWTN' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.5) * calibration_weight
+        # Home WTN boosted by home advantage
+        return max(0.01, min(0.60, base * (1 + home_adv * 0.20) - goal_style_adj * 0.3))
+
+    elif 'AwayWTN' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.35) * calibration_weight
+        # Away WTN reduced by home advantage
+        return max(0.01, min(0.40, base * (1 - home_adv * 0.20) - goal_style_adj * 0.3))
+
+    elif 'HomeCS' in market:
+        base = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
+        return max(0.01, min(0.65, base * (1 + home_adv * 0.15) - goal_style_adj * 0.4))
+
+    elif 'AwayCS' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.8) * calibration_weight
+        return max(0.01, min(0.55, base * (1 - home_adv * 0.15) - goal_style_adj * 0.4))
+
+    elif 'NoGoal' in market:
+        # 0-0 draw - defensive leagues boost, high home adv reduces
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.15) * calibration_weight
+        return max(0.01, min(0.15, base - goal_style_adj * 0.5))
+
+    # Win by margin - home/away
+    elif 'HomeWin' in market:
+        boost = home_adv * 0.15
+        return max(0.01, min(0.85, prob + boost))
+
+    elif 'AwayWin' in market:
+        boost = home_adv * 0.15
+        return max(0.01, min(0.60, prob - boost))
+
+    # Asian Handicap - home advantage affects line perception
+    elif 'AH_' in market:
+        if '_H' in market or market.endswith('_H'):
+            # Home covers handicap
+            return max(0.01, min(0.85, prob + home_adv * 0.08))
+        elif '_A' in market or market.endswith('_A'):
+            # Away covers handicap
+            return max(0.01, min(0.85, prob - home_adv * 0.08))
+
     return prob
 
 def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
@@ -730,30 +875,37 @@ def calculate_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = None):
-    """Enhanced HTML report with confidence scores"""
+    """Enhanced HTML report - Elite picks (>85% probability) sorted by date and league"""
     prob_cols = [c for c in df.columns if c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_")]
     if not prob_cols:
         print("Warning: No probability columns found")
         return
-    
+
     df2 = df.copy()
     df2["BestProb"] = df2[prob_cols].max(axis=1)
     df2["BestMarket"] = df2[prob_cols].idxmax(axis=1)
-    
+
     # Add confidence if available
     conf_cols = [c for c in df2.columns if c.startswith("CONF_")]
     if conf_cols:
         df2["AvgConfidence"] = df2[conf_cols].mean(axis=1)
     else:
         df2["AvgConfidence"] = 0.5
-    
-    # Filter meaningful predictions
-    meaningful = df2[(df2["BestProb"] > 0.5) & (df2["AvgConfidence"] > 0.5)]
-    
-    if len(meaningful) >= 10:
-        top = meaningful.sort_values(["AvgConfidence", "BestProb"], ascending=[False, False]).head(50)
-    else:
-        top = df2.sort_values("BestProb", ascending=False).head(50)
+
+    # Filter for ELITE predictions only (>85% probability)
+    elite_threshold = 0.85
+    elite = df2[df2["BestProb"] >= elite_threshold].copy()
+
+    # Sort by Date, then League
+    if 'Date' in elite.columns:
+        elite['Date'] = pd.to_datetime(elite['Date'], errors='coerce')
+        elite = elite.sort_values(['Date', 'League'], ascending=[True, True])
+
+    # Count stats
+    total_fixtures = len(df2)
+    elite_count = len(elite)
+    very_high = len(df2[df2["BestProb"] >= 0.90])
+    high_conf = len(df2[(df2["BestProb"] >= 0.75) & (df2["AvgConfidence"] >= 0.70)])
     
     def parse_market(market_name):
         market_name = market_name.replace("BLEND_", "").replace("P_", "").replace("DC_", "")
@@ -925,23 +1077,23 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
             <h1>[TARGET] ULTIMATE PREDICTIONS</h1>
             <p style='font-size: 1.2em; opacity: 0.9;'>Maximum Accuracy System - Top {len(top)} Elite Picks</p>
         </div>
-        
+
         <div class='stats'>
             <div class='stat-box'>
-                <div class='number'>{len(df2)}</div>
+                <div class='number'>{total_fixtures}</div>
                 <div class='label'>Total Fixtures</div>
             </div>
             <div class='stat-box'>
-                <div class='number'>{len(meaningful)}</div>
-                <div class='label'>High Quality</div>
+                <div class='number'>{elite_count}</div>
+                <div class='label'>Elite (85%+)</div>
             </div>
             <div class='stat-box'>
-                <div class='number'>{df2['BestProb'].max():.0%}</div>
-                <div class='label'>Best Probability</div>
+                <div class='number'>{very_high}</div>
+                <div class='label'>Very High (90%+)</div>
             </div>
             <div class='stat-box'>
-                <div class='number'>{df2['AvgConfidence'].mean():.0%}</div>
-                <div class='label'>Avg Confidence</div>
+                <div class='number'>{high_conf}</div>
+                <div class='label'>High Confidence</div>
             </div>
         </div>
         
@@ -960,30 +1112,28 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
             </thead>
             <tbody>"""
     
-    for i, (_, r) in enumerate(top.iterrows(), 1):
+    for i, (_, r) in enumerate(elite.iterrows(), 1):
         market, selection = parse_market(r['BestMarket'])
         prob = r['BestProb']
         conf = r.get('AvgConfidence', 0.5)
-        
-        # Row styling
-        if prob >= 0.85 and conf >= 0.75:
-            row_class = "elite"
-        elif prob >= 0.75:
-            row_class = "high"
-        elif prob >= 0.65:
-            row_class = "medium"
+
+        # Row styling - all are elite (85%+), differentiate by 90%+ and confidence
+        if prob >= 0.95:
+            row_class = "elite"  # 95%+ = gold tier
+        elif prob >= 0.90:
+            row_class = "high"   # 90-95% = green tier
         else:
-            row_class = ""
-        
+            row_class = "medium" # 85-90% = yellow tier
+
         # Confidence badge
         if conf >= 0.7:
             conf_class = "conf-high"
         else:
             conf_class = "conf-med"
-        
+
         # Source badge
         source = "BLEND" if r['BestMarket'].startswith("BLEND_") else ("DC" if r['BestMarket'].startswith("DC_") else "ML")
-        
+
         html += f"""
                 <tr class='{row_class}'>
                     <td class='rank'>{i}</td>
@@ -995,21 +1145,31 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
                     <td class='prob'>{prob:.1%}</td>
                     <td><span class='confidence {conf_class}'>{conf:.0%}</span></td>
                 </tr>"""
-    
+
+    # Handle empty elite list
+    if elite_count == 0:
+        html += """
+                <tr>
+                    <td colspan='8' style='text-align: center; padding: 40px; color: #666;'>
+                        No predictions above 85% threshold for these fixtures.
+                        Check weekly_bets_full.csv for all predictions.
+                    </td>
+                </tr>"""
+
     html += """
             </tbody>
         </table>
     </div>
 </body>
 </html>"""
-    
-    out_path = path / "top50_ultimate.html"
+
+    out_path = path / "elite_picks.html"
     out_path.write_text(html, encoding="utf-8")
     print(f"[OK] Wrote ULTIMATE HTML -> {out_path}")
     
     if secondary_path:
         secondary_path.mkdir(parents=True, exist_ok=True)
-        secondary_out = secondary_path / "top50_ultimate.html"
+        secondary_out = secondary_path / "elite_picks.html"
         secondary_out.write_text(html, encoding="utf-8")
         print(f"[OK] Wrote ULTIMATE HTML (copy) -> {secondary_out}")
 

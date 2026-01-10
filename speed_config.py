@@ -247,6 +247,92 @@ PRETUNED_PARAMS = {
 # MARKET TIERS - Focused on high-value betting markets
 # ============================================================================
 
+CORE_MARKETS = [
+    # Match Result
+    "y_1X2",        # Match result - most important
+
+    # Goals Markets (most popular)
+    "y_BTTS",       # Both teams to score
+    "y_OU_0_5",     # Over/Under 0.5
+    "y_OU_1_5",     # Over/Under 1.5
+    "y_OU_2_5",     # Over/Under 2.5 - most popular
+    "y_OU_3_5",     # Over/Under 3.5
+    "y_OU_4_5",     # Over/Under 4.5
+    "y_GOAL_RANGE", # Goal bands
+
+    # Double Chance
+    "y_DC_1X",      # Home or Draw
+    "y_DC_X2",      # Away or Draw
+    "y_DC_12",      # Home or Away (no draw)
+
+    # Draw No Bet
+    "y_DNB_H",
+    "y_DNB_A",
+
+    # Team Goals
+    "y_HomeTG_0_5", "y_HomeTG_1_5", "y_HomeTG_2_5",
+    "y_AwayTG_0_5", "y_AwayTG_1_5", "y_AwayTG_2_5",
+
+    # To Score
+    "y_HomeToScore",
+    "y_AwayToScore",
+
+    # Asian Handicap (core lines)
+    "y_AH_-0_5", "y_AH_0_0", "y_AH_+0_5",
+    "y_AH_-1_0", "y_AH_+1_0",
+
+    # Win to Nil
+    "y_HomeWTN",
+    "y_AwayWTN",
+
+    # Multi-goal
+    "y_Match2+Goals",
+    "y_Match3+Goals",
+]
+
+SECONDARY_MARKETS = [
+    # Extended Asian Handicap
+    "y_AH_-1_5", "y_AH_-2_0", "y_AH_+1_5", "y_AH_+2_0",
+
+    # Team exact goals
+    "y_HomeExact_0", "y_HomeExact_1", "y_HomeExact_2", "y_HomeExact_3+",
+    "y_AwayExact_0", "y_AwayExact_1", "y_AwayExact_2", "y_AwayExact_3+",
+
+    # Exact total goals
+    "y_ExactTotal_0", "y_ExactTotal_1", "y_ExactTotal_2",
+    "y_ExactTotal_3", "y_ExactTotal_4", "y_ExactTotal_5", "y_ExactTotal_6+",
+
+    # Clean sheets
+    "y_HomeCS", "y_AwayCS", "y_NoGoal",
+
+    # Win by margin
+    "y_HomeWinBy1", "y_HomeWinBy2", "y_HomeWinBy3+",
+    "y_AwayWinBy1", "y_AwayWinBy2", "y_AwayWinBy3+",
+    "y_HomeWin2+", "y_AwayWin2+",
+
+    # Result + BTTS combos
+    "y_HomeWin_BTTS_Y", "y_HomeWin_BTTS_N",
+    "y_AwayWin_BTTS_Y", "y_AwayWin_BTTS_N",
+    "y_Draw_BTTS_Y", "y_Draw_BTTS_N",
+
+    # Result + O/U combos
+    "y_HomeWin_O25", "y_HomeWin_U25",
+    "y_AwayWin_O25", "y_AwayWin_U25",
+    "y_Draw_O25", "y_Draw_U25",
+
+    # DC + combos
+    "y_DC1X_O25", "y_DC1X_U25",
+    "y_DCX2_O25", "y_DCX2_U25",
+    "y_DC12_O25", "y_DC12_U25",
+    "y_DC1X_BTTS_Y", "y_DC1X_BTTS_N",
+    "y_DCX2_BTTS_Y", "y_DCX2_BTTS_N",
+
+    # European Handicap
+    "y_EH_m1_H", "y_EH_m1_D", "y_EH_m1_A",
+    "y_EH_p1_H", "y_EH_p1_D", "y_EH_p1_A",
+]
+
+# Skip these in BALANCED mode (complex/rare)
 # Tier 1: Core high-value markets (13 markets - ALWAYS train)
 TIER1_CORE_MARKETS = [
     "y_1X2",              # Match result
@@ -276,25 +362,31 @@ SECONDARY_MARKETS = TIER2_VALUE_MARKETS
 
 # Skip these in FAST mode (rarely bet, complex)
 SKIP_IN_FAST_MODE = [
-    "y_CS",  # Correct score - 37 classes
-    "y_HTFT",  # 9 classes
+    "y_CS",  # Correct score - 37 classes, very hard
+    "y_HTFT",  # 9 classes, needs lots of data
+
+    # Half-time markets (less data, harder to predict)
     "y_HT",
-    "y_HT_OU_0_5",
-    "y_HT_OU_1_5",
-    "y_HT_OU_2_5",
+    "y_HT_OU_0_5", "y_HT_OU_1_5", "y_HT_OU_2_5",
     "y_HT_BTTS",
-    "y_2H_OU_0_5",
-    "y_2H_OU_1_5",
-    "y_2H_OU_2_5",
+
+    # Second half (even less predictable)
+    "y_2H_OU_0_5", "y_2H_OU_1_5", "y_2H_OU_2_5",
     "y_2H_BTTS",
+
+    # Rare/complex
     "y_HigherHalf",
     "y_GoalsBothHalves",
-    "y_HomeScoresBothHalves",
-    "y_AwayScoresBothHalves",
+    "y_HomeScoresBothHalves", "y_AwayScoresBothHalves",
+    "y_HomeWinEitherHalf", "y_AwayWinEitherHalf",
+    "y_HomeWinBothHalves", "y_AwayWinBothHalves",
     "y_FirstToScore",
-    "y_TotalOddEven",
-    "y_HomeOddEven",
-    "y_AwayOddEven",
+    "y_TotalOddEven", "y_HomeOddEven", "y_AwayOddEven",
+    "y_Match4+Goals", "y_Match5+Goals",  # Rare outcomes
+
+    # Extended European Handicap (less common)
+    "y_EH_m2_H", "y_EH_m2_D", "y_EH_m2_A",
+    "y_EH_p2_H", "y_EH_p2_D", "y_EH_p2_A",
 ]
 
 
