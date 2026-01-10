@@ -563,6 +563,4 @@ except Exception as e:
     traceback.print_exc()
 
 finally:
-    if not NON_INTERACTIVE:
-        input("\nPress Enter to close...")
     print("\n[DONE] Pipeline finished.")
