@@ -161,17 +161,19 @@ class AccuracyTracker:
             outcome_cols = [c for c in results_df.columns if c.startswith('y_')]
             
             for outcome_col in outcome_cols:
-                market = outcome_col  # e.g., y_1X2
+                # Remove 'y_' prefix to match database format
+                # e.g., y_1X2 -> 1X2, y_BTTS -> BTTS
+                market = outcome_col.replace('y_', '')
                 actual_outcome = row[outcome_col]
-                
+
                 if pd.notna(actual_outcome):
                     # Update matching predictions
                     cursor.execute("""
                         UPDATE predictions
                         SET actual_outcome = ?,
-                            correct = CASE 
-                                WHEN predicted_outcome = ? THEN 1 
-                                ELSE 0 
+                            correct = CASE
+                                WHEN predicted_outcome = ? THEN 1
+                                ELSE 0
                             END
                         WHERE match_date = ?
                         AND league = ?
@@ -179,7 +181,7 @@ class AccuracyTracker:
                         AND away_team = ?
                         AND market = ?
                         AND actual_outcome IS NULL
-                    """, (actual_outcome, actual_outcome, match_date, league, 
+                    """, (actual_outcome, actual_outcome, match_date, league,
                          home_team, away_team, market))
                     
                     updated_count += cursor.rowcount
