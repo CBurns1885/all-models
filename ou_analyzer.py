@@ -25,9 +25,9 @@ OU_REPORT_CSV = OUTPUT_DIR / "ou_analysis.csv"
 OU_REPORT_XLSX = OUTPUT_DIR / "ou_analysis.xlsx"
 
 # Thresholds
-DEFAULT_CONFIDENCE = 0.65  # 65% minimum confidence
-HIGH_CONFIDENCE = 0.75     # 75%+ = high confidence
-ELITE_CONFIDENCE = 0.85    # 85%+ = elite
+DEFAULT_CONFIDENCE = 0.90  # 90% minimum confidence
+HIGH_CONFIDENCE = 0.92     # 92%+ = high confidence
+ELITE_CONFIDENCE = 0.95    # 95%+ = elite
 
 # O/U Lines to analyze
 OU_LINES = [ '0_5','1_5', '2_5', '3_5', '4_5']
@@ -660,10 +660,10 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="Analyze Over/Under predictions")
     parser.add_argument(
-        '--confidence', 
-        type=float, 
-        default=0.65,
-        help='Minimum confidence threshold (default: 0.65)'
+        '--confidence',
+        type=float,
+        default=0.90,
+        help='Minimum confidence threshold (default: 0.90)'
     )
     
     args = parser.parse_args()

@@ -205,13 +205,13 @@ class MarketSplitter:
                 market_df['Confidence'] = market_df[renamed_cols].max(axis=1)
                 market_df['Confidence_%'] = (market_df['Confidence'] * 100).round(1)
 
-            # Filter: Keep only predictions with confidence >= 60%
+            # Filter: Keep only predictions with confidence >= 90%
             if 'Confidence' in market_df.columns:
                 before_count = len(market_df)
-                market_df = market_df[market_df['Confidence'] >= 0.60].copy()
+                market_df = market_df[market_df['Confidence'] >= 0.90].copy()
                 filtered_count = before_count - len(market_df)
                 if filtered_count > 0:
-                    print(f"  [{market_key}] Filtered {filtered_count} predictions below 60% confidence")
+                    print(f"  [{market_key}] Filtered {filtered_count} predictions below 90% confidence")
 
             # Sort by date, then league, then confidence (highest first)
             sort_cols = []

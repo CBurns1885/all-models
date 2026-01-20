@@ -198,11 +198,11 @@ MARKET_CONFIGS = {
 class MarketBacktester:
     """Analyze all markets using walk-forward backtest on historical data"""
 
-    def __init__(self, weeks: int = 4, min_confidence: float = 0.65, use_historical: bool = True):
+    def __init__(self, weeks: int = 4, min_confidence: float = 0.90, use_historical: bool = True):
         """
         Args:
             weeks: Number of weeks to analyze
-            min_confidence: Minimum confidence threshold (default 65%)
+            min_confidence: Minimum confidence threshold (default 90%)
             use_historical: If True, run walk-forward backtest on historical data
                           If False, analyze recent predictions (for live tracking)
         """
@@ -907,7 +907,7 @@ class MarketBacktester:
         print(f"[OK] Saved HTML report to {html_path}")
 
 
-def run_market_backtest(weeks: int = 4, min_confidence: float = 0.60, use_historical: bool = True):
+def run_market_backtest(weeks: int = 4, min_confidence: float = 0.90, use_historical: bool = True):
     """
     Run multi-market backtest analysis
 
@@ -948,7 +948,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Multi-Market Backtest Analysis')
     parser.add_argument('--weeks', type=int, default=4, help='Number of weeks to analyze (default: 4)')
-    parser.add_argument('--min-confidence', type=float, default=0.65, help='Minimum confidence threshold 0.0-1.0 (default: 0.65)')
+    parser.add_argument('--min-confidence', type=float, default=0.90, help='Minimum confidence threshold 0.0-1.0 (default: 0.90)')
     parser.add_argument('--no-historical', action='store_true', help='Use recent predictions instead of historical backtest')
     args = parser.parse_args()
 

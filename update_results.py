@@ -9,9 +9,13 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from accuracy_tracker import AccuracyTracker
 
-def fetch_latest_results(data_dir: Path = None) -> pd.DataFrame:
+def fetch_latest_results(data_dir: Path = None, days_back: int = 60) -> pd.DataFrame:
     """
     Fetch latest results from API-Football database
+
+    Args:
+        data_dir: Path to data directory (for CSV fallback)
+        days_back: Number of days to look back for results (default: 60)
     """
     print("[FETCH] Fetching latest results from API-Football database...")
 
@@ -23,8 +27,8 @@ def fetch_latest_results(data_dir: Path = None) -> pd.DataFrame:
             print("   [WARN] API-Football database not found, trying CSV fallback...")
             return fetch_latest_results_from_csv(data_dir)
 
-        # Get recent completed matches (last 30 days)
-        cutoff_date = datetime.now() - timedelta(days=30)
+        # Get recent completed matches (configurable lookback)
+        cutoff_date = datetime.now() - timedelta(days=days_back)
 
         # Get all finished matches
         df = get_fixtures_from_db(status='FT')
@@ -36,7 +40,7 @@ def fetch_latest_results(data_dir: Path = None) -> pd.DataFrame:
         df['Date'] = pd.to_datetime(df['Date'])
         recent = df[df['Date'] >= cutoff_date].copy()
 
-        print(f"   [OK] Found {len(recent)} recent finished matches from database")
+        print(f"   [OK] Found {len(recent)} finished matches (last {days_back} days)")
         print(f"   Date range: {recent['Date'].min()} to {recent['Date'].max()}")
 
         return recent
@@ -320,25 +324,38 @@ def check_pending_predictions():
 # ============================================================================
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Update accuracy database with results")
+    parser.add_argument('--auto', '-y', action='store_true', help='Run without confirmation prompt')
+    args = parser.parse_args()
+
     print("[TRACKER] ACCURACY TRACKING - RESULTS UPDATER")
     print("="*60)
-    
+
     # Check pending predictions
     check_pending_predictions()
-    
-    # Ask user to proceed
-    print("\n" + "="*60)
-    proceed = input("Update database with latest results? (y/n): ").lower().strip()
-    
-    if proceed != 'y':
-        print("[ERROR] Update cancelled")
+
+    # Ask user to proceed (unless --auto flag)
+    proceed = True
+    if not args.auto:
+        print("\n" + "="*60)
+        try:
+            user_input = input("Update database with latest results? (y/n): ").lower().strip()
+            proceed = (user_input == 'y')
+        except EOFError:
+            # Non-interactive mode - proceed automatically
+            proceed = True
+
+    if not proceed:
+        print("[INFO] Update cancelled")
     else:
         # Update database
         success = update_accuracy_database()
-        
+
         if success:
             # Show recent performance
             show_recent_performance(weeks=4)
-            
-            print("\n[TIP] TIP: Run this script weekly after matches complete")
+
+            print("\n[TIP] Run this script weekly after matches complete")
             print("   It will keep your accuracy database up-to-date")

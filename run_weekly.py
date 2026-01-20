@@ -88,6 +88,8 @@ TRAINING_START_YEAR = 2023  # More recent data = better accuracy
 NON_INTERACTIVE = args.non_interactive
 
 DEFAULT_LEAGUES = [
+    # European Competitions (Champions League, Europa League, Conference League)
+    "UCL", "UEL", "UECL",
     # England (leagues + cups)
     "E0", "E1", "E2", "E3", "EC", "FAC",
     # Germany (leagues + cup)
@@ -395,13 +397,13 @@ try:
         csv_path = OUTPUT_DIR / "weekly_bets.csv"
 
         if csv_path.exists():
-            df_ou = analyze_ou_predictions(min_confidence=0.65)
+            df_ou = analyze_ou_predictions(min_confidence=0.90)
 
             if df_ou is not None and not df_ou.empty:
                 print(f"[OK] O/U Analysis: {len(df_ou)} predictions")
-                elite = len(df_ou[df_ou['Best_Prob'] >= 0.85])
-                high = len(df_ou[df_ou['Best_Prob'] >= 0.75])
-                print(f"   Elite (85%+): {elite}, High (75%+): {high}")
+                elite = len(df_ou[df_ou['Best_Prob'] >= 0.95])
+                high = len(df_ou[df_ou['Best_Prob'] >= 0.92])
+                print(f"   Elite (95%+): {elite}, High (92%+): {high}")
             else:
                 print("[INFO] No high-confidence O/U predictions")
         else:
