@@ -82,41 +82,59 @@ class AccuracyTracker:
     
     def log_predictions(self, predictions_df: pd.DataFrame, week_id: str):
         """
-        Log predictions for a week
-        
+        Log predictions for a week - only logs the BEST prediction per market
+
         Args:
             predictions_df: DataFrame with columns: Date, League, HomeTeam, AwayTeam,
                            P_y_1X2_H, P_y_1X2_D, P_y_1X2_A, etc.
             week_id: Unique identifier for this week (e.g., '2025-W40')
         """
         conn = sqlite3.connect(self.db_path)
-        
+
         prediction_date = datetime.now().date()
         records = []
-        
+
+        # Find all probability columns
+        prob_cols = [c for c in predictions_df.columns if c.startswith('P_')]
+
+        # Group probability columns by market
+        # e.g., P_1X2_H, P_1X2_D, P_1X2_A -> market '1X2'
+        markets = {}
+        for prob_col in prob_cols:
+            parts = prob_col.replace('P_', '').split('_')
+            if len(parts) < 2:
+                continue
+
+            # Market name is everything except the last part (outcome)
+            market = '_'.join(parts[:-1])
+            outcome = parts[-1]
+
+            if market not in markets:
+                markets[market] = []
+            markets[market].append((prob_col, outcome))
+
         # Extract predictions for each market
         for idx, row in predictions_df.iterrows():
             match_date = pd.to_datetime(row['Date']).date()
             league = row['League']
             home_team = row['HomeTeam']
             away_team = row['AwayTeam']
-            
-            # Find all probability columns
-            prob_cols = [c for c in predictions_df.columns if c.startswith('P_')]
-            
-            for prob_col in prob_cols:
-                # Parse market and outcome from column name
-                # e.g., P_y_1X2_H -> market=y_1X2, outcome=H
-                parts = prob_col.replace('P_', '').split('_')
-                if len(parts) < 2:
-                    continue
-                
-                # Reconstruct market name
-                market = '_'.join(parts[:-1])
-                outcome = parts[-1]
-                probability = row[prob_col]
-                
-                if pd.notna(probability) and probability > 0:
+
+            # For each market, find the outcome with highest probability
+            for market, cols_and_outcomes in markets.items():
+                best_prob = 0
+                best_outcome = None
+                best_col = None
+
+                for prob_col, outcome in cols_and_outcomes:
+                    prob = row.get(prob_col, 0)
+                    if pd.notna(prob) and prob > best_prob:
+                        best_prob = prob
+                        best_outcome = outcome
+                        best_col = prob_col
+
+                # Only log if we found a valid prediction
+                if best_outcome is not None and best_prob > 0:
                     records.append({
                         'week_id': week_id,
                         'prediction_date': prediction_date,
@@ -125,17 +143,17 @@ class AccuracyTracker:
                         'home_team': home_team,
                         'away_team': away_team,
                         'market': market,
-                        'predicted_outcome': outcome,
-                        'predicted_probability': float(probability),
+                        'predicted_outcome': best_outcome,
+                        'predicted_probability': float(best_prob),
                         'actual_outcome': None,
                         'correct': None
                     })
-        
+
         # Insert into database
         if records:
             pd.DataFrame(records).to_sql('predictions', conn, if_exists='append', index=False)
             print(f"[OK] Logged {len(records)} predictions for week {week_id}")
-        
+
         conn.close()
     
     def update_results(self, results_df: pd.DataFrame):
@@ -335,7 +353,7 @@ class AccuracyTracker:
 
         # Create confidence buckets (60%, 65%, 70%, ..., 100%)
         buckets = list(range(60, 105, 5))  # [60, 65, 70, 75, 80, 85, 90, 95, 100]
-        bucket_labels = [f"{b}%-{b+4}%" for b in buckets[:-1]] + ["100%"]
+        bucket_labels = [f"{b}%-{b+4}%" for b in buckets[:-1]]  # ['60%-64%', ..., '95%-99%']
 
         # Assign each prediction to a bucket
         df['confidence_bucket'] = pd.cut(

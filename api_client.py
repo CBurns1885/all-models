@@ -555,6 +555,167 @@ def populate_historical_data(leagues: List[str] = None, seasons: List[int] = Non
     return total
 
 
+def fetch_injuries_for_fixture(fixture_id: int) -> List[Dict]:
+    """
+    Fetch injury/lineup data for a specific fixture
+
+    Args:
+        fixture_id: API-Football fixture ID
+
+    Returns:
+        List of injury records
+    """
+    data = _make_request('injuries', {'fixture': fixture_id})
+
+    if not data or 'response' not in data:
+        return []
+
+    injuries = []
+    for injury in data['response']:
+        player = injury.get('player', {})
+        team = injury.get('team', {})
+
+        injuries.append({
+            'fixture_id': fixture_id,
+            'team_id': team.get('id'),
+            'team_name': team.get('name'),
+            'player_id': player.get('id'),
+            'player_name': player.get('name'),
+            'player_type': player.get('type'),  # 'Missing Fixture' or type
+            'injury_reason': player.get('reason')
+        })
+
+    return injuries
+
+
+def fetch_lineups_for_fixture(fixture_id: int) -> Dict:
+    """
+    Fetch confirmed lineups for a specific fixture
+    Usually available ~1 hour before kickoff
+
+    Args:
+        fixture_id: API-Football fixture ID
+
+    Returns:
+        Dictionary with home and away lineups
+    """
+    data = _make_request('fixtures/lineups', {'fixture': fixture_id})
+
+    if not data or 'response' not in data or not data['response']:
+        return {}
+
+    result = {'home': None, 'away': None}
+
+    for team_data in data['response']:
+        team = team_data.get('team', {})
+        team_id = team.get('id')
+        formation = team_data.get('formation')
+
+        starters = []
+        for player in team_data.get('startXI', []):
+            p = player.get('player', {})
+            starters.append({
+                'id': p.get('id'),
+                'name': p.get('name'),
+                'number': p.get('number'),
+                'pos': p.get('pos'),
+                'grid': p.get('grid')
+            })
+
+        subs = []
+        for player in team_data.get('substitutes', []):
+            p = player.get('player', {})
+            subs.append({
+                'id': p.get('id'),
+                'name': p.get('name'),
+                'number': p.get('number'),
+                'pos': p.get('pos')
+            })
+
+        lineup_data = {
+            'team_id': team_id,
+            'team_name': team.get('name'),
+            'formation': formation,
+            'starters': starters,
+            'substitutes': subs
+        }
+
+        # Determine if home or away (first is usually home)
+        if result['home'] is None:
+            result['home'] = lineup_data
+        else:
+            result['away'] = lineup_data
+
+    return result
+
+
+def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fetch injuries and lineups for upcoming fixtures
+    Adds injury count and lineup status columns
+
+    Args:
+        fixtures_df: DataFrame with upcoming fixtures (must have fixture_id column)
+
+    Returns:
+        DataFrame with added injury/lineup columns
+    """
+    if 'fixture_id' not in fixtures_df.columns:
+        print("[WARN] No fixture_id column - cannot fetch live data")
+        return fixtures_df
+
+    log_header("Fetching Live Data (Injuries & Lineups)")
+
+    df = fixtures_df.copy()
+    df['home_injuries'] = 0
+    df['away_injuries'] = 0
+    df['home_injury_players'] = ''
+    df['away_injury_players'] = ''
+    df['home_formation'] = ''
+    df['away_formation'] = ''
+    df['lineups_confirmed'] = False
+
+    for idx, row in df.iterrows():
+        fixture_id = row['fixture_id']
+        home_team = row.get('HomeTeam', '')
+        away_team = row.get('AwayTeam', '')
+
+        # Fetch injuries
+        injuries = fetch_injuries_for_fixture(fixture_id)
+
+        if injuries:
+            home_inj = [i for i in injuries if i['team_name'] == home_team]
+            away_inj = [i for i in injuries if i['team_name'] == away_team]
+
+            df.at[idx, 'home_injuries'] = len(home_inj)
+            df.at[idx, 'away_injuries'] = len(away_inj)
+            df.at[idx, 'home_injury_players'] = ', '.join([i['player_name'] for i in home_inj[:5]])
+            df.at[idx, 'away_injury_players'] = ', '.join([i['player_name'] for i in away_inj[:5]])
+
+        # Fetch lineups (if available)
+        lineups = fetch_lineups_for_fixture(fixture_id)
+
+        if lineups and lineups.get('home') and lineups.get('away'):
+            df.at[idx, 'home_formation'] = lineups['home'].get('formation', '')
+            df.at[idx, 'away_formation'] = lineups['away'].get('formation', '')
+            df.at[idx, 'lineups_confirmed'] = True
+
+        # Progress indicator
+        if (idx + 1) % 10 == 0:
+            print(f"  Processed {idx + 1}/{len(df)} fixtures...")
+
+    # Summary
+    total_home_inj = df['home_injuries'].sum()
+    total_away_inj = df['away_injuries'].sum()
+    lineups_available = df['lineups_confirmed'].sum()
+
+    print(f"\n[OK] Live data fetched:")
+    print(f"  Total injuries: {total_home_inj} (home) + {total_away_inj} (away)")
+    print(f"  Lineups confirmed: {lineups_available}/{len(df)} fixtures")
+
+    return df
+
+
 def get_database_stats() -> Dict:
     """
     Get statistics about the current database

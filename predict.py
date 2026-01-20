@@ -791,6 +791,91 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
     
     return rows, out_cols
 
+
+def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply injury-based adjustments to predictions.
+
+    Injuries affect:
+    - Team strength (more injuries = weaker)
+    - Goals markets (key attacker out = fewer goals)
+    - Clean sheet probability
+
+    Args:
+        df: DataFrame with predictions
+        fixtures_df: DataFrame with fixture info including injury data
+
+    Returns:
+        DataFrame with adjusted predictions
+    """
+    if 'home_injuries' not in fixtures_df.columns or 'away_injuries' not in fixtures_df.columns:
+        return df
+
+    print("[INJURY] Applying injury impact adjustments...")
+
+    df = df.copy()
+
+    # Maximum injury impact (per player out)
+    INJURY_IMPACT_PER_PLAYER = 0.02  # 2% adjustment per injury
+    MAX_INJURY_IMPACT = 0.10  # Maximum 10% total adjustment
+
+    for idx in range(len(df)):
+        if idx >= len(fixtures_df):
+            break
+
+        home_inj = fixtures_df.iloc[idx].get('home_injuries', 0)
+        away_inj = fixtures_df.iloc[idx].get('away_injuries', 0)
+
+        if home_inj == 0 and away_inj == 0:
+            continue
+
+        # Calculate injury impact (capped)
+        home_impact = min(home_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
+        away_impact = min(away_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
+
+        # Adjust 1X2 probabilities
+        # More home injuries = reduce home win, increase away win
+        # More away injuries = reduce away win, increase home win
+        for prefix in ['P_', 'BLEND_']:
+            h_col = f'{prefix}1X2_H'
+            d_col = f'{prefix}1X2_D'
+            a_col = f'{prefix}1X2_A'
+
+            if h_col in df.columns and a_col in df.columns:
+                # Adjust based on injury differential
+                h_adj = away_impact - home_impact  # Home benefits from away injuries
+                a_adj = home_impact - away_impact  # Away benefits from home injuries
+
+                df.at[idx, h_col] = max(0.01, min(0.99, df.at[idx, h_col] + h_adj))
+                df.at[idx, a_col] = max(0.01, min(0.99, df.at[idx, a_col] + a_adj))
+
+                # Normalize to ensure sum <= 1
+                total = df.at[idx, h_col] + df.at[idx, d_col] + df.at[idx, a_col]
+                if total > 1:
+                    df.at[idx, h_col] /= total
+                    df.at[idx, d_col] /= total
+                    df.at[idx, a_col] /= total
+
+        # Adjust over/under based on total injuries (more injuries typically = fewer goals)
+        total_inj = home_inj + away_inj
+        if total_inj > 0:
+            goal_reduction = min(total_inj * 0.01, 0.05)  # Max 5% reduction in over probability
+
+            for line in ['0_5', '1_5', '2_5', '3_5', '4_5']:
+                for prefix in ['P_', 'BLEND_']:
+                    o_col = f'{prefix}OU_{line}_O'
+                    u_col = f'{prefix}OU_{line}_U'
+
+                    if o_col in df.columns and u_col in df.columns:
+                        df.at[idx, o_col] = max(0.01, df.at[idx, o_col] - goal_reduction)
+                        df.at[idx, u_col] = min(0.99, df.at[idx, u_col] + goal_reduction)
+
+    adjusted_count = len(fixtures_df[(fixtures_df['home_injuries'] > 0) | (fixtures_df['away_injuries'] > 0)])
+    print(f"[INJURY] Adjusted {adjusted_count} fixtures based on injury data")
+
+    return df
+
+
 def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
     """Enhanced blending with dynamic weights by league quality"""
     try:
@@ -921,8 +1006,168 @@ def calculate_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
+def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
+    """
+    Create combined output for 1X2, OU2.5, and OU1.5 markets above 95% confidence.
+    Shows all three markets side-by-side for each match where any qualifies.
+    """
+    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 >= 95%)...")
+
+    # Define the target markets and their probability columns
+    markets = {
+        '1X2': ['BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A', 'P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
+        'OU_2_5': ['BLEND_OU_2_5_O', 'BLEND_OU_2_5_U', 'P_OU_2_5_O', 'P_OU_2_5_U'],
+        'OU_1_5': ['BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U']
+    }
+
+    rows = []
+    threshold = 0.95
+
+    for idx, row in df.iterrows():
+        match_info = {
+            'Date': row.get('Date', ''),
+            'League': row.get('League', ''),
+            'Home': row.get('Home', row.get('HomeTeam', '')),
+            'Away': row.get('Away', row.get('AwayTeam', '')),
+        }
+
+        # Check each market
+        has_high_conf = False
+
+        # 1X2 Market
+        x1x2_cols = [c for c in markets['1X2'] if c in df.columns]
+        if x1x2_cols:
+            x1x2_probs = row[x1x2_cols]
+            best_1x2 = x1x2_probs.max()
+            best_1x2_col = x1x2_probs.idxmax() if best_1x2 > 0 else ''
+            if best_1x2 >= threshold:
+                has_high_conf = True
+                if '_H' in best_1x2_col:
+                    match_info['1X2_Pick'] = 'Home'
+                elif '_D' in best_1x2_col:
+                    match_info['1X2_Pick'] = 'Draw'
+                elif '_A' in best_1x2_col:
+                    match_info['1X2_Pick'] = 'Away'
+                match_info['1X2_Prob'] = f"{best_1x2:.1%}"
+            else:
+                match_info['1X2_Pick'] = '-'
+                match_info['1X2_Prob'] = f"{best_1x2:.1%}" if best_1x2 > 0 else '-'
+        else:
+            match_info['1X2_Pick'] = '-'
+            match_info['1X2_Prob'] = '-'
+
+        # OU 2.5 Market
+        ou25_cols = [c for c in markets['OU_2_5'] if c in df.columns]
+        if ou25_cols:
+            ou25_probs = row[ou25_cols]
+            best_ou25 = ou25_probs.max()
+            best_ou25_col = ou25_probs.idxmax() if best_ou25 > 0 else ''
+            if best_ou25 >= threshold:
+                has_high_conf = True
+                match_info['OU25_Pick'] = 'Over' if '_O' in best_ou25_col else 'Under'
+                match_info['OU25_Prob'] = f"{best_ou25:.1%}"
+            else:
+                match_info['OU25_Pick'] = '-'
+                match_info['OU25_Prob'] = f"{best_ou25:.1%}" if best_ou25 > 0 else '-'
+        else:
+            match_info['OU25_Pick'] = '-'
+            match_info['OU25_Prob'] = '-'
+
+        # OU 1.5 Market
+        ou15_cols = [c for c in markets['OU_1_5'] if c in df.columns]
+        if ou15_cols:
+            ou15_probs = row[ou15_cols]
+            best_ou15 = ou15_probs.max()
+            best_ou15_col = ou15_probs.idxmax() if best_ou15 > 0 else ''
+            if best_ou15 >= threshold:
+                has_high_conf = True
+                match_info['OU15_Pick'] = 'Over' if '_O' in best_ou15_col else 'Under'
+                match_info['OU15_Prob'] = f"{best_ou15:.1%}"
+            else:
+                match_info['OU15_Pick'] = '-'
+                match_info['OU15_Prob'] = f"{best_ou15:.1%}" if best_ou15 > 0 else '-'
+        else:
+            match_info['OU15_Pick'] = '-'
+            match_info['OU15_Prob'] = '-'
+
+        # Only include matches with at least one high-confidence market
+        if has_high_conf:
+            rows.append(match_info)
+
+    if not rows:
+        print("[COMBINED] No matches with 95%+ confidence in 1X2, OU2.5, or OU1.5")
+        return
+
+    # Create DataFrame and save
+    combined_df = pd.DataFrame(rows)
+    combined_df = combined_df.sort_values(['Date', 'League'])
+
+    # Save CSV
+    csv_path = path / "high_confidence_combined.csv"
+    combined_df.to_csv(csv_path, index=False)
+    print(f"[OK] Saved combined CSV: {csv_path} ({len(combined_df)} matches)")
+
+    # Generate HTML report
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>High Confidence Picks (95%+) - 1X2, OU2.5, OU1.5</title>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }}
+        h1 {{ color: #00d4ff; text-align: center; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; background: #16213e; }}
+        th {{ background: #0f3460; color: #00d4ff; padding: 12px; text-align: left; }}
+        td {{ padding: 10px; border-bottom: 1px solid #0f3460; }}
+        tr:hover {{ background: #1f4068; }}
+        .pick {{ font-weight: bold; color: #00ff88; }}
+        .no-pick {{ color: #666; }}
+        .prob {{ font-size: 0.9em; color: #aaa; }}
+        .high-prob {{ color: #00ff88; font-weight: bold; }}
+        .summary {{ text-align: center; margin: 20px 0; color: #aaa; }}
+    </style>
+</head>
+<body>
+    <h1>High Confidence Combined Picks (95%+)</h1>
+    <p class='summary'>{len(combined_df)} matches with at least one market above 95% confidence</p>
+    <table>
+        <tr>
+            <th>Date</th>
+            <th>League</th>
+            <th>Match</th>
+            <th>1X2</th>
+            <th>O/U 2.5</th>
+            <th>O/U 1.5</th>
+        </tr>
+"""
+
+    for _, row in combined_df.iterrows():
+        # Format each cell
+        x1x2_class = 'pick high-prob' if row['1X2_Pick'] != '-' else 'no-pick'
+        ou25_class = 'pick high-prob' if row['OU25_Pick'] != '-' else 'no-pick'
+        ou15_class = 'pick high-prob' if row['OU15_Pick'] != '-' else 'no-pick'
+
+        html_content += f"""        <tr>
+            <td>{row['Date']}</td>
+            <td>{row['League']}</td>
+            <td>{row['Home']} vs {row['Away']}</td>
+            <td class='{x1x2_class}'>{row['1X2_Pick']} <span class='prob'>({row['1X2_Prob']})</span></td>
+            <td class='{ou25_class}'>{row['OU25_Pick']} <span class='prob'>({row['OU25_Prob']})</span></td>
+            <td class='{ou15_class}'>{row['OU15_Pick']} <span class='prob'>({row['OU15_Prob']})</span></td>
+        </tr>
+"""
+
+    html_content += """    </table>
+</body>
+</html>"""
+
+    html_path = path / "high_confidence_combined.html"
+    with open(html_path, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    print(f"[OK] Saved combined HTML: {html_path}")
+
+
 def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = None):
-    """Enhanced HTML report - Elite picks (>85% probability) sorted by date and league"""
+    """Enhanced HTML report - Elite picks (>95% probability) sorted by date and league"""
     prob_cols = [c for c in df.columns if c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_")]
     if not prob_cols:
         print("Warning: No probability columns found")
@@ -939,8 +1184,8 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
     else:
         df2["AvgConfidence"] = 0.5
 
-    # Filter for ELITE predictions only (>85% probability)
-    elite_threshold = 0.85
+    # Filter for ELITE predictions only (>95% probability)
+    elite_threshold = 0.95
     elite = df2[df2["BestProb"] >= elite_threshold].copy()
 
     # Sort by Date, then League
@@ -1222,7 +1467,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 
 def predict_week(fixtures_csv: Path) -> Path:
     """ULTIMATE prediction pipeline"""
-    
+
     log_header("[TARGET] ULTIMATE WEEKLY PREDICTIONS")
     print("Maximum Accuracy Features:")
     print("  * League-specific calibration")
@@ -1230,16 +1475,25 @@ def predict_week(fixtures_csv: Path) -> Path:
     print("  * Poisson adjustments")
     print("  * Time-weighted form")
     print("  * Dynamic blend weights")
-    print("  * Confidence scoring\n")
-    
+    print("  * Confidence scoring")
+    print("  * Injury impact adjustments\n")
+
     # Load models
     models = load_trained_targets()
     if not models:
         raise RuntimeError("No trained models found!")
-    
+
     # Load fixtures
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
+
+    # Check for injury data
+    has_injury_data = 'home_injuries' in fx.columns and 'away_injuries' in fx.columns
+    if has_injury_data:
+        total_injuries = fx['home_injuries'].sum() + fx['away_injuries'].sum()
+        print(f"[LIVE] Injury data available: {total_injuries} total injuries across fixtures")
+    else:
+        print("[INFO] No injury data - run closer to match time for live data")
     
     # Build features
     log_header("BUILD ENHANCED FEATURES")
@@ -1281,7 +1535,11 @@ def predict_week(fixtures_csv: Path) -> Path:
     # Apply enhanced blending
     log_header("APPLY DYNAMIC BLENDING")
     df_out = _apply_blend(df_out)
-    
+
+    # Apply injury adjustments (if injury data available)
+    log_header("APPLY INJURY ADJUSTMENTS")
+    df_out = apply_injury_adjustments(df_out, fx)
+
     # Calculate confidence scores
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
@@ -1302,18 +1560,21 @@ def predict_week(fixtures_csv: Path) -> Path:
     df_out.to_csv(output_path_full, index=False)
     print(f"\n[OK] Saved full predictions: {output_path_full} ({len(df_out)} matches)")
 
-    # Filter for weekly_bets.csv: Keep only predictions with >= 60% confidence
+    # Filter for weekly_bets.csv: Keep only predictions with >= 95% confidence
     if 'MaxConfidence' in df_out.columns:
-        df_filtered = df_out[df_out['MaxConfidence'] >= 0.60].copy()
+        df_filtered = df_out[df_out['MaxConfidence'] >= 0.95].copy()
         filtered_count = len(df_out) - len(df_filtered)
-        print(f"[FILTER] Removed {filtered_count} matches with confidence < 60%")
+        print(f"[FILTER] Removed {filtered_count} matches with confidence < 95%")
     else:
         df_filtered = df_out.copy()
 
     # Save filtered version as weekly_bets.csv for compatibility with other scripts
     output_path = OUTPUT_DIR / "weekly_bets.csv"
     df_filtered.to_csv(output_path, index=False)
-    print(f"[OK] Saved filtered predictions: {output_path} ({len(df_filtered)} matches >= 60% confidence)")
+    print(f"[OK] Saved filtered predictions: {output_path} ({len(df_filtered)} matches >= 95% confidence)")
+
+    # Create combined high-confidence output for 1X2, OU2.5, and OU1.5 markets
+    _write_combined_high_confidence(df_out, OUTPUT_DIR)
     
     # Generate HTML
     log_header("GENERATE REPORTS")

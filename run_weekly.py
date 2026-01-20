@@ -133,21 +133,25 @@ fixtures_file = None
 
 # Try API-Football first
 try:
-    from api_client import download_upcoming_fixtures, test_api_connection
-    
+    from api_client import download_upcoming_fixtures, test_api_connection, fetch_live_data_for_upcoming
+
     print("Testing API-Football connection...")
     if test_api_connection():
         print("\n[OK] API-Football connected!")
-        
+
         # Download fixtures
         import pandas as pd
         fixtures_df = download_upcoming_fixtures(DEFAULT_LEAGUES, days_ahead=7)
-        
+
         if not fixtures_df.empty:
+            # Fetch live data (injuries & lineups) for upcoming fixtures
+            print("\n[LIVE] Fetching injuries and lineups...")
+            fixtures_df = fetch_live_data_for_upcoming(fixtures_df)
+
             # Save to outputs
             fixtures_file = OUTPUT_DIR / "upcoming_fixtures.csv"
             fixtures_df.to_csv(fixtures_file, index=False)
-            print(f"[OK] Downloaded {len(fixtures_df)} fixtures via API")
+            print(f"[OK] Downloaded {len(fixtures_df)} fixtures via API (with live data)")
         else:
             print("[WARN] No fixtures from API, trying fallback...")
     else:
