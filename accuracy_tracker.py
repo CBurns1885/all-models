@@ -170,7 +170,8 @@ class AccuracyTracker:
         updated_count = 0
         
         for idx, row in results_df.iterrows():
-            match_date = pd.to_datetime(row['Date']).date()
+            # Convert date to string format for SQLite comparison
+            match_date = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
             league = row['League']
             home_team = row['HomeTeam']
             away_team = row['AwayTeam']
