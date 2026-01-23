@@ -139,6 +139,8 @@ def get_current_season() -> int:
 
 # --- Coverage ---
 LEAGUE_CODES = [
+    # European Competitions
+    "UCL", "UEL", "UECL",
     # England (leagues + cups)
     "E0", "E1", "E2", "E3", "EC", "FAC",
     # Germany (leagues + cup)
@@ -168,6 +170,12 @@ PRIORITY_LEAGUES = ["E0", "E1", "D1", "SP1", "I1", "F1"]
 
 # Domestic cups (knockout tournaments - different prediction dynamics)
 DOMESTIC_CUPS = ["EC", "FAC", "DFB", "CDR", "CIT", "CDF", "KNVB", "BEC", "TCP", "SFC", "TFC"]
+
+# European competitions (Champions League, Europa League, Conference League)
+EUROPEAN_CUPS = ["UCL", "UEL", "UECL"]
+
+# All cup/knockout competitions
+ALL_CUPS = DOMESTIC_CUPS + EUROPEAN_CUPS
 
 # --- Data sources ---
 FOOTBALL_DATA_CSV_BASE = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
