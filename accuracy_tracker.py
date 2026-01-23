@@ -434,6 +434,44 @@ def update_with_results(results_csv: Path):
         return False
 
 
+def update_accuracy_database():
+    """
+    Update accuracy database with latest results.
+    Called from run_weekly.py after predictions are generated.
+    Fetches results from API and updates prediction outcomes.
+    """
+    try:
+        # Import here to avoid circular imports
+        from update_results import fetch_latest_results
+
+        tracker = AccuracyTracker()
+
+        # Fetch latest results (last 60 days)
+        results_df = fetch_latest_results(days_back=60)
+
+        if results_df is not None and not results_df.empty:
+            updated = tracker.update_results(results_df)
+            print(f"[OK] Updated {updated} predictions with results")
+
+            # Recalculate accuracy for recent weeks
+            recent_weeks = results_df['Date'].apply(
+                lambda x: pd.to_datetime(x).strftime('%Y-W%W')
+            ).unique()
+
+            for week in recent_weeks[:4]:  # Last 4 weeks
+                tracker.calculate_weekly_accuracy(week)
+
+            # Update market weights
+            tracker.get_market_weights()
+        else:
+            print("[INFO] No new results to update")
+
+    except ImportError as e:
+        print(f"[WARN] update_results module not available: {e}")
+    except Exception as e:
+        print(f"[WARN] Accuracy update failed: {e}")
+
+
 def get_current_weights() -> Dict[str, float]:
     """Get current market weights for prediction weighting"""
     tracker = AccuracyTracker()
