@@ -1008,10 +1008,10 @@ def calculate_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     """
-    Create combined output for 1X2, OU2.5, and OU1.5 markets above 95% confidence.
+    Create combined output for 1X2, OU2.5, and OU1.5 markets above 90% confidence.
     Shows all three markets side-by-side for each match where any qualifies.
     """
-    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 >= 95%)...")
+    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 >= 90%)...")
 
     # Define the target markets and their probability columns
     markets = {
@@ -1021,7 +1021,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     }
 
     rows = []
-    threshold = 0.95
+    threshold = 0.90
 
     for idx, row in df.iterrows():
         match_info = {
@@ -1095,7 +1095,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
             rows.append(match_info)
 
     if not rows:
-        print("[COMBINED] No matches with 95%+ confidence in 1X2, OU2.5, or OU1.5")
+        print("[COMBINED] No matches with 90%+ confidence in 1X2, OU2.5, or OU1.5")
         return
 
     # Create DataFrame and save
@@ -1111,7 +1111,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>High Confidence Picks (95%+) - 1X2, OU2.5, OU1.5</title>
+    <title>High Confidence Picks (90%+) - 1X2, OU2.5, OU1.5</title>
     <style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }}
         h1 {{ color: #00d4ff; text-align: center; }}
@@ -1127,8 +1127,8 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     </style>
 </head>
 <body>
-    <h1>High Confidence Combined Picks (95%+)</h1>
-    <p class='summary'>{len(combined_df)} matches with at least one market above 95% confidence</p>
+    <h1>High Confidence Combined Picks (90%+)</h1>
+    <p class='summary'>{len(combined_df)} matches with at least one market above 90% confidence</p>
     <table>
         <tr>
             <th>Date</th>
