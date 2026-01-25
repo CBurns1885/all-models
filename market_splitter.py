@@ -167,17 +167,35 @@ class MarketSplitter:
         # Base columns to include in all market files
         base_cols = ['Date', 'League', 'HomeTeam', 'AwayTeam', 'Time']
 
+        # Markets that should use P_ columns (base model)
+        use_p_markets = {'1X2'}
+        # Markets that should use DC_ columns (Dixon-Coles ensemble)
+        use_dc_markets = {'OU_1_5', 'OU_2_5'}
+
         for market_key, config in market_configs.items():
             prob_cols = config['prob_cols']
 
-            # Check if these columns exist with P_ or DC_ prefix
-            # Prefer P_ columns as they have data for all leagues (DC_ has NaN for some)
+            # Determine column prefix preference based on market type
             available_cols = []
             for col in prob_cols:
-                if f'P_{col}' in self.df.columns:
-                    available_cols.append(f'P_{col}')
-                elif f'DC_{col}' in self.df.columns:
-                    available_cols.append(f'DC_{col}')
+                if market_key in use_p_markets:
+                    # Use P_ for 1X2
+                    if f'P_{col}' in self.df.columns:
+                        available_cols.append(f'P_{col}')
+                    elif f'DC_{col}' in self.df.columns:
+                        available_cols.append(f'DC_{col}')
+                elif market_key in use_dc_markets:
+                    # Use DC_ for OU 1.5/2.5
+                    if f'DC_{col}' in self.df.columns:
+                        available_cols.append(f'DC_{col}')
+                    elif f'P_{col}' in self.df.columns:
+                        available_cols.append(f'P_{col}')
+                else:
+                    # Default: prefer P_ columns
+                    if f'P_{col}' in self.df.columns:
+                        available_cols.append(f'P_{col}')
+                    elif f'DC_{col}' in self.df.columns:
+                        available_cols.append(f'DC_{col}')
 
             if not available_cols:
                 continue  # Skip market if no probability columns found
