@@ -170,13 +170,14 @@ class MarketSplitter:
         for market_key, config in market_configs.items():
             prob_cols = config['prob_cols']
 
-            # Check if these columns exist with DC_ or P_ prefix
+            # Check if these columns exist with P_ or DC_ prefix
+            # Prefer P_ columns as they have data for all leagues (DC_ has NaN for some)
             available_cols = []
             for col in prob_cols:
-                if f'DC_{col}' in self.df.columns:
-                    available_cols.append(f'DC_{col}')
-                elif f'P_{col}' in self.df.columns:
+                if f'P_{col}' in self.df.columns:
                     available_cols.append(f'P_{col}')
+                elif f'DC_{col}' in self.df.columns:
+                    available_cols.append(f'DC_{col}')
 
             if not available_cols:
                 continue  # Skip market if no probability columns found
