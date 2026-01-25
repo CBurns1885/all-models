@@ -272,27 +272,13 @@ print("\n" + "="*60)
 print("[CONFIG] CONFIGURATION")
 print("="*60)
 
-if NON_INTERACTIVE:
-    # Use command-line argument for mode
-    choice = str(args.mode)
-    print(f"\n[AUTO] Using mode {choice} (non-interactive)")
-else:
-    print("\nTRAINING MODE:")
-    print("  1. Full tuning (50 trials) - Best accuracy, ~2+ hours")
-    print("  2. Quick tuning (25 trials) - Good accuracy, ~1 hour")
-    print("  3. Fast mode (10 trials) - Decent accuracy, ~30 min")
-    print("  4. No tuning - Fastest, ~15 min [RECOMMENDED FOR TESTING]")
-
-    while True:
-        choice = input("\nChoose (1-4, default=4): ").strip() or "4"
-        if choice in ["1", "2", "3", "4"]:
-            break
-        print("Please enter 1, 2, 3, or 4")
-
+# Use command-line argument for mode (default: no tuning)
+choice = str(args.mode)
 mode_trial_counts = {"1": "50", "2": "25", "3": "10", "4": "0"}
 os.environ["OPTUNA_TRIALS"] = mode_trial_counts[choice]
 
 print(f"\n[OK] Configuration set:")
+print(f"   Speed mode: {args.speed}")
 print(f"   Tuning: {mode_trial_counts[choice]} trials")
 print(f"   Data source: API-Football (enhanced)" if os.environ.get("USE_API_FOOTBALL") == "1" else "   Data source: football-data.co.uk")
 print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}")
