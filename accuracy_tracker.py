@@ -84,9 +84,13 @@ class AccuracyTracker:
         """
         Log predictions for a week - only logs the BEST prediction per market
 
+        Uses correct column prefixes:
+        - P_ columns for 1X2 (base ML model)
+        - DC_ columns for O/U markets (Dixon-Coles ensemble)
+
         Args:
             predictions_df: DataFrame with columns: Date, League, HomeTeam, AwayTeam,
-                           P_y_1X2_H, P_y_1X2_D, P_y_1X2_A, etc.
+                           P_1X2_H, P_1X2_D, P_1X2_A, DC_OU_2_5_O, DC_OU_2_5_U, etc.
             week_id: Unique identifier for this week (e.g., '2025-W40')
         """
         conn = sqlite3.connect(self.db_path)
@@ -94,20 +98,59 @@ class AccuracyTracker:
         prediction_date = datetime.now().date()
         records = []
 
-        # Find all probability columns
-        prob_cols = [c for c in predictions_df.columns if c.startswith('P_')]
+        # Define which column prefix to use for each market type
+        # P_ for 1X2, DC_ for O/U markets
+        market_prefix_config = {
+            '1X2': 'P_',
+            'OU_0_5': 'DC_',
+            'OU_1_5': 'DC_',
+            'OU_2_5': 'DC_',
+            'OU_3_5': 'DC_',
+            'OU_4_5': 'DC_',
+        }
 
-        # Group probability columns by market
-        # e.g., P_1X2_H, P_1X2_D, P_1X2_A -> market '1X2'
+        # Build markets dictionary with correct prefix for each
         markets = {}
-        for prob_col in prob_cols:
+
+        # First, handle configured markets with specific prefixes
+        for market_base, prefix in market_prefix_config.items():
+            # Find columns matching this market with the configured prefix
+            matching_cols = [c for c in predictions_df.columns
+                           if c.startswith(prefix) and market_base in c.replace(prefix, '')]
+
+            if not matching_cols:
+                # Fallback to P_ if DC_ not found, or vice versa
+                alt_prefix = 'DC_' if prefix == 'P_' else 'P_'
+                matching_cols = [c for c in predictions_df.columns
+                               if c.startswith(alt_prefix) and market_base in c.replace(alt_prefix, '')]
+
+            for col in matching_cols:
+                # Extract market and outcome from column name
+                col_without_prefix = col.replace('P_', '').replace('DC_', '')
+                parts = col_without_prefix.split('_')
+                if len(parts) < 2:
+                    continue
+
+                market = '_'.join(parts[:-1])
+                outcome = parts[-1]
+
+                if market not in markets:
+                    markets[market] = []
+                markets[market].append((col, outcome))
+
+        # Also include any other P_ columns not in the config (for backwards compatibility)
+        other_p_cols = [c for c in predictions_df.columns if c.startswith('P_')]
+        for prob_col in other_p_cols:
             parts = prob_col.replace('P_', '').split('_')
             if len(parts) < 2:
                 continue
 
-            # Market name is everything except the last part (outcome)
             market = '_'.join(parts[:-1])
             outcome = parts[-1]
+
+            # Skip if already handled by config
+            if market in market_prefix_config:
+                continue
 
             if market not in markets:
                 markets[market] = []
