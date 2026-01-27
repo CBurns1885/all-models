@@ -464,35 +464,68 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         if hrow.empty or arow.empty:
             continue
         
-        feat_cols = [c for c in base.columns if not c.startswith("y_") 
+        feat_cols = [c for c in base.columns if not c.startswith("y_")
                      and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
-        
+
         fused = pd.DataFrame()
-        
-        # Calculate weighted features for home team
-        for col in feat_cols:
-            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
-                weights = hrow['time_weight'].values[-5:]
-                values = hrow[col].fillna(0).values[-5:]
-                if weights.sum() > 0:
-                    weighted_avg = np.average(values, weights=weights)
-                    fused.at[0, col] = weighted_avg
+
+        # Helper function to extract team's stats from a match row
+        # When team was HOME: their stats are in Home_* columns
+        # When team was AWAY: their stats are in Away_* columns
+        def get_team_feature(row, team, base_col):
+            """Get feature value for a team, regardless of home/away position"""
+            if row['HomeTeam'] == team:
+                # Team was home - use Home_ version
+                home_col = base_col.replace('Away_', 'Home_')
+                return row.get(home_col, 0)
+            else:
+                # Team was away - use Away_ version
+                away_col = base_col.replace('Home_', 'Away_')
+                return row.get(away_col, 0)
+
+        # Build Home_ features from home team's perspective
+        home_feat_cols = [c for c in feat_cols if c.startswith('Home_')]
+        for col in home_feat_cols:
+            values = []
+            weights = []
+            for _, row in hrow.tail(5).iterrows():
+                val = get_team_feature(row, ht, col)
+                if pd.notna(val):
+                    values.append(float(val))
+                    weights.append(row.get('time_weight', 1.0))
+            if values and sum(weights) > 0:
+                fused.at[0, col] = np.average(values, weights=weights)
+            else:
+                fused.at[0, col] = 0.0
+
+        # Build Away_ features from away team's perspective
+        away_feat_cols = [c for c in feat_cols if c.startswith('Away_')]
+        for col in away_feat_cols:
+            values = []
+            weights = []
+            for _, row in arow.tail(5).iterrows():
+                val = get_team_feature(row, at, col)
+                if pd.notna(val):
+                    values.append(float(val))
+                    weights.append(row.get('time_weight', 1.0))
+            if values and sum(weights) > 0:
+                fused.at[0, col] = np.average(values, weights=weights)
+            else:
+                fused.at[0, col] = 0.0
+
+        # Copy non-team-specific features (Elo, DayOfWeek, etc.)
+        other_cols = [c for c in feat_cols if not c.startswith('Home_') and not c.startswith('Away_')]
+        for col in other_cols:
+            if col in hrow.columns:
+                if hrow[col].dtype in ['float64', 'int64']:
+                    weights = hrow['time_weight'].values[-5:]
+                    values = hrow[col].fillna(0).values[-5:]
+                    if len(weights) > 0 and weights.sum() > 0:
+                        fused.at[0, col] = np.average(values, weights=weights)
+                    else:
+                        fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
                 else:
                     fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-            else:
-                fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-        
-        # Update away team features
-        for c in fused.columns:
-            if c.startswith("Away_") and c in arow.columns:
-                if arow[c].dtype in ['float64', 'int64']:
-                    weights = arow['time_weight'].values[-5:]
-                    values = arow[c].fillna(0).values[-5:]
-                    if weights.sum() > 0:
-                        weighted_avg = np.average(values, weights=weights)
-                        fused.at[0, c] = weighted_avg
-                else:
-                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
         
         fused["League"] = lg
         fused["Date"] = dt
