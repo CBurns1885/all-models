@@ -468,9 +468,20 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         at_away_matches = hist_lg[hist_lg["AwayTeam"] == at]
         at_away_matches = at_away_matches[at_away_matches["Date"] < dt].sort_values("Date").tail(10)
 
+        # Identify feature column groups (do this once, outside the condition)
+        home_feat_cols = [c for c in base.columns if c.startswith("Home_")]
+        away_feat_cols = [c for c in base.columns if c.startswith("Away_")]
+        other_cols = [c for c in base.columns if not c.startswith(("Home_", "Away_", "y_"))
+                      and c not in ["FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
+                                    "days_ago", "time_weight", "League", "Date",
+                                    "HomeTeam", "AwayTeam"]]
+
+        # Flag to track if we need role-aware fallback extraction
+        use_fallback_extraction = False
+
         if ht_home_matches.empty or at_away_matches.empty:
             # Fallback: if not enough role-specific matches, use any recent matches
-            # but still extract features correctly based on role
+            # but extract features with role awareness
             ht_any = hist_lg[(hist_lg["HomeTeam"] == ht) | (hist_lg["AwayTeam"] == ht)]
             ht_any = ht_any[ht_any["Date"] < dt].sort_values("Date").tail(10)
 
@@ -480,58 +491,140 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
             if ht_any.empty or at_any.empty:
                 continue
 
-            # Use fallback with role detection
-            ht_home_matches = ht_any if ht_home_matches.empty else ht_home_matches
-            at_away_matches = at_any if at_away_matches.empty else at_away_matches
-
-        # Identify feature column groups
-        home_feat_cols = [c for c in base.columns if c.startswith("Home_")]
-        away_feat_cols = [c for c in base.columns if c.startswith("Away_")]
-        other_cols = [c for c in base.columns if not c.startswith(("Home_", "Away_", "y_"))
-                      and c not in ["FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
-                                    "days_ago", "time_weight", "League", "Date",
-                                    "HomeTeam", "AwayTeam"]]
+            use_fallback_extraction = True
 
         fused = pd.DataFrame(index=[0])
 
-        # Calculate Home_* features from home team's HOME matches
-        for col in home_feat_cols:
-            if col in ht_home_matches.columns:
-                valid_data = ht_home_matches[col].dropna()
-                if len(valid_data) > 0 and ht_home_matches[col].dtype in ['float64', 'int64']:
-                    weights = ht_home_matches.loc[valid_data.index, 'time_weight'].values[-5:]
-                    values = valid_data.values[-5:]
-                    if len(weights) > 0 and weights.sum() > 0:
-                        fused.at[0, col] = np.average(values, weights=weights)
-                    else:
-                        fused.at[0, col] = valid_data.iloc[-1]
-                elif len(valid_data) > 0:
-                    fused.at[0, col] = valid_data.iloc[-1]
-                else:
-                    fused.at[0, col] = 0
-            else:
-                fused.at[0, col] = 0
+        if use_fallback_extraction:
+            # IMPROVED FALLBACK: Extract features with role awareness
+            # For home team: use Home_* when they were home, Away_* when they were away
+            def extract_team_features(matches_df, team_name, target_prefix):
+                """Extract features for a team, mapping based on their role in each match."""
+                values_dict = {col: [] for col in home_feat_cols + away_feat_cols}
+                weights_list = []
 
-        # Calculate Away_* features from away team's AWAY matches
-        for col in away_feat_cols:
-            if col in at_away_matches.columns:
-                valid_data = at_away_matches[col].dropna()
-                if len(valid_data) > 0 and at_away_matches[col].dtype in ['float64', 'int64']:
-                    weights = at_away_matches.loc[valid_data.index, 'time_weight'].values[-5:]
-                    values = valid_data.values[-5:]
-                    if len(weights) > 0 and weights.sum() > 0:
-                        fused.at[0, col] = np.average(values, weights=weights)
+                for _, match_row in matches_df.iterrows():
+                    w = match_row.get('time_weight', 1.0)
+                    weights_list.append(w)
+
+                    if match_row['HomeTeam'] == team_name:
+                        # Team was HOME - Home_* columns have their stats
+                        for col in home_feat_cols:
+                            val = match_row.get(col, np.nan)
+                            if pd.notna(val):
+                                values_dict[col].append(val)
                     else:
-                        fused.at[0, col] = valid_data.iloc[-1]
-                elif len(valid_data) > 0:
-                    fused.at[0, col] = valid_data.iloc[-1]
+                        # Team was AWAY - Away_* columns have their stats
+                        # Map Away_* -> Home_* equivalent for the target
+                        for col in away_feat_cols:
+                            val = match_row.get(col, np.nan)
+                            if pd.notna(val):
+                                # Convert Away_X to Home_X for consistent output
+                                home_equiv = col.replace('Away_', 'Home_')
+                                if home_equiv in values_dict:
+                                    values_dict[home_equiv].append(val)
+
+                return values_dict, weights_list
+
+            # Extract home team features (for Home_* output columns)
+            ht_values, ht_weights = extract_team_features(ht_any, ht, 'Home_')
+            for col in home_feat_cols:
+                vals = ht_values.get(col, [])
+                if vals:
+                    vals = vals[-5:]
+                    ws = ht_weights[-len(vals):] if ht_weights else [1.0] * len(vals)
+                    if sum(ws) > 0:
+                        fused.at[0, col] = np.average(vals, weights=ws)
+                    else:
+                        fused.at[0, col] = vals[-1]
                 else:
                     fused.at[0, col] = 0
-            else:
-                fused.at[0, col] = 0
+
+            # Extract away team features (for Away_* output columns)
+            def extract_away_team_features(matches_df, team_name):
+                """Extract features for away team, mapping based on their role."""
+                values_dict = {col: [] for col in away_feat_cols}
+                weights_list = []
+
+                for _, match_row in matches_df.iterrows():
+                    w = match_row.get('time_weight', 1.0)
+                    weights_list.append(w)
+
+                    if match_row['AwayTeam'] == team_name:
+                        # Team was AWAY - Away_* columns have their stats
+                        for col in away_feat_cols:
+                            val = match_row.get(col, np.nan)
+                            if pd.notna(val):
+                                values_dict[col].append(val)
+                    else:
+                        # Team was HOME - Home_* columns have their stats
+                        # Map Home_* -> Away_* equivalent
+                        for col in home_feat_cols:
+                            val = match_row.get(col, np.nan)
+                            if pd.notna(val):
+                                away_equiv = col.replace('Home_', 'Away_')
+                                if away_equiv in values_dict:
+                                    values_dict[away_equiv].append(val)
+
+                return values_dict, weights_list
+
+            at_values, at_weights = extract_away_team_features(at_any, at)
+            for col in away_feat_cols:
+                vals = at_values.get(col, [])
+                if vals:
+                    vals = vals[-5:]
+                    ws = at_weights[-len(vals):] if at_weights else [1.0] * len(vals)
+                    if sum(ws) > 0:
+                        fused.at[0, col] = np.average(vals, weights=ws)
+                    else:
+                        fused.at[0, col] = vals[-1]
+                else:
+                    fused.at[0, col] = 0
+
+        else:
+            # PRIMARY PATH: Role-specific matches available
+            # Calculate Home_* features from home team's HOME matches
+            for col in home_feat_cols:
+                if col in ht_home_matches.columns:
+                    valid_data = ht_home_matches[col].dropna()
+                    if len(valid_data) > 0 and ht_home_matches[col].dtype in ['float64', 'int64']:
+                        weights = ht_home_matches.loc[valid_data.index, 'time_weight'].values[-5:]
+                        values = valid_data.values[-5:]
+                        if len(weights) > 0 and weights.sum() > 0:
+                            fused.at[0, col] = np.average(values, weights=weights)
+                        else:
+                            fused.at[0, col] = valid_data.iloc[-1]
+                    elif len(valid_data) > 0:
+                        fused.at[0, col] = valid_data.iloc[-1]
+                    else:
+                        fused.at[0, col] = 0
+                else:
+                    fused.at[0, col] = 0
+
+            # Calculate Away_* features from away team's AWAY matches
+            for col in away_feat_cols:
+                if col in at_away_matches.columns:
+                    valid_data = at_away_matches[col].dropna()
+                    if len(valid_data) > 0 and at_away_matches[col].dtype in ['float64', 'int64']:
+                        weights = at_away_matches.loc[valid_data.index, 'time_weight'].values[-5:]
+                        values = valid_data.values[-5:]
+                        if len(weights) > 0 and weights.sum() > 0:
+                            fused.at[0, col] = np.average(values, weights=weights)
+                        else:
+                            fused.at[0, col] = valid_data.iloc[-1]
+                    elif len(valid_data) > 0:
+                        fused.at[0, col] = valid_data.iloc[-1]
+                    else:
+                        fused.at[0, col] = 0
+                else:
+                    fused.at[0, col] = 0
 
         # Handle other features (Elo, odds, etc.) - use most recent from either team's matches
-        all_recent = pd.concat([ht_home_matches, at_away_matches]).sort_values("Date")
+        if use_fallback_extraction:
+            all_recent = pd.concat([ht_any, at_any]).drop_duplicates().sort_values("Date")
+        else:
+            all_recent = pd.concat([ht_home_matches, at_away_matches]).sort_values("Date")
+
         for col in other_cols:
             if col in all_recent.columns:
                 valid_data = all_recent[col].dropna()

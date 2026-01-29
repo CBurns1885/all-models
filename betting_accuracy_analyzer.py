@@ -12,7 +12,7 @@ import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
-from config import OUTPUT_DIR, BASE_DIR
+from config import OUTPUT_DIR, BASE_DIR, MARKET_PREFIX_CONFIG, DEFAULT_CONFIDENCE_THRESHOLD
 
 
 class BettingAccuracyAnalyzer:
@@ -20,50 +20,17 @@ class BettingAccuracyAnalyzer:
     Analyze betting accuracy using:
     - P_ columns for 1X2 market
     - DC_ columns for O/U markets
-    - 90%+ confidence threshold
+    - Configurable confidence threshold (default 90%)
     """
 
-    def __init__(self, db_path: Path = None, confidence_threshold: float = 0.90):
+    def __init__(self, db_path: Path = None, confidence_threshold: float = None):
         if db_path is None:
             db_path = BASE_DIR / "outputs" / "accuracy_database.db"
         self.db_path = db_path
-        self.confidence_threshold = confidence_threshold
+        self.confidence_threshold = confidence_threshold or DEFAULT_CONFIDENCE_THRESHOLD
 
-        # Define which column prefix to use for each market
-        self.market_column_config = {
-            # 1X2 uses P_ columns (base ML model)
-            '1X2': {
-                'prefix': 'P_',
-                'columns': ['1X2_H', '1X2_D', '1X2_A'],
-                'outcome_col': 'y_1X2'
-            },
-            # O/U markets use DC_ columns (Dixon-Coles ensemble)
-            'OU_0_5': {
-                'prefix': 'DC_',
-                'columns': ['OU_0_5_O', 'OU_0_5_U'],
-                'outcome_col': 'y_OU_0_5'
-            },
-            'OU_1_5': {
-                'prefix': 'DC_',
-                'columns': ['OU_1_5_O', 'OU_1_5_U'],
-                'outcome_col': 'y_OU_1_5'
-            },
-            'OU_2_5': {
-                'prefix': 'DC_',
-                'columns': ['OU_2_5_O', 'OU_2_5_U'],
-                'outcome_col': 'y_OU_2_5'
-            },
-            'OU_3_5': {
-                'prefix': 'DC_',
-                'columns': ['OU_3_5_O', 'OU_3_5_U'],
-                'outcome_col': 'y_OU_3_5'
-            },
-            'OU_4_5': {
-                'prefix': 'DC_',
-                'columns': ['OU_4_5_O', 'OU_4_5_U'],
-                'outcome_col': 'y_OU_4_5'
-            },
-        }
+        # Use centralized market configuration from config.py
+        self.market_column_config = MARKET_PREFIX_CONFIG
 
     def extract_qualifying_bets(self, predictions_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -85,6 +52,7 @@ class BettingAccuracyAnalyzer:
             available_cols = [col for col in full_columns if col in predictions_df.columns]
 
             if not available_cols:
+                print(f"[INFO] Market {market} skipped - columns not found: {full_columns}")
                 continue
 
             # For each match, find the best prediction for this market

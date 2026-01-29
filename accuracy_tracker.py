@@ -14,6 +14,13 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import json
 
+try:
+    from config import MARKET_PREFIX_CONFIG, get_market_prefix
+except ImportError:
+    # Fallback if config not available
+    MARKET_PREFIX_CONFIG = None
+    get_market_prefix = None
+
 class AccuracyTracker:
     """Track and analyze prediction accuracy over time"""
     
@@ -98,16 +105,20 @@ class AccuracyTracker:
         prediction_date = datetime.now().date()
         records = []
 
-        # Define which column prefix to use for each market type
-        # P_ for 1X2, DC_ for O/U markets
-        market_prefix_config = {
-            '1X2': 'P_',
-            'OU_0_5': 'DC_',
-            'OU_1_5': 'DC_',
-            'OU_2_5': 'DC_',
-            'OU_3_5': 'DC_',
-            'OU_4_5': 'DC_',
-        }
+        # Use centralized config or fallback to local definition
+        if MARKET_PREFIX_CONFIG is not None:
+            market_prefix_config = {k: v['prefix'] for k, v in MARKET_PREFIX_CONFIG.items()}
+        else:
+            # Fallback: Define which column prefix to use for each market type
+            # P_ for 1X2, DC_ for O/U markets
+            market_prefix_config = {
+                '1X2': 'P_',
+                'OU_0_5': 'DC_',
+                'OU_1_5': 'DC_',
+                'OU_2_5': 'DC_',
+                'OU_3_5': 'DC_',
+                'OU_4_5': 'DC_',
+            }
 
         # Build markets dictionary with correct prefix for each
         markets = {}
