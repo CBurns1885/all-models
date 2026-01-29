@@ -439,75 +439,123 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
     return row
 
 def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
-    """Enhanced feature building with time weighting"""
+    """
+    Enhanced feature building with time weighting.
+
+    CRITICAL: Uses role-based feature extraction to avoid home/away crossover:
+    - For home team: Only uses matches where they played at HOME (Home_* features)
+    - For away team: Only uses matches where they played AWAY (Away_* features)
+    """
     base = _load_base_features()
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
-    
+
     # Add time weights for recent form emphasis
     current_date = datetime.now()
     base['days_ago'] = (current_date - pd.to_datetime(base['Date'])).dt.days
     base['time_weight'] = np.exp(-base['days_ago'] / 180)  # 180-day half-life
-    
+
     rows = []
     for _, r in fx.iterrows():
         lg, dt, ht, at = r["League"], r["Date"], r["HomeTeam"], r["AwayTeam"]
         hist_lg = base[base["League"] == lg]
-        
-        # Get last 10 games for each team with time weighting
-        hrow = hist_lg[(hist_lg["HomeTeam"]==ht) | (hist_lg["AwayTeam"]==ht)]
-        hrow = hrow[hrow["Date"]<dt].sort_values("Date").tail(10)
-        
-        arow = hist_lg[(hist_lg["HomeTeam"]==at) | (hist_lg["AwayTeam"]==at)]
-        arow = arow[arow["Date"]<dt].sort_values("Date").tail(10)
-        
-        if hrow.empty or arow.empty:
-            continue
-        
-        feat_cols = [c for c in base.columns if not c.startswith("y_") 
-                     and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
-        
-        fused = pd.DataFrame()
-        
-        # Calculate weighted features for home team
-        for col in feat_cols:
-            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
-                weights = hrow['time_weight'].values[-5:]
-                values = hrow[col].fillna(0).values[-5:]
-                if weights.sum() > 0:
-                    weighted_avg = np.average(values, weights=weights)
-                    fused.at[0, col] = weighted_avg
+
+        # FIXED: Get matches where home team played at HOME (for Home_* features)
+        ht_home_matches = hist_lg[hist_lg["HomeTeam"] == ht]
+        ht_home_matches = ht_home_matches[ht_home_matches["Date"] < dt].sort_values("Date").tail(10)
+
+        # FIXED: Get matches where away team played AWAY (for Away_* features)
+        at_away_matches = hist_lg[hist_lg["AwayTeam"] == at]
+        at_away_matches = at_away_matches[at_away_matches["Date"] < dt].sort_values("Date").tail(10)
+
+        if ht_home_matches.empty or at_away_matches.empty:
+            # Fallback: if not enough role-specific matches, use any recent matches
+            # but still extract features correctly based on role
+            ht_any = hist_lg[(hist_lg["HomeTeam"] == ht) | (hist_lg["AwayTeam"] == ht)]
+            ht_any = ht_any[ht_any["Date"] < dt].sort_values("Date").tail(10)
+
+            at_any = hist_lg[(hist_lg["HomeTeam"] == at) | (hist_lg["AwayTeam"] == at)]
+            at_any = at_any[at_any["Date"] < dt].sort_values("Date").tail(10)
+
+            if ht_any.empty or at_any.empty:
+                continue
+
+            # Use fallback with role detection
+            ht_home_matches = ht_any if ht_home_matches.empty else ht_home_matches
+            at_away_matches = at_any if at_away_matches.empty else at_away_matches
+
+        # Identify feature column groups
+        home_feat_cols = [c for c in base.columns if c.startswith("Home_")]
+        away_feat_cols = [c for c in base.columns if c.startswith("Away_")]
+        other_cols = [c for c in base.columns if not c.startswith(("Home_", "Away_", "y_"))
+                      and c not in ["FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
+                                    "days_ago", "time_weight", "League", "Date",
+                                    "HomeTeam", "AwayTeam"]]
+
+        fused = pd.DataFrame(index=[0])
+
+        # Calculate Home_* features from home team's HOME matches
+        for col in home_feat_cols:
+            if col in ht_home_matches.columns:
+                valid_data = ht_home_matches[col].dropna()
+                if len(valid_data) > 0 and ht_home_matches[col].dtype in ['float64', 'int64']:
+                    weights = ht_home_matches.loc[valid_data.index, 'time_weight'].values[-5:]
+                    values = valid_data.values[-5:]
+                    if len(weights) > 0 and weights.sum() > 0:
+                        fused.at[0, col] = np.average(values, weights=weights)
+                    else:
+                        fused.at[0, col] = valid_data.iloc[-1]
+                elif len(valid_data) > 0:
+                    fused.at[0, col] = valid_data.iloc[-1]
                 else:
-                    fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
+                    fused.at[0, col] = 0
             else:
-                fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-        
-        # Update away team features
-        for c in fused.columns:
-            if c.startswith("Away_") and c in arow.columns:
-                if arow[c].dtype in ['float64', 'int64']:
-                    weights = arow['time_weight'].values[-5:]
-                    values = arow[c].fillna(0).values[-5:]
-                    if weights.sum() > 0:
-                        weighted_avg = np.average(values, weights=weights)
-                        fused.at[0, c] = weighted_avg
+                fused.at[0, col] = 0
+
+        # Calculate Away_* features from away team's AWAY matches
+        for col in away_feat_cols:
+            if col in at_away_matches.columns:
+                valid_data = at_away_matches[col].dropna()
+                if len(valid_data) > 0 and at_away_matches[col].dtype in ['float64', 'int64']:
+                    weights = at_away_matches.loc[valid_data.index, 'time_weight'].values[-5:]
+                    values = valid_data.values[-5:]
+                    if len(weights) > 0 and weights.sum() > 0:
+                        fused.at[0, col] = np.average(values, weights=weights)
+                    else:
+                        fused.at[0, col] = valid_data.iloc[-1]
+                elif len(valid_data) > 0:
+                    fused.at[0, col] = valid_data.iloc[-1]
                 else:
-                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
-        
+                    fused.at[0, col] = 0
+            else:
+                fused.at[0, col] = 0
+
+        # Handle other features (Elo, odds, etc.) - use most recent from either team's matches
+        all_recent = pd.concat([ht_home_matches, at_away_matches]).sort_values("Date")
+        for col in other_cols:
+            if col in all_recent.columns:
+                valid_data = all_recent[col].dropna()
+                if len(valid_data) > 0:
+                    fused.at[0, col] = valid_data.iloc[-1]
+                else:
+                    fused.at[0, col] = 0
+            else:
+                fused.at[0, col] = 0
+
         fused["League"] = lg
         fused["Date"] = dt
         fused["HomeTeam"] = ht
         fused["AwayTeam"] = at
-        
+
         for c in base.columns:
             if c.startswith("y_"):
                 fused[c] = pd.NA
-        
+
         rows.append(fused)
-    
+
     if not rows:
         raise RuntimeError("No fixtures matched with historical features.")
-    
+
     return pd.concat(rows, ignore_index=True).sort_values(["League","Date","HomeTeam"])
 
 def _collect_market_columns() -> List[str]:
