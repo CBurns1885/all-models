@@ -1014,10 +1014,11 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 >= 90%)...")
 
     # Define the target markets and their probability columns
+    # Priority: DC_ (Dixon-Coles) first, then BLEND_, then P_
     markets = {
-        '1X2': ['BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A', 'P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
-        'OU_2_5': ['BLEND_OU_2_5_O', 'BLEND_OU_2_5_U', 'P_OU_2_5_O', 'P_OU_2_5_U'],
-        'OU_1_5': ['BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U']
+        '1X2': ['DC_1X2_H', 'DC_1X2_D', 'DC_1X2_A', 'BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A', 'P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
+        'OU_2_5': ['DC_OU_2_5_O', 'DC_OU_2_5_U', 'BLEND_OU_2_5_O', 'BLEND_OU_2_5_U', 'P_OU_2_5_O', 'P_OU_2_5_U'],
+        'OU_1_5': ['DC_OU_1_5_O', 'DC_OU_1_5_U', 'BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U']
     }
 
     rows = []
