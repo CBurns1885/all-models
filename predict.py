@@ -454,73 +454,45 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         lg, dt, ht, at = r["League"], r["Date"], r["HomeTeam"], r["AwayTeam"]
         hist_lg = base[base["League"] == lg]
         
-        # IMPORTANT: The model was trained with HOME-ONLY and AWAY-ONLY form.
-        # Home_* features = team's performance in their HOME matches only
-        # Away_* features = team's performance in their AWAY matches only
-        # We must NOT mix home and away form!
-
-        # Get home team's HOME matches only (for Home_* features)
-        hrow_home = hist_lg[hist_lg["HomeTeam"]==ht]
-        hrow_home = hrow_home[hrow_home["Date"]<dt].sort_values("Date").tail(10)
-
-        # Get away team's AWAY matches only (for Away_* features)
-        arow_away = hist_lg[hist_lg["AwayTeam"]==at]
-        arow_away = arow_away[arow_away["Date"]<dt].sort_values("Date").tail(10)
-
-        if hrow_home.empty or arow_away.empty:
+        # Get last 10 games for each team with time weighting
+        hrow = hist_lg[(hist_lg["HomeTeam"]==ht) | (hist_lg["AwayTeam"]==ht)]
+        hrow = hrow[hrow["Date"]<dt].sort_values("Date").tail(10)
+        
+        arow = hist_lg[(hist_lg["HomeTeam"]==at) | (hist_lg["AwayTeam"]==at)]
+        arow = arow[arow["Date"]<dt].sort_values("Date").tail(10)
+        
+        if hrow.empty or arow.empty:
             continue
-
-        feat_cols = [c for c in base.columns if not c.startswith("y_")
+        
+        feat_cols = [c for c in base.columns if not c.startswith("y_") 
                      and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
-
+        
         fused = pd.DataFrame()
-
-        # Build Home_ features from home team's HOME matches only
-        # This matches how features.py builds Home_* (from Side="Home" rows)
-        home_feat_cols = [c for c in feat_cols if c.startswith('Home_')]
-        for col in home_feat_cols:
-            values = []
-            weights = []
-            for _, row in hrow_home.tail(5).iterrows():
-                val = row.get(col, 0)  # Directly use Home_* column
-                if pd.notna(val):
-                    values.append(float(val))
-                    weights.append(row.get('time_weight', 1.0))
-            if values and sum(weights) > 0:
-                fused.at[0, col] = np.average(values, weights=weights)
-            else:
-                fused.at[0, col] = 0.0
-
-        # Build Away_ features from away team's AWAY matches only
-        # This matches how features.py builds Away_* (from Side="Away" rows)
-        away_feat_cols = [c for c in feat_cols if c.startswith('Away_')]
-        for col in away_feat_cols:
-            values = []
-            weights = []
-            for _, row in arow_away.tail(5).iterrows():
-                val = row.get(col, 0)  # Directly use Away_* column
-                if pd.notna(val):
-                    values.append(float(val))
-                    weights.append(row.get('time_weight', 1.0))
-            if values and sum(weights) > 0:
-                fused.at[0, col] = np.average(values, weights=weights)
-            else:
-                fused.at[0, col] = 0.0
-
-        # Copy non-team-specific features (Elo, DayOfWeek, etc.)
-        # Use home team's home matches for reference
-        other_cols = [c for c in feat_cols if not c.startswith('Home_') and not c.startswith('Away_')]
-        for col in other_cols:
-            if col in hrow_home.columns:
-                if hrow_home[col].dtype in ['float64', 'int64']:
-                    weights = hrow_home['time_weight'].values[-5:]
-                    values = hrow_home[col].fillna(0).values[-5:]
-                    if len(weights) > 0 and weights.sum() > 0:
-                        fused.at[0, col] = np.average(values, weights=weights)
-                    else:
-                        fused.at[0, col] = hrow_home[col].iloc[-1] if len(hrow_home) > 0 else 0
+        
+        # Calculate weighted features for home team
+        for col in feat_cols:
+            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
+                weights = hrow['time_weight'].values[-5:]
+                values = hrow[col].fillna(0).values[-5:]
+                if weights.sum() > 0:
+                    weighted_avg = np.average(values, weights=weights)
+                    fused.at[0, col] = weighted_avg
                 else:
-                    fused.at[0, col] = hrow_home[col].iloc[-1] if len(hrow_home) > 0 else 0
+                    fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
+            else:
+                fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
+        
+        # Update away team features
+        for c in fused.columns:
+            if c.startswith("Away_") and c in arow.columns:
+                if arow[c].dtype in ['float64', 'int64']:
+                    weights = arow['time_weight'].values[-5:]
+                    values = arow[c].fillna(0).values[-5:]
+                    if weights.sum() > 0:
+                        weighted_avg = np.average(values, weights=weights)
+                        fused.at[0, c] = weighted_avg
+                else:
+                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
         
         fused["League"] = lg
         fused["Date"] = dt
