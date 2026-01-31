@@ -760,7 +760,59 @@ def get_database_stats() -> Dict:
     }
 
 
+def download_missing_leagues(seasons: List[int] = None) -> int:
+    """
+    Download data for leagues that are missing from the database.
+    Useful for adding cups (UCL, UEL, FAC, etc.) and smaller leagues (CRO, SWZ, etc.)
+
+    Args:
+        seasons: List of season years to fetch (defaults to current + previous)
+
+    Returns:
+        Total fixtures downloaded
+    """
+    from config import LEAGUE_CODES, API_LEAGUE_MAP
+
+    if seasons is None:
+        current_year = datetime.now().year
+        current_month = datetime.now().month
+        current_season = current_year if current_month >= 7 else current_year - 1
+        seasons = [current_season - 1, current_season]
+
+    log_header("Downloading Missing Leagues")
+
+    # Get leagues already in database
+    stats = get_database_stats()
+    existing_leagues = set(stats.get('leagues', []))
+
+    # Find missing leagues that have API mappings
+    missing = []
+    for lg in LEAGUE_CODES:
+        if lg not in existing_leagues and lg in API_LEAGUE_MAP:
+            missing.append(lg)
+
+    if not missing:
+        print("[OK] All configured leagues already have data!")
+        return 0
+
+    print(f"Missing leagues to download: {missing}")
+    print(f"Seasons: {seasons}")
+
+    return populate_historical_data(leagues=missing, seasons=seasons, fetch_stats=False)
+
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="API-Football Data Client")
+    parser.add_argument('--download-missing', action='store_true',
+                       help='Download data for missing leagues (cups, smaller leagues)')
+    parser.add_argument('--download-all', action='store_true',
+                       help='Download all configured leagues')
+    parser.add_argument('--seasons', nargs='+', type=int, default=None,
+                       help='Seasons to download (e.g., 2023 2024 2025)')
+    args = parser.parse_args()
+
     print("="*60)
     print("API-FOOTBALL CLIENT")
     print("="*60)
@@ -775,21 +827,34 @@ if __name__ == "__main__":
             print(f"   Total fixtures: {stats['total_fixtures']}")
             print(f"   Completed matches: {stats['completed_fixtures']}")
             print(f"   Date range: {stats['date_range']}")
-            print(f"   Leagues: {stats['leagues']}")
+            print(f"   Leagues: {len(stats['leagues'])} ({', '.join(sorted(stats['leagues']))})")
             print(f"   Seasons: {stats['seasons']}")
         else:
             print("   Database not found. Initializing...")
             _init_database()
 
-        # Option to populate data
-        print("\n3. Would you like to populate historical data?")
-        print("   (This will use API calls)")
-        choice = input("   Enter 'y' to proceed: ").strip().lower()
+        # Handle command line options
+        if args.download_missing:
+            download_missing_leagues(seasons=args.seasons)
+        elif args.download_all:
+            from config import LEAGUE_CODES
+            seasons = args.seasons or [2023, 2024, 2025]
+            populate_historical_data(leagues=LEAGUE_CODES, seasons=seasons)
+        else:
+            # Interactive mode
+            print("\n3. Options:")
+            print("   [1] Download missing leagues (cups + smaller leagues)")
+            print("   [2] Download ALL configured leagues")
+            print("   [3] Exit")
+            choice = input("   Enter choice (1/2/3): ").strip()
 
-        if choice == 'y':
-            populate_historical_data(
-                leagues=['E0', 'E1', 'D1', 'SP1', 'I1', 'F1'],
-                seasons=[2023, 2024]
-            )
+            if choice == '1':
+                download_missing_leagues()
+            elif choice == '2':
+                from config import LEAGUE_CODES
+                populate_historical_data(
+                    leagues=LEAGUE_CODES,
+                    seasons=[2023, 2024, 2025]
+                )
     else:
         print("\n[ERROR] API connection failed. Check your API key.")

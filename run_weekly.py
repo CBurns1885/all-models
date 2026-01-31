@@ -313,6 +313,32 @@ try:
     from predict import predict_week
     import datetime as dt
 
+    # Step 0: Check for missing leagues (cups, smaller leagues)
+    def step0():
+        try:
+            from api_client import get_database_stats, download_missing_leagues
+            from config import LEAGUE_CODES, API_LEAGUE_MAP
+
+            stats = get_database_stats()
+            if not stats.get('exists'):
+                print("[WARN] API database not found - will be created")
+                return
+
+            existing = set(stats.get('leagues', []))
+            configured = set(lg for lg in LEAGUE_CODES if lg in API_LEAGUE_MAP)
+            missing = configured - existing
+
+            if missing:
+                print(f"[WARN] Missing leagues in database: {sorted(missing)}")
+                print("       Run: py api_client.py --download-missing")
+                print("       Or manually download to add cups (UCL, UEL, FAC) and smaller leagues (CRO, SWZ)")
+            else:
+                print(f"[OK] All {len(existing)} configured leagues have data")
+        except Exception as e:
+            print(f"[WARN] Could not check database: {e}")
+
+    run_step(0, "CHECK DATA COVERAGE", step0)
+
     # Step 1: Build historical database (uses shared API-Football DB)
     def step1():
         build_historical_results(force=False)  # Don't force rebuild unless needed

@@ -6,19 +6,41 @@ from typing import Iterable, Tuple
 from config import DATA_DIR, log_header
 from progress_utils import Timer, heartbeat
 
-# League codes supported by football-data.co.uk (extend as needed)
+# League codes supported by football-data.co.uk
+# Note: Not all leagues/cups are available on football-data.co.uk
+# Cups and some smaller leagues require API-Football instead
 DEFAULT_LEAGUES = [
-    "E0", "E1", "E2", "E3", "EC",      # England
-    "D1", "D2",                         # Germany
-    "SP1", "SP2",                       # Spain
-    "I1", "I2",                         # Italy
-    "F1", "F2",                         # France
-    "N1",                               # Netherlands
-    "B1",                               # Belgium
-    "P1",                               # Portugal
-    "G1",                               # Greece
-    "SC0", "SC1", "SC2", "SC3",        # Scotland
-    "T1",                               # Turkey
+    # England (leagues + cups)
+    "E0", "E1", "E2", "E3", "EC",
+    # Germany (leagues)
+    "D1", "D2",
+    # Spain (leagues)
+    "SP1", "SP2",
+    # Italy (leagues)
+    "I1", "I2",
+    # France (leagues)
+    "F1", "F2",
+    # Netherlands
+    "N1",
+    # Belgium
+    "B1",
+    # Portugal
+    "P1",
+    # Greece
+    "G1",
+    # Scotland
+    "SC0", "SC1",
+    # Turkey
+    "T1",
+    # Additional leagues available on football-data.co.uk
+    "A1",   # Austria
+    "SWZ",  # Switzerland
+    "POL",  # Poland
+    "DEN",  # Denmark
+    "NOR",  # Norway
+    "SWE",  # Sweden
+    "CZE",  # Czech Republic
+    "CRO",  # Croatia (HNL)
 ]
 
 def _season_code(year_start: int) -> str:
