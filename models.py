@@ -1282,14 +1282,14 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
         elapsed = time.time() - start_time
         avg_per_target = elapsed / i
         remaining = avg_per_target * (len(targets) - i)
-        print(f"⏱ Est. {remaining/3600:.1f}h remaining ({i}/{len(targets)} done)")
-    
+        print(f"[TIME] Est. {remaining/3600:.1f}h remaining ({i}/{len(targets)} done)")
+
     # save manifest
     with open(models_dir / "manifest.json", "w") as f:
         json.dump(sorted(list(models.keys())), f, indent=2)
 
     total_time = time.time() - start_time
-    print(f"\n✅ Training complete: {len(models)} models in {total_time/60:.1f} minutes")
+    print(f"\n[OK] Training complete: {len(models)} models in {total_time/60:.1f} minutes")
     return models
 
 

@@ -47,21 +47,47 @@ def _expected_score(ra: float, rb: float) -> float:
     return 1.0 / (1.0 + 10 ** (-(ra - rb) / 400.0))
 
 def _elo_by_league(df: pd.DataFrame, cfg: EloConfig) -> pd.DataFrame:
-    """Compute league-specific Elo ratings with momentum adjustment"""
+    """Compute league-specific Elo ratings with momentum adjustment.
+
+    For cup competitions, uses league Elo as fallback when cup history is limited.
+    """
+    from config import ALL_CUPS, CUP_TO_LEAGUE
+
     df = df.sort_values(["League","Date"]).copy()
-    
+
     state: Dict[Tuple[str,str], float] = {}
     momentum: Dict[Tuple[str,str], float] = {}
-    
+    match_count: Dict[Tuple[str,str], int] = {}  # Track matches per team/league
+
     home_elos, away_elos, home_mom, away_mom = [], [], [], []
 
     for idx, row in df.iterrows():
         lg = row["League"]
         ht, at = row["HomeTeam"], row["AwayTeam"]
         key_h, key_a = (lg, ht), (lg, at)
-        
+
+        # Get base Elo for this competition
         ra = state.get(key_h, cfg.base_rating)
         rb = state.get(key_a, cfg.base_rating)
+
+        # For cup games: fallback to league Elo if cup history is limited
+        if lg in ALL_CUPS:
+            primary_league = CUP_TO_LEAGUE.get(lg)
+            if primary_league:
+                # Check if team has limited cup history (< 5 matches)
+                if match_count.get(key_h, 0) < 5:
+                    league_elo_h = state.get((primary_league, ht), cfg.base_rating)
+                    if league_elo_h != cfg.base_rating:
+                        # Blend: 70% league Elo, 30% cup Elo (if any)
+                        cup_weight = min(match_count.get(key_h, 0) / 5.0, 1.0) * 0.3
+                        ra = league_elo_h * (1 - cup_weight) + ra * cup_weight
+
+                if match_count.get(key_a, 0) < 5:
+                    league_elo_a = state.get((primary_league, at), cfg.base_rating)
+                    if league_elo_a != cfg.base_rating:
+                        cup_weight = min(match_count.get(key_a, 0) / 5.0, 1.0) * 0.3
+                        rb = league_elo_a * (1 - cup_weight) + rb * cup_weight
+
         ma = momentum.get(key_h, 0.0)
         mb = momentum.get(key_a, 0.0)
 
@@ -73,15 +99,19 @@ def _elo_by_league(df: pd.DataFrame, cfg: EloConfig) -> pd.DataFrame:
         ftr = row.get("FTR")
         if pd.isna(ftr):
             continue
-            
+
+        # Increment match count
+        match_count[key_h] = match_count.get(key_h, 0) + 1
+        match_count[key_a] = match_count.get(key_a, 0) + 1
+
         # Calculate scores
-        if ftr == "H": 
+        if ftr == "H":
             score_home = 1.0
             mom_change_h, mom_change_a = 1.0, -1.0
-        elif ftr == "D": 
+        elif ftr == "D":
             score_home = 0.5
             mom_change_h, mom_change_a = 0.0, 0.0
-        else: 
+        else:
             score_home = 0.0
             mom_change_h, mom_change_a = -1.0, 1.0
 
@@ -91,16 +121,17 @@ def _elo_by_league(df: pd.DataFrame, cfg: EloConfig) -> pd.DataFrame:
 
         ra_eff = ra + cfg.home_adv + ma * 10  # Add momentum
         rb_eff = rb + mb * 10
-        
+
         k = cfg.k_base * margin_mult
         ea = _expected_score(ra_eff, rb_eff)
-        
+
         ra_new = ra + k * (score_home - ea)
         rb_new = rb + k * ((1.0 - score_home) - (1.0 - ea))
-        
-        state[key_h] = ra_new - cfg.home_adv
+
+        # Store new ratings (home_adv only affects expected score, not stored rating)
+        state[key_h] = ra_new
         state[key_a] = rb_new
-        
+
         # Update momentum
         momentum[key_h] = ma * cfg.momentum_decay + mom_change_h * (1 - cfg.momentum_decay)
         momentum[key_a] = mb * cfg.momentum_decay + mom_change_a * (1 - cfg.momentum_decay)
@@ -112,7 +143,7 @@ def _elo_by_league(df: pd.DataFrame, cfg: EloConfig) -> pd.DataFrame:
     out["Elo_Mom_Home"] = home_mom
     out["Elo_Mom_Away"] = away_mom
     out["Elo_Mom_Diff"] = out["Elo_Mom_Home"] - out["Elo_Mom_Away"]
-    
+
     return out
 
 # -----------------------------

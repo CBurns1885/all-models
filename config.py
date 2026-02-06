@@ -177,6 +177,37 @@ EUROPEAN_CUPS = ["UCL", "UEL", "UECL"]
 # All cup/knockout competitions
 ALL_CUPS = DOMESTIC_CUPS + EUROPEAN_CUPS
 
+# Cup to primary league mapping (for Elo fallback)
+CUP_TO_LEAGUE = {
+    "FAC": "E0",   # FA Cup -> Premier League
+    "EC": "E0",    # EFL Cup -> Premier League
+    "DFB": "D1",   # DFB Pokal -> Bundesliga
+    "CDR": "SP1",  # Copa del Rey -> La Liga
+    "CIT": "I1",   # Coppa Italia -> Serie A
+    "CDF": "F1",   # Coupe de France -> Ligue 1
+    "KNVB": "N1",  # KNVB Beker -> Eredivisie
+    "BEC": "B1",   # Belgian Cup -> Jupiler Pro
+    "TCP": "P1",   # Taca de Portugal -> Primeira Liga
+    "SFC": "SC0",  # Scottish FA Cup -> Scottish Prem
+    "TFC": "T1",   # Turkish Cup -> Super Lig
+    "UCL": "E0",   # Champions League -> use EPL as proxy
+    "UEL": "E0",   # Europa League -> use EPL as proxy
+    "UECL": "E0",  # Conference League -> use EPL as proxy
+}
+
+# Cup round strength factor (1.0 = full strength, lower = rotated squad)
+# Early rounds typically see squad rotation from top clubs
+CUP_ROUND_STRENGTH = {
+    "Round 1": 0.70,
+    "Round 2": 0.75,
+    "Round 3": 0.80,
+    "Round 4": 0.85,
+    "Round 5": 0.90,
+    "Quarter-final": 0.95,
+    "Semi-final": 1.0,
+    "Final": 1.0,
+}
+
 # --- Data sources ---
 FOOTBALL_DATA_CSV_BASE = "https://www.football-data.co.uk/mmz4281/{season}/{league}.csv"
 FIXTURES_URL = "https://www.football-data.co.uk/fixtures.csv"

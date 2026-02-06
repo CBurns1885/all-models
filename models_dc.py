@@ -218,14 +218,20 @@ def fit_league(df_league: pd.DataFrame, use_form: bool = True) -> DCParams:
     n = len(teams)
     theta0 = np.zeros(2 * n + 2)
     theta0[-2] = 0.2   # Home advantage initial guess
-    theta0[-1] = 0.05  # Rho initial guess
-    
+    theta0[-1] = 0.0   # Rho initial guess (centered at 0)
+
+    # Set bounds: attack/defence unbounded, home_adv [-1, 2], rho [-0.3, 0.3]
+    bounds = [(None, None)] * (2 * n)  # Attack and defence unbounded
+    bounds.append((-1.0, 2.0))  # Home advantage bounds
+    bounds.append((-0.3, 0.3))  # Rho bounds (critical for numerical stability)
+
     # Optimize
     res = minimize(
         _neg_loglik,
         theta0,
         args=(n, home_idx, away_idx, hg, ag, w),
         method='L-BFGS-B',
+        bounds=bounds,
         options={'maxiter': 800, 'ftol': 1e-10}
     )
     
@@ -438,7 +444,14 @@ def price_match(params: DCParams, home: str, away: str,
     out['_expected_total_goals'] = lam + mu
     out['_home_xG'] = lam
     out['_away_xG'] = mu
-    
+
+    # Safety: clip all probability values to [0, 1]
+    for k, v in out.items():
+        if k.startswith('DC_') and not k.startswith('DC_CS_'):
+            out[k] = max(0.0, min(1.0, v))
+        elif k.startswith('DC_CS_'):
+            out[k] = max(0.0, min(1.0, v))
+
     return out
 
 # ============================================================================

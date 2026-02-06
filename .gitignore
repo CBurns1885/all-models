@@ -70,6 +70,13 @@ catboost_info/
 .env
 .env.local
 
+# Temp/test files
+nul
+_ul
+install_log.txt
+test_run_log.txt
+test_*.py
+
 # Keep structure folders but ignore contents
 data/*
 !data/.gitkeep
