@@ -140,7 +140,7 @@ def _load_base_features() -> pd.DataFrame:
     df = pd.read_parquet(FEATURES_PARQUET)
     if not np.issubdtype(df["Date"].dtype, np.datetime64):
         df["Date"] = pd.to_datetime(df["Date"])
-    return df.sort_values(["League","Date"])
+    return df.sort_values(["Date","League"])
 
 def calculate_league_profiles(df: pd.DataFrame) -> Dict:
     """Calculate actual league profiles from historical data"""
@@ -508,7 +508,7 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     if not rows:
         raise RuntimeError("No fixtures matched with historical features.")
     
-    return pd.concat(rows, ignore_index=True).sort_values(["League","Date","HomeTeam"])
+    return pd.concat(rows, ignore_index=True).sort_values(["Date","League","HomeTeam"])
 
 def _collect_market_columns() -> List[str]:
     """All expected probability column names - COMPREHENSIVE VERSION"""

@@ -181,8 +181,11 @@ def generate_ou_report(df_ou: pd.DataFrame, min_confidence: float = DEFAULT_CONF
         _generate_empty_report(min_confidence)
         return
     
-    # Sort by confidence
-    df_ou = df_ou.sort_values('Best_Prob', ascending=False).reset_index(drop=True)
+    # Sort by date, league, then confidence (highest first)
+    if 'Date' in df_ou.columns and 'League' in df_ou.columns:
+        df_ou = df_ou.sort_values(['Date', 'League', 'Best_Prob'], ascending=[True, True, False]).reset_index(drop=True)
+    else:
+        df_ou = df_ou.sort_values('Best_Prob', ascending=False).reset_index(drop=True)
     
     # Get historical performance
     historical = get_ou_historical_performance()
@@ -524,7 +527,7 @@ def _generate_excel_report(df: pd.DataFrame, historical: dict):
             for line in ['0.5', '1.5', '2.5', '3.5', '4.5']:
                 line_df = df_formatted[df_formatted['Line'] == line].copy()
                 if not line_df.empty:
-                    line_df = line_df.sort_values('Date')
+                    line_df = line_df.sort_values(['Date', 'League'] if 'League' in line_df.columns else ['Date'])
                     sheet_name = f'O_U {line}'.replace('.', '_')
                     line_df.to_excel(writer, sheet_name=sheet_name, index=False)
             
