@@ -334,6 +334,35 @@ try:
 
     run_step(0, "CHECK DATA COVERAGE", step0)
 
+    # ===================================================================
+    # ACCURACY & RESULTS UPDATE - Run at START so market weights are fresh
+    # before generating new predictions (Steps 6/7/8 depend on this)
+    # ===================================================================
+
+    # Step 0a: Update accuracy database with latest match results
+    def step0a():
+        try:
+            from update_results import update_accuracy_database as update_results_db
+            update_results_db()
+        except ImportError:
+            print("[WARN] update_results module not available - skipping")
+        except Exception as e:
+            print(f"[WARN] Results update skipped: {e}")
+
+    run_step(0, "UPDATE RESULTS & ACCURACY DB", step0a)
+
+    # Step 0b: Update backtest results for high-confidence predictions
+    def step0b():
+        try:
+            from backtest_results import main as backtest_main
+            backtest_main()
+        except ImportError:
+            print("[WARN] backtest_results module not available - skipping")
+        except Exception as e:
+            print(f"[WARN] Backtest results update skipped: {e}")
+
+    run_step(0, "UPDATE BACKTEST RESULTS", step0b)
+
     # Step 1: Build historical database (uses shared API-Football DB)
     def step1():
         build_historical_results(force=False)  # Don't force rebuild unless needed
@@ -421,29 +450,18 @@ try:
     # Step 8: Build Accumulators
     def step8():
         try:
-            from acc_builder import AccumulatorBuilder
+            from acc_builder import SeasonalAccumulatorBuilder
             csv_path = OUTPUT_DIR / "weekly_bets.csv"
 
             if csv_path.exists():
-                builder = AccumulatorBuilder(str(csv_path))
-
-                strategies = {
-                    'safe': ('Conservative 4-Fold', 4),
-                    'mixed': ('Balanced 5-Fold', 5),
-                    'aggressive': ('High-Risk 6-Fold', 6)
-                }
-
-                acca_count = 0
-                for strategy_name, (display_name, num_legs) in strategies.items():
-                    acca_html = builder.generate_report(strategy=strategy_name, num_legs=num_legs)
-                    acca_path = OUTPUT_DIR / f"accumulators_{strategy_name}.html"
-
-                    with open(acca_path, 'w', encoding='utf-8') as f:
-                        f.write(acca_html)
-
-                    acca_count += 1
-
-                print(f"[OK] Generated {acca_count} accumulator strategies")
+                builder = SeasonalAccumulatorBuilder(
+                    weekly_bets_path=str(csv_path),
+                    accuracy_db_path=str(OUTPUT_DIR / "accuracy_database.db")
+                )
+                report_path = builder.generate_weekly_report(
+                    filename="weekly_accumulators.html"
+                )
+                print(f"[OK] Accumulator report: {report_path}")
             else:
                 raise FileNotFoundError("weekly_bets.csv not found")
         except ImportError:
@@ -470,16 +488,23 @@ try:
 
     run_step(9, "SPLIT BY MARKET", step9)
 
-    # Step 10: Update accuracy database
+    # Step 10: Final accuracy sync (catches any results that arrived during this run)
     def step10():
         try:
-            from accuracy_tracker import update_accuracy_database
+            from accuracy_tracker import update_accuracy_database, generate_weekly_accuracy_report
             update_accuracy_database()
-            print("[OK] Accuracy database updated")
+            print("[OK] Accuracy database synced (final pass)")
+
+            # Generate accuracy report for last week
+            try:
+                last_week = (dt.datetime.now() - dt.timedelta(days=7)).strftime('%Y-W%W')
+                generate_weekly_accuracy_report(week_id=last_week, output_dir=OUTPUT_DIR)
+            except Exception as e:
+                print(f"[WARN] Accuracy report generation skipped: {e}")
         except Exception as e:
             print(f"[WARN] Accuracy update skipped: {e}")
 
-    run_step(10, "UPDATE ACCURACY DB", step10)
+    run_step(10, "FINAL ACCURACY SYNC & REPORT", step10)
 
     # Step 11: Archive outputs
     def step11():
