@@ -432,7 +432,9 @@ def main():
             t_rate = t_wins / t_total * 100
             print(f"{label:12} - Win Rate: {t_rate:5.1f}% ({t_wins}/{t_total})")
 
-    # Save results
+    # Sort by date then league before saving
+    if 'Date' in hc_df.columns and 'League' in hc_df.columns:
+        hc_df = hc_df.sort_values(['Date', 'League'], ascending=[True, True])
     hc_df.to_csv(OUTPUT_CSV, index=False)
     print(f"\nSaved results to {OUTPUT_CSV}")
 

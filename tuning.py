@@ -141,7 +141,7 @@ def objective_factory(alg: str, cvd: CVData):
                 colsample_bytree=trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 min_child_samples=trial.suggest_int("min_child_samples", 10, 50),
                 objective="multiclass" if K>2 else "binary",
-                random_state=42, n_jobs=-1
+                random_state=42, n_jobs=-1, verbose=-1
             )
         elif alg == "cat" and _HAS_CAT:
             return CatBoostClassifier(
@@ -153,6 +153,10 @@ def objective_factory(alg: str, cvd: CVData):
                 loss_function="MultiClass" if K>2 else "Logloss",
                 verbose=False
             )
+        elif alg == "coral":
+            from ordinal import CORALOrdinal
+            C = trial.suggest_float("C", 0.01, 100.0, log=True)
+            return CORALOrdinal(C=C, max_iter=2000)
         else:
             raise RuntimeError(f"Algorithm not available: {alg}")
 
