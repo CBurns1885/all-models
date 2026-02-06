@@ -337,7 +337,7 @@ try:
             x = self.drop1(torch.relu(self.fc1(x)))
             x = self.drop2(torch.relu(self.fc2(x)))
             return self.fc3(x)
-except:
+except Exception:
     SmallBNN = None
 
 class BNNWrapper(BaseEstimator, ClassifierMixin):
@@ -378,7 +378,7 @@ class BNNWrapper(BaseEstimator, ClassifierMixin):
         outs = []
         for _ in range(self.mc):
             with torch.no_grad():
-                logits = self.model(X_t).numpy()
+                logits = self.model(X_t).cpu().numpy()
                 probs = _softmax_np(logits)
                 outs.append(probs)
         return np.mean(np.stack(outs, axis=0), axis=0)
@@ -1016,9 +1016,6 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     sub = df.dropna(subset=[target_col]).copy()
     if sub.empty:
         raise RuntimeError(f"No data for target {target_col}")
-    if df[target_col].isna().all():
-        print(f"[WARN] Skipping {target_col} - no data available")
-        return None
     
     error_count = 0
     
@@ -1403,7 +1400,8 @@ def load_trained_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Tr
     for p in models_dir.glob("y_*.joblib"):
         try:
             models[p.stem] = joblib.load(p)
-        except Exception:
+        except Exception as e:
+            print(f"[WARN] Failed to load model {p.stem}: {e}")
             continue
     return models
 

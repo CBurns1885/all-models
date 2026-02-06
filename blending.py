@@ -20,7 +20,7 @@ def _load_features():
 BLEND_WEIGHTS_JSON = Path("models/blend_weights.json")
 
 # Map model targets -> output column name builder
-OU_LINES = ["0_5","1_5","2_5","3_5","4_5"]
+OU_LINES = ["0_5","1_5","2_5","3_5","4_5","5_5"]
 AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
 
 # For each target, define a function that maps an ordered class-prob vector to output column names
@@ -31,7 +31,7 @@ def _cols_for_target(target: str, class_labels: List[str]) -> List[str]:
         # assume class order ["N","Y"] or ["Y","N"]; we’ll align by label
         return ["P_BTTS_N","P_BTTS_Y"]
     if target.startswith("y_OU_"):
-        l = target.split("_")[-1]
+        l = target.split("_", 2)[2]
         return [f"P_OU_{l}_U", f"P_OU_{l}_O"]
     if target.startswith("y_AH_"):
         l = target.split("_",2)[2]
@@ -166,7 +166,7 @@ def learn_blend_weights() -> Dict[str, float]:
                 labs = [f"{a}-{b}" for a in range(6) for b in range(6)] + ["Other"]
                 vec = [mp.get(f"DC_CS_{a}_{b}",0.0) for a in range(6) for b in range(6)] + [mp.get("DC_CS_Other",0.0)]
             elif target.startswith("y_OU_"):
-                l = target.split("_")[-1]; labs = ["U","O"]
+                l = target.split("_", 2)[2]; labs = ["U","O"]
                 vec = [mp.get(f"DC_OU_{l}_U",0.0), mp.get(f"DC_OU_{l}_O",0.0)]
             elif target.startswith("y_AH_"):
                 l = target.split("_",2)[2]; labs = ["A","P","H"]

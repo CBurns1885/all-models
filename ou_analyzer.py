@@ -30,7 +30,7 @@ HIGH_CONFIDENCE = 0.92     # 92%+ = high confidence
 ELITE_CONFIDENCE = 0.95    # 95%+ = elite
 
 # O/U Lines to analyze
-OU_LINES = [ '0_5','1_5', '2_5', '3_5', '4_5']
+OU_LINES = [ '0_5','1_5', '2_5', '3_5', '4_5', '5_5']
 
 # ============================================================================
 # DATA EXTRACTION
