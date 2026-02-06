@@ -153,6 +153,10 @@ def objective_factory(alg: str, cvd: CVData):
                 loss_function="MultiClass" if K>2 else "Logloss",
                 verbose=False
             )
+        elif alg == "coral":
+            from ordinal import CORALOrdinal
+            C = trial.suggest_float("C", 0.01, 100.0, log=True)
+            return CORALOrdinal(C=C, max_iter=2000)
         else:
             raise RuntimeError(f"Algorithm not available: {alg}")
 

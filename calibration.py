@@ -349,3 +349,123 @@ def get_calibrator_for_market(target_col: str, n_classes: int):
             return TemperatureScaler()
         else:
             return DirichletCalibrator()
+
+
+def enforce_calibration_constraints(predictions: dict) -> dict:
+    """
+    Enforce cross-market mathematical constraints on calibrated predictions
+    BEFORE blending. This ensures the ML model outputs are internally consistent.
+
+    Operates on a dict mapping column names to probability values for a single row.
+    Returns the adjusted dict.
+
+    Constraints:
+    1. O/U Over probabilities must decrease as line increases
+    2. O/U Over + Under = 1.0 for each line
+    3. BTTS=Yes implies Over 1.5 (need at least 2 goals)
+    4. Team goal O/U monotonicity
+    5. 1X2 probabilities sum to 1.0
+    6. Correct Score 0-0 <= Under 0.5
+    """
+    p = dict(predictions)  # shallow copy
+
+    # --- 1. O/U Over monotonicity: P(O line_i) >= P(O line_{i+1}) ---
+    ou_lines = ['0_5', '1_5', '2_5', '3_5', '4_5', '5_5']
+    over_keys = [f'P_OU_{l}_O' for l in ou_lines]
+    present_overs = [(k, l) for k, l in zip(over_keys, ou_lines) if k in p and p[k] is not None]
+
+    if len(present_overs) >= 2:
+        # Enforce non-increasing order via isotonic projection
+        vals = [p[k] for k, _ in present_overs]
+        adjusted = _isotonic_decreasing(vals)
+        for (k, _), v in zip(present_overs, adjusted):
+            p[k] = v
+            # Replace trailing _O with _U (avoid matching _O in _OU)
+            under_k = k[:-2] + '_U'
+            if under_k in p:
+                p[under_k] = 1.0 - v
+
+    # --- 2. BTTS consistency with O/U ---
+    if 'P_BTTS_Y' in p and p.get('P_BTTS_Y') is not None:
+        btts_y = p['P_BTTS_Y']
+        # BTTS=Yes requires at least 2 goals → must be <= P(Over 1.5)
+        if 'P_OU_1_5_O' in p and p.get('P_OU_1_5_O') is not None:
+            if btts_y > p['P_OU_1_5_O']:
+                # Soft adjustment: move both towards average
+                avg = (btts_y + p['P_OU_1_5_O']) / 2
+                p['P_BTTS_Y'] = max(0.01, avg - 0.02)
+                p['P_OU_1_5_O'] = min(0.99, avg + 0.02)
+                p['P_BTTS_N'] = 1.0 - p['P_BTTS_Y']
+                p['P_OU_1_5_U'] = 1.0 - p['P_OU_1_5_O']
+
+        # If U0.5 is high, BTTS must be near zero
+        if 'P_OU_0_5_U' in p and p.get('P_OU_0_5_U') is not None:
+            if p['P_OU_0_5_U'] > 0.5:
+                p['P_BTTS_Y'] = min(p.get('P_BTTS_Y', 0), 0.01)
+                p['P_BTTS_N'] = 1.0 - p['P_BTTS_Y']
+
+    # --- 3. 1X2 normalization ---
+    hda_keys = ['P_1X2_H', 'P_1X2_D', 'P_1X2_A']
+    if all(k in p and p[k] is not None for k in hda_keys):
+        total = sum(p[k] for k in hda_keys)
+        if total > 0:
+            for k in hda_keys:
+                p[k] = p[k] / total
+
+    # --- 4. Team goals O/U monotonicity ---
+    for prefix in ['P_HomeTG_', 'P_AwayTG_']:
+        tg_lines = ['0_5', '1_5', '2_5', '3_5']
+        tg_overs = [(f'{prefix}{l}_O', l) for l in tg_lines]
+        present_tg = [(k, l) for k, l in tg_overs if k in p and p[k] is not None]
+        if len(present_tg) >= 2:
+            vals = [p[k] for k, _ in present_tg]
+            adjusted = _isotonic_decreasing(vals)
+            for (k, _), v in zip(present_tg, adjusted):
+                p[k] = v
+                under_k = k[:-2] + '_U'
+                if under_k in p:
+                    p[under_k] = 1.0 - v
+
+    # --- 5. CS 0-0 must not exceed Under 0.5 ---
+    if 'P_CS_0_0' in p and 'P_OU_0_5_U' in p:
+        if p.get('P_CS_0_0') is not None and p.get('P_OU_0_5_U') is not None:
+            p['P_CS_0_0'] = min(p['P_CS_0_0'], p['P_OU_0_5_U'])
+
+    # --- 6. BTTS and team goals consistency ---
+    if all(k in p and p.get(k) is not None for k in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
+        min_btts = p['P_HomeTG_0_5_O'] * p['P_AwayTG_0_5_O']
+        p['P_BTTS_Y'] = max(p['P_BTTS_Y'], min_btts * 0.85)
+        p['P_BTTS_N'] = 1.0 - p['P_BTTS_Y']
+
+    return p
+
+
+def _isotonic_decreasing(vals: list) -> list:
+    """
+    Pool adjacent violators to enforce a non-increasing sequence.
+    Returns adjusted values that are monotonically non-increasing.
+    Uses proper PAVA: negate, run increasing PAVA, negate back.
+    """
+    n = len(vals)
+    if n <= 1:
+        return [max(0.01, min(0.99, v)) for v in vals]
+    # PAVA for non-decreasing on negated values = non-increasing on originals
+    neg = [-v for v in vals]
+    # Standard increasing PAVA
+    blocks = []  # list of (sum, count)
+    for v in neg:
+        blocks.append((v, 1))
+        while len(blocks) >= 2:
+            s1, c1 = blocks[-2]
+            s2, c2 = blocks[-1]
+            if s1 / c1 > s2 / c2:
+                blocks.pop()
+                blocks[-1] = (s1 + s2, c1 + c2)
+            else:
+                break
+    # Expand blocks back to values
+    result = []
+    for s, c in blocks:
+        result.extend([s / c] * c)
+    # Negate back and clip
+    return [max(0.01, min(0.99, -v)) for v in result]

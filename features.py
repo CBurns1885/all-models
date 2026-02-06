@@ -499,6 +499,51 @@ def _add_contextual_features(df: pd.DataFrame) -> pd.DataFrame:
     except (ImportError, Exception) as e:
         print(f"   [INFO] Injury features not available: {e}")
 
+    # League quality tier features (allows model to learn league-specific patterns)
+    LEAGUE_TIERS = {
+        # Elite (top 5 European leagues)
+        'E0': 1, 'SP1': 1, 'I1': 1, 'D1': 1, 'F1': 1,
+        # High quality
+        'E1': 2, 'SP2': 2, 'I2': 2, 'D2': 2, 'F2': 2, 'N1': 2,
+        'P1': 2, 'B1': 2, 'SC0': 2, 'T1': 2,
+        # Medium quality
+        'E2': 3, 'E3': 3, 'SC1': 3, 'A1': 3, 'G1': 3, 'SWZ': 3,
+        'POL': 3, 'RUS': 3, 'EC': 3,
+    }
+    LEAGUE_AVG_GOALS = {
+        'E0': 2.72, 'E1': 2.65, 'E2': 2.58, 'E3': 2.61, 'EC': 2.65,
+        'SP1': 2.48, 'SP2': 2.35, 'I1': 2.68, 'I2': 2.45,
+        'D1': 3.05, 'D2': 2.85, 'F1': 2.55, 'F2': 2.42,
+        'N1': 2.95, 'B1': 2.78, 'P1': 2.52, 'SC0': 2.65, 'SC1': 2.58,
+        'T1': 3.10, 'G1': 2.35, 'A1': 2.92, 'SWZ': 2.75,
+        'POL': 2.62, 'RUS': 2.45,
+    }
+    LEAGUE_HOME_ADV = {
+        'E0': 0.12, 'E1': 0.10, 'E2': 0.11, 'E3': 0.13, 'EC': 0.12,
+        'SP1': 0.15, 'SP2': 0.14, 'I1': 0.11, 'I2': 0.12,
+        'D1': 0.09, 'D2': 0.10, 'F1': 0.13, 'F2': 0.12,
+        'N1': 0.08, 'B1': 0.10, 'P1': 0.16, 'SC0': 0.11, 'SC1': 0.13,
+        'T1': 0.14, 'G1': 0.18, 'A1': 0.10, 'SWZ': 0.09,
+        'POL': 0.12, 'RUS': 0.14,
+    }
+    LEAGUE_STYLE = {
+        # 1 = attacking, 0 = balanced, -1 = defensive
+        'E0': 0, 'E1': 0, 'E2': 0, 'E3': 0, 'EC': 0,
+        'SP1': -1, 'SP2': -1, 'I1': 0, 'I2': -1,
+        'D1': 1, 'D2': 1, 'F1': 0, 'F2': -1,
+        'N1': 1, 'B1': 0, 'P1': -1, 'SC0': 0, 'SC1': 0,
+        'T1': 1, 'G1': -1, 'A1': 1, 'SWZ': 0,
+        'POL': 0, 'RUS': -1,
+    }
+
+    if 'League' in out.columns:
+        out['League_Tier'] = out['League'].map(LEAGUE_TIERS).fillna(4).astype(int)
+        out['League_AvgGoals'] = out['League'].map(LEAGUE_AVG_GOALS).fillna(2.60)
+        out['League_HomeAdv'] = out['League'].map(LEAGUE_HOME_ADV).fillna(0.12)
+        out['League_Style'] = out['League'].map(LEAGUE_STYLE).fillna(0).astype(int)
+        tier_count = out['League_Tier'].nunique()
+        print(f"   Added league quality tier features ({tier_count} tiers across {out['League'].nunique()} leagues)")
+
     return out
 
 # -----------------------------

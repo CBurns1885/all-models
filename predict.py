@@ -777,14 +777,21 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
                     row[market] = apply_league_calibration(
                         row[market], market, league, league_profiles
                     )
-        
+
+        # Apply cross-market calibration constraints BEFORE Poisson/blending
+        try:
+            from calibration import enforce_calibration_constraints
+            row = enforce_calibration_constraints(row)
+        except ImportError:
+            pass
+
         # Convert to series
         row_series = pd.Series(row)
-        
+
         # Apply Poisson adjustments
         row_series = apply_poisson_adjustment(row_series, league=league)
-        
-        # Enforce cross-market constraints
+
+        # Enforce cross-market constraints (final pass)
         row_series = enforce_cross_market_constraints(row_series)
         
         rows.append(row_series.to_dict())
