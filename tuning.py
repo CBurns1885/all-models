@@ -141,7 +141,7 @@ def objective_factory(alg: str, cvd: CVData):
                 colsample_bytree=trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 min_child_samples=trial.suggest_int("min_child_samples", 10, 50),
                 objective="multiclass" if K>2 else "binary",
-                random_state=42, n_jobs=-1
+                random_state=42, n_jobs=-1, verbose=-1
             )
         elif alg == "cat" and _HAS_CAT:
             return CatBoostClassifier(

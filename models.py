@@ -12,7 +12,11 @@ import copy
 
 import numpy as np
 import pandas as pd
-import optuna
+try:
+    import optuna
+    _HAS_OPTUNA = True
+except ImportError:
+    _HAS_OPTUNA = False
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -43,11 +47,6 @@ except Exception:
 try:
     import lightgbm as lgb
     _HAS_LGB = True
-    # Try to silence warnings (may not work in all versions)
-    try:
-        lgb.set_option('verbosity', -1)
-    except:
-        pass
 except Exception:
     _HAS_LGB = False
 
@@ -114,33 +113,6 @@ def _load_features() -> pd.DataFrame:
     if not np.issubdtype(df["Date"].dtype, np.datetime64):
         df["Date"] = pd.to_datetime(df["Date"])
     return df.sort_values(["League", "Date"]).reset_index(drop=True)
-
-def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, TrainedTarget]:
-    df = _load_features()
-    
-    # NEW: Handle NaN values
-    print("Handling missing values...")
-    
-    # Fill numeric columns with median
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    for col in numeric_cols:
-        if not col.startswith('y_'):  # Don't touch target columns
-            if df[col].isna().sum() > 0:
-                median_val = df[col].median()
-                df[col] = df[col].fillna(median_val if pd.notna(median_val) else 0)
-    
-    # Fill categorical columns with mode or 'Unknown'
-    cat_cols = df.select_dtypes(include=['object', 'category']).columns
-    for col in cat_cols:
-        if not col.startswith('y_'):
-            if df[col].isna().sum() > 0:
-                mode_val = df[col].mode()
-                df[col] = df[col].fillna(mode_val[0] if len(mode_val) > 0 else 'Unknown')
-    
-    print(f"[OK] NaN values handled")
-    
-    # Continue with rest of function...
-    models: Dict[str, TrainedTarget] = {}
 
 # --------------------------------------------------------------------------------------
 # Targets definition
@@ -661,7 +633,7 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
                 colsample_bytree=best_params.get("colsample_bytree", 0.9),
                 min_child_samples=best_params.get("min_child_samples", 25),
                 objective="multiclass" if len(classes_)>2 else "binary",
-                random_state=RANDOM_SEED, n_jobs=-1
+                random_state=RANDOM_SEED, n_jobs=-1, verbose=-1
             )
             model = lgb.LGBMClassifier(**params)
         elif alg == "cat" and _HAS_CAT:
@@ -1380,3 +1352,77 @@ def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> 
         P = P / P.sum(axis=1, keepdims=True)
         out[t] = P
     return out
+
+
+def analyse_feature_importance(models_dir: Path = MODEL_ARTIFACTS_DIR, top_n: int = 50) -> Dict[str, List]:
+    """
+    Analyse feature importance across all trained models.
+    Returns per-target importance rankings and identifies consistently unimportant features.
+
+    Args:
+        models_dir: Directory with trained model artifacts
+        top_n: Number of top features to show per model
+
+    Returns:
+        Dict with 'per_target' importances and 'drop_candidates' (features with zero
+        importance across all tree-based models)
+    """
+    models = load_trained_targets(models_dir)
+    if not models:
+        print("[WARN] No trained models found")
+        return {}
+
+    all_importances: Dict[str, List[float]] = {}
+    per_target = {}
+
+    for target, trg in models.items():
+        for name, base in trg.base_models.items():
+            if name == "dc" or name == "__DC__":
+                continue
+            if hasattr(base, 'feature_importances_'):
+                importances = base.feature_importances_
+                # Get feature names from preprocessor
+                try:
+                    num_names = list(trg.preprocessor.transformers_[0][2] or [])
+                    cat_names = list(trg.preprocessor.transformers_[1][2] or [])
+                    feat_names = num_names + cat_names
+                    # OHE may expand cat features
+                    if len(feat_names) < len(importances):
+                        feat_names = [f"f_{i}" for i in range(len(importances))]
+                except Exception:
+                    feat_names = [f"f_{i}" for i in range(len(importances))]
+
+                ranked = sorted(zip(feat_names, importances), key=lambda x: x[1], reverse=True)
+                per_target[f"{target}_{name}"] = ranked[:top_n]
+
+                for fname, imp in zip(feat_names, importances):
+                    if fname not in all_importances:
+                        all_importances[fname] = []
+                    all_importances[fname].append(imp)
+
+    # Features with zero importance across ALL models
+    drop_candidates = [
+        fname for fname, imps in all_importances.items()
+        if all(imp == 0.0 for imp in imps) and len(imps) >= 3
+    ]
+
+    # Save analysis
+    analysis = {
+        'drop_candidates': sorted(drop_candidates),
+        'drop_count': len(drop_candidates),
+        'total_features': len(all_importances),
+        'models_analysed': len(per_target),
+    }
+
+    analysis_path = models_dir / "feature_importance_analysis.json"
+    with open(analysis_path, "w") as f:
+        json.dump(analysis, f, indent=2)
+
+    print(f"\n[FEATURE IMPORTANCE ANALYSIS]")
+    print(f"  Total features: {len(all_importances)}")
+    print(f"  Zero-importance candidates for pruning: {len(drop_candidates)}")
+    if drop_candidates:
+        print(f"  Top drop candidates: {drop_candidates[:20]}")
+    print(f"  Saved to {analysis_path}")
+
+    return {'per_target': per_target, 'drop_candidates': drop_candidates, 'all_importances': all_importances}

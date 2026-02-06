@@ -277,6 +277,46 @@ def get_injuries_from_db(
     return df
 
 
+def get_injury_counts_from_db() -> pd.DataFrame:
+    """
+    Get aggregated injury counts per team per fixture date.
+    Returns a DataFrame with columns: League, Date, Team, InjuryCount
+    suitable for merging into features as Home_InjuryCount / Away_InjuryCount.
+    """
+    if not API_FOOTBALL_DB.exists():
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(API_FOOTBALL_DB)
+
+    # Check injuries table exists
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='injuries'")
+    if not cursor.fetchone():
+        conn.close()
+        return pd.DataFrame()
+
+    query = """
+        SELECT
+            f.league_code as League,
+            f.date as Date,
+            i.team_name as Team,
+            COUNT(*) as InjuryCount
+        FROM injuries i
+        JOIN fixtures f ON i.fixture_id = f.fixture_id
+        WHERE f.status = 'FT'
+        GROUP BY f.league_code, f.date, i.team_name
+    """
+
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+
+    if not df.empty:
+        df['Date'] = pd.to_datetime(df['Date'])
+        df['InjuryCount'] = pd.to_numeric(df['InjuryCount'], errors='coerce').fillna(0).astype(int)
+
+    return df
+
+
 def build_historical_from_api(
     seasons: List[int] = None,
     leagues: List[str] = None,

@@ -33,6 +33,23 @@ LEAGUE_DECAY_DAYS = {
 }
 DEFAULT_DECAY = 400.0
 
+# Form clamp range per league style (wider = more responsive to form)
+# Volatile/attacking leagues get wider range, stable/defensive leagues tighter
+LEAGUE_FORM_CLAMP = {
+    'D1': (0.65, 1.35),   # Bundesliga - more volatile, high-scoring
+    'D2': (0.65, 1.35),
+    'N1': (0.65, 1.35),   # Eredivisie - very open
+    'T1': (0.60, 1.40),   # Turkish Super Lig - volatile, high-scoring
+    'A1': (0.65, 1.35),   # Austria - attacking style
+    'SP1': (0.75, 1.25),  # La Liga - tactical, less form swing
+    'I1': (0.75, 1.25),   # Serie A - disciplined
+    'F1': (0.75, 1.25),   # Ligue 1 - physical, moderate variance
+    'G1': (0.75, 1.25),   # Greece - defensive
+    'E0': (0.70, 1.30),   # Premier League - balanced
+    'E1': (0.68, 1.32),   # Championship - slightly more volatile
+}
+DEFAULT_FORM_CLAMP = (0.70, 1.30)
+
 MAX_GOALS = 12  # Increased for better tail accuracy
 RECENT_FORM_WINDOW = 5  # Last 5 matches for form boost
 
@@ -129,10 +146,12 @@ def _neg_loglik(theta, n, home_idx, away_idx, hg, ag, w):
 # RECENT FORM CALCULATOR
 # ============================================================================
 
-def _calculate_recent_form(df_league: pd.DataFrame, window: int = RECENT_FORM_WINDOW) -> Dict[str, Dict]:
+def _calculate_recent_form(df_league: pd.DataFrame, window: int = RECENT_FORM_WINDOW, league_code: str = None) -> Dict[str, Dict]:
     """
-    Calculate recent form adjustments for attack/defence
-    Returns multipliers based on last N games
+    Calculate recent form adjustments for attack/defence.
+    Form clamp range is configurable per league to account for
+    different levels of form volatility across competitions.
+    Returns multipliers based on last N games.
     """
     df = df_league.sort_values('Date')
     teams = pd.unique(pd.concat([df['HomeTeam'], df['AwayTeam']]))
@@ -168,9 +187,10 @@ def _calculate_recent_form(df_league: pd.DataFrame, window: int = RECENT_FORM_WI
         recent_attack[team] = (recent_goals_scored / matches_played) / league_avg_goals
         recent_defence[team] = league_avg_goals / (recent_goals_conceded / matches_played)
         
-        # Clamp to reasonable range [0.7, 1.3]
-        recent_attack[team] = max(0.7, min(1.3, recent_attack[team]))
-        recent_defence[team] = max(0.7, min(1.3, recent_defence[team]))
+        # Clamp to league-specific range
+        lo, hi = LEAGUE_FORM_CLAMP.get(league_code, DEFAULT_FORM_CLAMP) if league_code else DEFAULT_FORM_CLAMP
+        recent_attack[team] = max(lo, min(hi, recent_attack[team]))
+        recent_defence[team] = max(lo, min(hi, recent_defence[team]))
     
     return {
         'attack': recent_attack,
@@ -251,7 +271,7 @@ def fit_league(df_league: pd.DataFrame, use_form: bool = True) -> DCParams:
     
     # Add recent form adjustments if requested
     if use_form:
-        form = _calculate_recent_form(df)
+        form = _calculate_recent_form(df, league_code=league_name)
         params.recent_attack = form['attack']
         params.recent_defence = form['defence']
     

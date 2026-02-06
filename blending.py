@@ -103,26 +103,36 @@ def _opt_alpha(y_int: np.ndarray, p_ml: np.ndarray, p_dc: np.ndarray) -> float:
 def learn_blend_weights() -> Dict[str, float]:
     """
     Returns dict: target_name -> alpha (0..1) where alpha weights ML vs DC.
+    Uses a time-based holdout (last 20% of matches) to avoid in-sample overfitting.
     Saves to models/blend_weights.json
     """
     # Load historical features and trained ML models
     df = _load_features()
     models = load_trained_targets()
-    # Compute ML predictions on rows where target is known (in-sample; acceptable for weight selection)
     weights: Dict[str, float] = {}
 
-    # Pre-fit DC once per league from all historical (for speed & determinism)
-    base = df.dropna(subset=["FTHG","FTAG","HomeTeam","AwayTeam","League","Date"]).copy()
+    # Use only the most recent 20% of data as validation for blend weights
+    # This prevents in-sample overfitting of the blend alpha
+    df = df.sort_values('Date')
+    n = len(df)
+    val_start = int(n * 0.80)
+    df_val = df.iloc[val_start:].copy()
+    df_train = df.iloc[:val_start].copy()
+    print(f"  Blend weight learning: using {len(df_val)} validation rows "
+          f"(last 20%, from {df_val['Date'].min().date()} onwards)")
+
+    # Pre-fit DC on training portion only
+    base = df_train.dropna(subset=["FTHG","FTAG","HomeTeam","AwayTeam","League","Date"]).copy()
     dc_params = dc_fit_all(base[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
 
     for target, m in models.items():
-        if target not in df.columns:
+        if target not in df_val.columns:
             continue
-        sub = df.dropna(subset=[target]).copy()
-        if sub.empty:
+        sub = df_val.dropna(subset=[target]).copy()
+        if len(sub) < 50:  # Need enough validation samples
             continue
 
-        # ML probs
+        # ML probs (on held-out validation data)
         ml_dict = ml_predict({target: m}, sub)
         p_ml_full = ml_dict[target]  # shape (n, K_ml)
         ml_labels = list(m.classes_)
