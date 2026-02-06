@@ -242,6 +242,43 @@ FORCE_RETRAIN = os.environ.get("FORCE_RETRAIN", "0") == "1"
 FORM_WINDOWS = [3, 5, 10, 20]
 EWM_SPAN = 10
 
+# =============================================================================
+# MARKET CONFIGURATION - Column prefix mapping
+# =============================================================================
+# Defines which model/column prefix to use for each market type:
+# - P_ = Base ML model predictions
+# - DC_ = Dixon-Coles statistical model predictions
+
+# Markets that use P_ (base ML) columns
+P_MARKETS = {'1X2', 'BTTS', 'DNB'}
+
+# Markets that use DC_ (Dixon-Coles) columns
+DC_MARKETS = {'OU_0_5', 'OU_1_5', 'OU_2_5', 'OU_3_5', 'OU_4_5'}
+
+# Combined config for programmatic access
+MARKET_PREFIX_CONFIG = {
+    # 1X2 uses P_ (base ML model)
+    '1X2': {'prefix': 'P_', 'columns': ['1X2_H', '1X2_D', '1X2_A'], 'outcome_col': 'y_1X2'},
+    # O/U markets use DC_ (Dixon-Coles ensemble)
+    'OU_0_5': {'prefix': 'DC_', 'columns': ['OU_0_5_O', 'OU_0_5_U'], 'outcome_col': 'y_OU_0_5'},
+    'OU_1_5': {'prefix': 'DC_', 'columns': ['OU_1_5_O', 'OU_1_5_U'], 'outcome_col': 'y_OU_1_5'},
+    'OU_2_5': {'prefix': 'DC_', 'columns': ['OU_2_5_O', 'OU_2_5_U'], 'outcome_col': 'y_OU_2_5'},
+    'OU_3_5': {'prefix': 'DC_', 'columns': ['OU_3_5_O', 'OU_3_5_U'], 'outcome_col': 'y_OU_3_5'},
+    'OU_4_5': {'prefix': 'DC_', 'columns': ['OU_4_5_O', 'OU_4_5_U'], 'outcome_col': 'y_OU_4_5'},
+    # BTTS uses P_ (base ML model)
+    'BTTS': {'prefix': 'P_', 'columns': ['BTTS_Y', 'BTTS_N'], 'outcome_col': 'y_BTTS'},
+}
+
+def get_market_prefix(market: str) -> str:
+    """Get the column prefix for a market type."""
+    if market in MARKET_PREFIX_CONFIG:
+        return MARKET_PREFIX_CONFIG[market]['prefix']
+    # Default to P_ for unknown markets
+    return 'P_'
+
+# Default confidence threshold for betting selection
+DEFAULT_CONFIDENCE_THRESHOLD = 0.90
+
 def season_code(year_start: int) -> str:
     return f"{str(year_start)[-2:]}{str(year_start + 1)[-2:]}"
 
