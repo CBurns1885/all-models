@@ -282,7 +282,7 @@ print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}
 # RUN PIPELINE WITH ERROR RECOVERY
 # ============================================================================
 
-TOTAL_STEPS = 12  # Updated to include market splitting step
+TOTAL_STEPS = 12  # Steps 0-12 (0a/0b share step 0 for progress)
 errors = []
 
 def run_step(step_num, step_name, func, *args, **kwargs):
