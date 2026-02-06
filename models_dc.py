@@ -377,7 +377,7 @@ def price_match(params: DCParams, home: str, away: str,
     # Over/Under lines (CRITICAL FOR O/U ACCURACY)
     S = np.add.outer(np.arange(P.shape[0]), np.arange(P.shape[1]))
     
-    for line in [0.5, 1.5, 2.5, 3.5, 4.5]:
+    for line in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
         line_str = str(line).replace('.', '_')
         
         over_prob = P[S > line].sum()

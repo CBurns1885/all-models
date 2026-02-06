@@ -16,7 +16,8 @@ def get_fixtures_from_db(
     status: str = 'FT'
 ) -> pd.DataFrame:
     """
-    Read fixtures from shared API-Football database
+    Read fixtures from shared API-Football database, joining match_stats
+    for detailed per-team statistics (shots, possession, corners, etc.)
 
     Args:
         seasons: List of seasons (e.g., [2024, 2025])
@@ -24,7 +25,7 @@ def get_fixtures_from_db(
         status: Match status ('FT' for finished, 'NS' for not started)
 
     Returns:
-        DataFrame with columns matching old CSV format + new xG columns
+        DataFrame with columns matching old CSV format + xG + detailed stats
     """
     if not API_FOOTBALL_DB.exists():
         raise FileNotFoundError(
@@ -34,33 +35,162 @@ def get_fixtures_from_db(
 
     conn = sqlite3.connect(API_FOOTBALL_DB)
 
-    # Build query
+    # Build query - join match_stats for home and away team statistics
+    query = """
+        SELECT
+            f.league_code as League,
+            f.season as Season,
+            f.date as Date,
+            f.home_team as HomeTeam,
+            f.away_team as AwayTeam,
+            f.home_goals as FTHG,
+            f.away_goals as FTAG,
+            f.ht_home_goals as HTHG,
+            f.ht_away_goals as HTAG,
+            CASE
+                WHEN f.home_goals > f.away_goals THEN 'H'
+                WHEN f.home_goals < f.away_goals THEN 'A'
+                ELSE 'D'
+            END as FTR,
+            f.home_xG,
+            f.away_xG,
+            f.league_type,
+            f.referee,
+            f.venue_name,
+            -- Home team stats from match_stats
+            ms_h.shots_on_goal as Home_ShotsOnGoal,
+            ms_h.shots_off_goal as Home_ShotsOffGoal,
+            ms_h.total_shots as HS,
+            ms_h.blocked_shots as Home_BlockedShots,
+            ms_h.shots_inside_box as Home_Shots_Inside_Box,
+            ms_h.shots_outside_box as Home_ShotsOutsideBox,
+            ms_h.fouls as Home_Fouls,
+            ms_h.corners as HC,
+            ms_h.offsides as Home_Offsides,
+            ms_h.possession as Home_Possession,
+            ms_h.yellow_cards as HY,
+            ms_h.red_cards as HR,
+            ms_h.goalkeeper_saves as Home_GKSaves,
+            ms_h.total_passes as Home_TotalPasses,
+            ms_h.pass_accuracy as Home_Pass_Accuracy,
+            ms_h.expected_goals as Home_xG_Stats,
+            -- Away team stats from match_stats
+            ms_a.shots_on_goal as Away_ShotsOnGoal,
+            ms_a.shots_off_goal as Away_ShotsOffGoal,
+            ms_a.total_shots as AS_shots,
+            ms_a.blocked_shots as Away_BlockedShots,
+            ms_a.shots_inside_box as Away_Shots_Inside_Box,
+            ms_a.shots_outside_box as Away_ShotsOutsideBox,
+            ms_a.fouls as Away_Fouls,
+            ms_a.corners as AC,
+            ms_a.offsides as Away_Offsides,
+            ms_a.possession as Away_Possession,
+            ms_a.yellow_cards as AY,
+            ms_a.red_cards as AR,
+            ms_a.goalkeeper_saves as Away_GKSaves,
+            ms_a.total_passes as Away_TotalPasses,
+            ms_a.pass_accuracy as Away_Pass_Accuracy,
+            ms_a.expected_goals as Away_xG_Stats
+        FROM fixtures f
+        LEFT JOIN match_stats ms_h ON f.fixture_id = ms_h.fixture_id
+            AND f.home_team_id = ms_h.team_id
+        LEFT JOIN match_stats ms_a ON f.fixture_id = ms_a.fixture_id
+            AND f.away_team_id = ms_a.team_id
+        WHERE f.status = ?
+    """
+
+    params = [status]
+
+    if seasons:
+        placeholders = ','.join(['?'] * len(seasons))
+        query += f" AND f.season IN ({placeholders})"
+        params.extend(seasons)
+
+    if leagues:
+        placeholders = ','.join(['?'] * len(leagues))
+        query += f" AND f.league_code IN ({placeholders})"
+        params.extend(leagues)
+
+    query += " ORDER BY f.date, f.league_code"
+
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+
+    # Rename AS_shots to AS (avoiding SQL keyword conflict)
+    if 'AS_shots' in df.columns:
+        df = df.rename(columns={'AS_shots': 'AS'})
+
+    # Map shots_on_goal to the standard HST/AST column names
+    if 'Home_ShotsOnGoal' in df.columns:
+        df['HST'] = df['Home_ShotsOnGoal']
+    if 'Away_ShotsOnGoal' in df.columns:
+        df['AST'] = df['Away_ShotsOnGoal']
+
+    # Convert date to datetime
+    df['Date'] = pd.to_datetime(df['Date'])
+
+    # Ensure numeric columns
+    numeric_cols = ['FTHG', 'FTAG', 'HTHG', 'HTAG', 'home_xG', 'away_xG', 'Season',
+                    'HS', 'AS', 'HST', 'AST', 'HC', 'AC', 'HY', 'AY', 'HR', 'AR',
+                    'Home_Possession', 'Away_Possession', 'Home_Shots_Inside_Box',
+                    'Away_Shots_Inside_Box', 'Home_Pass_Accuracy', 'Away_Pass_Accuracy',
+                    'Home_GKSaves', 'Away_GKSaves', 'Home_TotalPasses', 'Away_TotalPasses',
+                    'Home_Fouls', 'Away_Fouls', 'Home_Offsides', 'Away_Offsides',
+                    'Home_BlockedShots', 'Away_BlockedShots']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Log stats availability
+    stats_available = df['HS'].notna().sum()
+    print(f"  Match stats available: {stats_available}/{len(df)} fixtures "
+          f"({stats_available/max(len(df),1)*100:.1f}%)")
+
+    return df
+
+
+def get_standings_from_db(
+    seasons: List[int] = None,
+    leagues: List[str] = None
+) -> pd.DataFrame:
+    """
+    Read league standings from shared API-Football database.
+    Returns team position, points, goals diff, form string.
+
+    Returns:
+        DataFrame with standings data per team/league/season
+    """
+    if not API_FOOTBALL_DB.exists():
+        return pd.DataFrame()
+
+    conn = sqlite3.connect(API_FOOTBALL_DB)
+
+    # Check if standings table exists
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='standings'")
+    if not cursor.fetchone():
+        conn.close()
+        return pd.DataFrame()
+
     query = """
         SELECT
             league_code as League,
             season as Season,
-            date as Date,
-            home_team as HomeTeam,
-            away_team as AwayTeam,
-            home_goals as FTHG,
-            away_goals as FTAG,
-            ht_home_goals as HTHG,
-            ht_away_goals as HTAG,
-            CASE
-                WHEN home_goals > away_goals THEN 'H'
-                WHEN home_goals < away_goals THEN 'A'
-                ELSE 'D'
-            END as FTR,
-            home_xG,
-            away_xG,
-            league_type,
-            referee,
-            venue_name
-        FROM fixtures
-        WHERE status = ?
+            team_name as Team,
+            rank as LeaguePosition,
+            points as LeaguePoints,
+            goals_diff as LeagueGD,
+            played as LeaguePlayed,
+            win as LeagueWins,
+            draw as LeagueDraws,
+            lose as LeagueLosses,
+            goals_for as LeagueGF,
+            goals_against as LeagueGA,
+            form as LeagueForm
+        FROM standings
+        WHERE 1=1
     """
-
-    params = [status]
+    params = []
 
     if seasons:
         placeholders = ','.join(['?'] * len(seasons))
@@ -72,19 +202,26 @@ def get_fixtures_from_db(
         query += f" AND league_code IN ({placeholders})"
         params.extend(leagues)
 
-    query += " ORDER BY date, league_code"
-
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
 
-    # Convert date to datetime
-    df['Date'] = pd.to_datetime(df['Date'])
+    if not df.empty:
+        # Compute win rate and points-per-game
+        df['LeaguePlayed'] = pd.to_numeric(df['LeaguePlayed'], errors='coerce')
+        df['LeaguePoints'] = pd.to_numeric(df['LeaguePoints'], errors='coerce')
+        df['LeaguePosition'] = pd.to_numeric(df['LeaguePosition'], errors='coerce')
+        df['LeaguePPG'] = df['LeaguePoints'] / df['LeaguePlayed'].clip(lower=1)
 
-    # Ensure numeric columns
-    numeric_cols = ['FTHG', 'FTAG', 'HTHG', 'HTAG', 'home_xG', 'away_xG', 'Season']
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Parse form string (e.g. "WWDLW") into numeric recent form
+        def form_to_score(form_str):
+            if not isinstance(form_str, str):
+                return np.nan
+            score = 0
+            for ch in form_str[-5:]:  # Last 5 results
+                if ch == 'W': score += 3
+                elif ch == 'D': score += 1
+            return score / max(len(form_str[-5:]), 1)
+        df['LeagueFormScore'] = df['LeagueForm'].apply(form_to_score)
 
     return df
 
@@ -199,7 +336,17 @@ def build_historical_from_api(
         'League', 'Date', 'Season', 'HomeTeam', 'AwayTeam',
         'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG',
         'B365H', 'B365D', 'B365A', 'PSCH', 'PSCD', 'PSCA',
-        'home_xG', 'away_xG', 'league_type', 'referee', 'venue_name'
+        'home_xG', 'away_xG', 'league_type', 'referee', 'venue_name',
+        # Match stats columns (from match_stats table join)
+        'HS', 'AS', 'HST', 'AST', 'HC', 'AC', 'HY', 'AY', 'HR', 'AR',
+        'Home_Possession', 'Away_Possession',
+        'Home_Shots_Inside_Box', 'Away_Shots_Inside_Box',
+        'Home_Pass_Accuracy', 'Away_Pass_Accuracy',
+        'Home_GKSaves', 'Away_GKSaves',
+        'Home_TotalPasses', 'Away_TotalPasses',
+        'Home_Fouls', 'Away_Fouls',
+        'Home_Offsides', 'Away_Offsides',
+        'Home_BlockedShots', 'Away_BlockedShots',
     ]
 
     available_cols = [c for c in expected_cols if c in df.columns]

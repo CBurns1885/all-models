@@ -9,11 +9,12 @@ from pathlib import Path
 
 from models_dc import fit_all as dc_fit_all, price_match as dc_price_match
 from models import load_trained_targets, predict_proba as ml_predict
-# Import _load_features directly
-import pandas as pd
+
 def _load_features():
     from config import FEATURES_PARQUET
-    return pd.read_parquet(FEATURES_PARQUET)
+    df = pd.read_parquet(FEATURES_PARQUET)
+    df['Date'] = pd.to_datetime(df['Date'])
+    return df.sort_values(['League', 'Date'])
 
 
 BLEND_WEIGHTS_JSON = Path("models/blend_weights.json")

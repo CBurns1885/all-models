@@ -171,14 +171,21 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["HY"]
         out["CardsR"] = out["HR"]
         
-        # Advanced stats (from API-Football)
-        out = _ensure_cols(out, ["Home_xG", "Home_Possession", "Home_Shots_Inside_Box", 
-                                  "Home_Big_Chances", "Home_Pass_Accuracy"])
-        out["xG"] = out.get("Home_xG", np.nan)
-        out["Possession"] = out.get("Home_Possession", np.nan)
-        out["ShotsInBox"] = out.get("Home_Shots_Inside_Box", np.nan)
-        out["BigChances"] = out.get("Home_Big_Chances", np.nan)
-        out["PassAcc"] = out.get("Home_Pass_Accuracy", np.nan)
+        # Advanced stats (from API-Football match_stats)
+        # xG comes as home_xG (lowercase) from the adapter
+        out = _ensure_cols(out, ["home_xG", "Home_Possession", "Home_Shots_Inside_Box",
+                                  "Home_Pass_Accuracy", "Home_GKSaves",
+                                  "Home_TotalPasses", "Home_Fouls", "Home_Offsides",
+                                  "Home_BlockedShots"])
+        out["xG"] = out["home_xG"]
+        out["Possession"] = out["Home_Possession"]
+        out["ShotsInBox"] = out["Home_Shots_Inside_Box"]
+        out["PassAcc"] = out["Home_Pass_Accuracy"]
+        out["GKSaves"] = out["Home_GKSaves"]
+        out["TotalPasses"] = out["Home_TotalPasses"]
+        out["Fouls"] = out["Home_Fouls"]
+        out["Offsides"] = out["Home_Offsides"]
+        out["BlockedShots"] = out["Home_BlockedShots"]
         
     else:  # Away
         out["Team"] = out["AwayTeam"]
@@ -196,13 +203,20 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["AY"]
         out["CardsR"] = out["AR"]
         
-        out = _ensure_cols(out, ["Away_xG", "Away_Possession", "Away_Shots_Inside_Box",
-                                  "Away_Big_Chances", "Away_Pass_Accuracy"])
-        out["xG"] = out.get("Away_xG", np.nan)
-        out["Possession"] = out.get("Away_Possession", np.nan)
-        out["ShotsInBox"] = out.get("Away_Shots_Inside_Box", np.nan)
-        out["BigChances"] = out.get("Away_Big_Chances", np.nan)
-        out["PassAcc"] = out.get("Away_Pass_Accuracy", np.nan)
+        # xG comes as away_xG (lowercase) from the adapter
+        out = _ensure_cols(out, ["away_xG", "Away_Possession", "Away_Shots_Inside_Box",
+                                  "Away_Pass_Accuracy", "Away_GKSaves",
+                                  "Away_TotalPasses", "Away_Fouls", "Away_Offsides",
+                                  "Away_BlockedShots"])
+        out["xG"] = out["away_xG"]
+        out["Possession"] = out["Away_Possession"]
+        out["ShotsInBox"] = out["Away_Shots_Inside_Box"]
+        out["PassAcc"] = out["Away_Pass_Accuracy"]
+        out["GKSaves"] = out["Away_GKSaves"]
+        out["TotalPasses"] = out["Away_TotalPasses"]
+        out["Fouls"] = out["Away_Fouls"]
+        out["Offsides"] = out["Away_Offsides"]
+        out["BlockedShots"] = out["Away_BlockedShots"]
     
     out["Side"] = side
     out["CleanSheet"] = (out["GoalsAgainst"] == 0).astype(int)
@@ -212,7 +226,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
     cols = ["League","Date","Team","Opp","Side","GoalsFor","GoalsAgainst",
             "Win","Draw","Loss","Shots","ShotsT","Corners","CardsY","CardsR",
             "CleanSheet","FailedToScore","BTTS",
-            "xG","Possession","ShotsInBox","BigChances","PassAcc"]
+            "xG","Possession","ShotsInBox","PassAcc",
+            "GKSaves","TotalPasses","Fouls","Offsides","BlockedShots"]
     
     return out[[c for c in cols if c in out.columns]]
 
@@ -243,8 +258,9 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         team_df[f"FTS_rate{w}"] = rolled["FailedToScore"].mean()
         team_df[f"BTTS_rate{w}"] = rolled["BTTS"].mean()
         
-        # Advanced stats (if available)
-        for col in ["xG", "Possession", "ShotsInBox", "BigChances", "PassAcc"]:
+        # Advanced stats (if available from API-Football match_stats)
+        for col in ["xG", "Possession", "ShotsInBox", "PassAcc",
+                     "GKSaves", "TotalPasses", "Fouls", "Offsides", "BlockedShots"]:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
     
@@ -356,7 +372,52 @@ def _add_contextual_features(df: pd.DataFrame) -> pd.DataFrame:
     
     out = out.merge(rest_df, left_index=True, right_index=True, how='left')
     out['RestDiff'] = out['Home_RestDays'] - out['Away_RestDays']
-    
+
+    # League standings features (if available from API)
+    try:
+        from api_football_adapter import get_standings_from_db
+        standings = get_standings_from_db()
+        if not standings.empty:
+            # Join home team standings
+            home_standings = standings.rename(columns={
+                col: f'Home_{col}' for col in standings.columns
+                if col not in ['League', 'Season', 'Team']
+            })
+            out = out.merge(
+                home_standings, left_on=['League', 'HomeTeam'],
+                right_on=['League', 'Team'], how='left'
+            )
+            if 'Team' in out.columns:
+                out = out.drop(columns=['Team'])
+            if 'Season_y' in out.columns:
+                out = out.drop(columns=['Season_y'])
+                out = out.rename(columns={'Season_x': 'Season'})
+
+            # Join away team standings
+            away_standings = standings.rename(columns={
+                col: f'Away_{col}' for col in standings.columns
+                if col not in ['League', 'Season', 'Team']
+            })
+            out = out.merge(
+                away_standings, left_on=['League', 'AwayTeam'],
+                right_on=['League', 'Team'], how='left'
+            )
+            if 'Team' in out.columns:
+                out = out.drop(columns=['Team'])
+            if 'Season_y' in out.columns:
+                out = out.drop(columns=['Season_y'])
+                out = out.rename(columns={'Season_x': 'Season'})
+
+            # Derived features: position diff, points diff
+            if 'Home_LeaguePosition' in out.columns and 'Away_LeaguePosition' in out.columns:
+                out['PositionDiff'] = out['Away_LeaguePosition'] - out['Home_LeaguePosition']
+                out['PointsDiff'] = out.get('Home_LeaguePoints', 0) - out.get('Away_LeaguePoints', 0)
+                out['PPGDiff'] = out.get('Home_LeaguePPG', 0) - out.get('Away_LeaguePPG', 0)
+                out['FormScoreDiff'] = out.get('Home_LeagueFormScore', 0) - out.get('Away_LeagueFormScore', 0)
+                print(f"   Added league standings features for {standings['League'].nunique()} leagues")
+    except (ImportError, Exception) as e:
+        print(f"   [INFO] League standings not available: {e}")
+
     return out
 
 # -----------------------------

@@ -29,7 +29,7 @@ MODELS_DIR = MODEL_ARTIFACTS_DIR  # Alias for compatibility
 # API-FOOTBALL CONFIGURATION (NEW!)
 # =============================================================================
 
-API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "0f17fdba78d15a625710f7244a1cc770")
+API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "")
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
 # League ID Mapping (football-data.co.uk code -> API-Football ID)

@@ -75,14 +75,9 @@ os.environ["N_ESTIMATORS"] = estimator_counts.get(args.speed, "150")
 
 os.environ["USE_API_FOOTBALL"] = "1"  # Use API-Football for data
 os.environ["USE_XG_FEATURES"] = "1"   # Use expected goals features
-os.environ["API_FOOTBALL_KEY"] = "0f17fdba78d15a625710f7244a1cc770"
-
-# Email configuration (optional)
-os.environ["EMAIL_SMTP_SERVER"] = "smtp-mail.outlook.com"
-os.environ["EMAIL_SMTP_PORT"] = "587"
-os.environ["EMAIL_SENDER"] = "christopher_burns@live.co.uk"
-os.environ["EMAIL_PASSWORD"] = ""
-os.environ["EMAIL_RECIPIENT"] = "christopher_burns@live.co.uk"
+# API key and email credentials should be set via environment variables or .env file
+# e.g.: export API_FOOTBALL_KEY="your_key_here"
+# e.g.: export EMAIL_SENDER="your@email.com"
 
 TRAINING_START_YEAR = 2023  # More recent data = better accuracy
 NON_INTERACTIVE = args.non_interactive

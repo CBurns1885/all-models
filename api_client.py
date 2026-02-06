@@ -205,11 +205,35 @@ def _init_database():
         )
     """)
 
+    # Standings table (league position, points, form)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS standings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            league_id INTEGER,
+            league_code TEXT,
+            season INTEGER,
+            team_id INTEGER,
+            team_name TEXT,
+            rank INTEGER,
+            points INTEGER,
+            goals_diff INTEGER,
+            played INTEGER,
+            win INTEGER,
+            draw INTEGER,
+            lose INTEGER,
+            goals_for INTEGER,
+            goals_against INTEGER,
+            form TEXT,
+            fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     # Create indices for faster queries
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fixtures_date ON fixtures(date)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fixtures_league ON fixtures(league_code)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fixtures_status ON fixtures(status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fixtures_season ON fixtures(season)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_standings_team ON standings(team_name, league_code, season)")
 
     conn.commit()
     conn.close()
@@ -553,6 +577,70 @@ def populate_historical_data(leagues: List[str] = None, seasons: List[int] = Non
         print(f"[OK] Statistics fetched for {stats_count} matches")
 
     return total
+
+
+def fetch_standings(league_code: str, season: int) -> int:
+    """
+    Fetch league standings (table position, points, form) for a league/season.
+    Stores in the standings table.
+
+    Args:
+        league_code: football-data.co.uk league code (e.g., 'E0')
+        season: Season year (e.g., 2024 for 2024-25)
+
+    Returns:
+        Number of teams in standings
+    """
+    if league_code not in API_LEAGUE_MAP:
+        return 0
+
+    league_id = API_LEAGUE_MAP[league_code]
+    data = _make_request('standings', {'league': league_id, 'season': season})
+
+    if not data or 'response' not in data or not data['response']:
+        return 0
+
+    _init_database()
+    conn = sqlite3.connect(API_FOOTBALL_DB)
+    cursor = conn.cursor()
+
+    count = 0
+    for league_data in data['response']:
+        standings_list = league_data.get('league', {}).get('standings', [])
+        for group in standings_list:
+            for team_entry in group:
+                team = team_entry.get('team', {})
+                stats_all = team_entry.get('all', {})
+
+                cursor.execute("""
+                    INSERT OR REPLACE INTO standings
+                    (league_id, league_code, season, team_id, team_name,
+                     rank, points, goals_diff, played, win, draw, lose,
+                     goals_for, goals_against, form, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    league_id,
+                    league_code,
+                    season,
+                    team.get('id'),
+                    team.get('name'),
+                    team_entry.get('rank'),
+                    team_entry.get('points'),
+                    team_entry.get('goalsDiff'),
+                    stats_all.get('played'),
+                    stats_all.get('win'),
+                    stats_all.get('draw'),
+                    stats_all.get('lose'),
+                    stats_all.get('goals', {}).get('for'),
+                    stats_all.get('goals', {}).get('against'),
+                    team_entry.get('form'),
+                ))
+                count += 1
+
+    conn.commit()
+    conn.close()
+
+    return count
 
 
 def fetch_injuries_for_fixture(fixture_id: int) -> List[Dict]:

@@ -18,13 +18,13 @@ class TemperatureScaler:
     def __init__(self):
         self.T = 1.0
     def fit(self, logits: np.ndarray, y: np.ndarray):
-        # 1D search over temperature
+        from scipy.optimize import minimize_scalar
         def nll(T):
             P = softmax(logits / T)
             eps=1e-12
             return -np.mean(np.log(np.clip(P[np.arange(len(y)), y], eps, 1.0)))
-        T_vals = np.linspace(0.5, 5.0, 30)
-        self.T = T_vals[np.argmin([nll(T) for T in T_vals])]
+        result = minimize_scalar(nll, bounds=(0.1, 10.0), method='bounded')
+        self.T = result.x
         return self
     def transform(self, logits: np.ndarray):
         return softmax(logits / self.T)

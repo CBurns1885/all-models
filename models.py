@@ -354,14 +354,16 @@ try:
     import torch
     import torch.nn as nn
     class SmallBNN(nn.Module):
-        def __init__(self, input_dim, output_dim):
+        def __init__(self, input_dim, output_dim, dropout=0.2):
             super().__init__()
             self.fc1 = nn.Linear(input_dim, 64)
+            self.drop1 = nn.Dropout(p=dropout)
             self.fc2 = nn.Linear(64, 32)
+            self.drop2 = nn.Dropout(p=dropout)
             self.fc3 = nn.Linear(32, output_dim)
         def forward(self, x):
-            x = torch.relu(self.fc1(x))
-            x = torch.relu(self.fc2(x))
+            x = self.drop1(torch.relu(self.fc1(x)))
+            x = self.drop2(torch.relu(self.fc2(x)))
             return self.fc3(x)
 except:
     SmallBNN = None
@@ -382,7 +384,7 @@ class BNNWrapper(BaseEstimator, ClassifierMixin):
             raise RuntimeError("Torch not available")
         torch.manual_seed(self.seed)
         self.in_dim = X.shape[1]
-        self.model = SmallBNN(self.in_dim, self.n_classes)
+        self.model = SmallBNN(self.in_dim, self.n_classes, dropout=self.dropout)
         opt = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         crit = nn.CrossEntropyLoss()
         X_t = torch.tensor(X, dtype=torch.float32)
@@ -680,15 +682,37 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
             raise RuntimeError(f"Tuning not supported for {alg}")
 
         try:
-            model.fit(X, y_consistent)
+            # Use early stopping for gradient boosting models
+            if alg in ("xgb", "lgb", "cat") and len(X) > 500:
+                from sklearn.model_selection import train_test_split
+                X_tr, X_es, y_tr, y_es = train_test_split(
+                    X, y_consistent, test_size=0.15, random_state=RANDOM_SEED, stratify=y_consistent
+                )
+                if alg == "xgb" and _HAS_XGB:
+                    model.set_params(early_stopping_rounds=30)
+                    model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
+                elif alg == "lgb" and _HAS_LGB:
+                    model.fit(
+                        X_tr, y_tr,
+                        eval_set=[(X_es, y_es)],
+                        callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(0)]
+                    )
+                elif alg == "cat" and _HAS_CAT:
+                    model.fit(X_tr, y_tr, eval_set=(X_es, y_es), early_stopping_rounds=30)
+            else:
+                model.fit(X, y_consistent)
             return model
         except Exception as e:
-            # If XGBoost fit fails, log and return None so training continues without it
-            if alg == "xgb":
-                print(f"[WARN]  XGBoost fit failed: {e}. Skipping XGBoost for this target.")
-                return None
+            # If gradient boosting fit fails with early stopping, retry without
+            if alg in ("xgb", "lgb", "cat"):
+                try:
+                    model.fit(X, y_consistent)
+                    return model
+                except Exception as e2:
+                    print(f"[WARN]  {alg} fit failed: {e2}. Skipping for this target.")
+                    return None
             else:
-                # Re-raise for non-XGBoost failures
+                # Re-raise for non-boosting failures
                 raise
         
     except Exception as e:
@@ -712,7 +736,9 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
     global _DC_PARAMS_CACHE
 
     # Use cached params if available and caching enabled
-    cache_key = len(train_df)  # Simple cache key based on training data size
+    # Cache key uses data size + date range hash for collision resistance
+    date_hash = hash((len(train_df), str(train_df['Date'].min()), str(train_df['Date'].max())))
+    cache_key = date_hash
     if use_cache and cache_key in _DC_PARAMS_CACHE:
         params = _DC_PARAMS_CACHE[cache_key]
     else:
