@@ -231,98 +231,49 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
         # Under markets - inverse of style adjustment
         return max(0.01, min(0.99, prob - goal_style_adj))
 
-    # ========== HOME/AWAY ADVANTAGE CALIBRATION ==========
+    # ========== RESULT & DIRECTIONAL MARKETS ==========
+    # NOTE: Do NOT apply home advantage adjustments here.
+    # The ML models already learn home advantage from features, and the
+    # Dixon-Coles model has explicit home advantage parameters.
+    # Adding a third layer of home bias caused systematic over-prediction
+    # of home wins and collapsed accuracy from 75% to near 0%.
 
-    # Match result markets
-    elif '1X2_H' in market:
-        return min(prob * (1 + home_adv * 0.3), 0.95)
+    # 1X2 - just bound, no home bias
+    elif '1X2_H' in market or '1X2_A' in market or '1X2_D' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif '1X2_A' in market:
-        return max(prob * (1 - home_adv * 0.3), 0.05)
+    # Double Chance - just bound
+    elif 'DC_1X' in market or 'DC1X' in market or 'DC_X2' in market or 'DCX2' in market or 'DC_12' in market or 'DC12' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif '1X2_D' in market:
-        # Draw less likely in leagues with high home advantage
-        return max(0.05, min(0.45, prob * (1 - home_adv * 0.15)))
+    # Draw No Bet - just bound
+    elif 'DNB_H' in market or 'DNB_A' in market:
+        return max(0.01, min(0.99, prob))
 
-    # Double Chance markets
-    elif 'DC_1X' in market or 'DC1X' in market:
-        # Home or Draw - boosted by home advantage
-        return min(prob * (1 + home_adv * 0.15), 0.95)
+    # Home/Away team goals - just bound
+    elif 'HomeTG_' in market or 'HomeExact' in market or 'AwayTG_' in market or 'AwayExact' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif 'DC_X2' in market or 'DCX2' in market:
-        # Away or Draw - reduced by home advantage
-        return max(prob * (1 - home_adv * 0.15), 0.15)
+    # Team to score - just bound
+    elif 'HomeToScore' in market or 'AwayToScore' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif 'DC_12' in market or 'DC12' in market:
-        # Home or Away (no draw) - slight boost in high home adv leagues
-        return min(prob * (1 + home_adv * 0.08), 0.95)
-
-    # Draw No Bet
-    elif 'DNB_H' in market:
-        return min(prob * (1 + home_adv * 0.25), 0.90)
-
-    elif 'DNB_A' in market:
-        return max(prob * (1 - home_adv * 0.25), 0.10)
-
-    # Home/Away team goals
-    elif 'HomeTG_' in market or 'HomeExact' in market:
-        # Home team goals - boosted by home advantage
-        line_boost = home_adv * 0.12
-        return max(0.01, min(0.99, prob + line_boost))
-
-    elif 'AwayTG_' in market or 'AwayExact' in market:
-        # Away team goals - reduced by home advantage
-        line_boost = home_adv * 0.12
-        return max(0.01, min(0.99, prob - line_boost))
-
-    # Team to score
-    elif 'HomeToScore' in market:
-        return min(prob * (1 + home_adv * 0.10), 0.95)
-
-    elif 'AwayToScore' in market:
-        return max(prob * (1 - home_adv * 0.10), 0.20)
-
-    # Win to Nil / Clean Sheet - with home/away distinction
-    elif 'HomeWTN' in market:
-        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.5) * calibration_weight
-        # Home WTN boosted by home advantage
-        return max(0.01, min(0.60, base * (1 + home_adv * 0.20) - goal_style_adj * 0.3))
-
-    elif 'AwayWTN' in market:
-        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.35) * calibration_weight
-        # Away WTN reduced by home advantage
-        return max(0.01, min(0.40, base * (1 - home_adv * 0.20) - goal_style_adj * 0.3))
-
-    elif 'HomeCS' in market:
+    # Win to Nil / Clean Sheet - use league clean_sheet_rate but no home bias
+    elif 'WTN' in market or 'HomeCS' in market or 'AwayCS' in market:
         base = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
-        return max(0.01, min(0.65, base * (1 + home_adv * 0.15) - goal_style_adj * 0.4))
-
-    elif 'AwayCS' in market:
-        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.8) * calibration_weight
-        return max(0.01, min(0.55, base * (1 - home_adv * 0.15) - goal_style_adj * 0.4))
+        return max(0.01, min(0.99, base - goal_style_adj * 0.3))
 
     elif 'NoGoal' in market:
-        # 0-0 draw - defensive leagues boost, high home adv reduces
         base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.15) * calibration_weight
         return max(0.01, min(0.15, base - goal_style_adj * 0.5))
 
-    # Win by margin - home/away
-    elif 'HomeWin' in market:
-        boost = home_adv * 0.15
-        return max(0.01, min(0.85, prob + boost))
+    # Win by margin - just bound
+    elif 'HomeWin' in market or 'AwayWin' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif 'AwayWin' in market:
-        boost = home_adv * 0.15
-        return max(0.01, min(0.60, prob - boost))
-
-    # Asian Handicap - home advantage affects line perception
+    # Asian Handicap - just bound
     elif 'AH_' in market:
-        if '_H' in market or market.endswith('_H'):
-            # Home covers handicap
-            return max(0.01, min(0.85, prob + home_adv * 0.08))
-        elif '_A' in market or market.endswith('_A'):
-            # Away covers handicap
-            return max(0.01, min(0.85, prob - home_adv * 0.08))
+        return max(0.01, min(0.99, prob))
 
     return prob
 
@@ -790,14 +741,11 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
                         row[market], market, league, league_profiles
                     )
 
-        # Apply cross-market calibration constraints BEFORE Poisson/blending
-        try:
-            from calibration import enforce_calibration_constraints
-            row = enforce_calibration_constraints(row)
-        except ImportError:
-            pass
-
         # Convert to series
+        # NOTE: Removed pre-Poisson enforce_calibration_constraints call.
+        # Poisson adjustment immediately overrides OU values, making a pre-Poisson
+        # constraint pass wasteful. The post-Poisson enforce_cross_market_constraints
+        # handles all constraint enforcement on final values.
         row_series = pd.Series(row)
 
         # Apply Poisson adjustments
@@ -1574,8 +1522,12 @@ def predict_week(fixtures_csv: Path) -> Path:
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
 
-    # Calculate max probability across all prediction columns for filtering
-    pred_cols = [col for col in df_out.columns if col.startswith('P_') or col.startswith('BLEND_')]
+    # Calculate max probability across competitive prediction columns for filtering.
+    # Exclude near-certain markets (OU_0_5) that inflate confidence to ~90.5% for
+    # every match regardless of actual prediction quality.
+    near_certain = {'P_OU_0_5_O', 'P_OU_0_5_U', 'BLEND_OU_0_5_O', 'BLEND_OU_0_5_U'}
+    pred_cols = [col for col in df_out.columns
+                 if (col.startswith('P_') or col.startswith('BLEND_')) and col not in near_certain]
     if pred_cols:
         df_out['MaxConfidence'] = df_out[pred_cols].max(axis=1)
 
