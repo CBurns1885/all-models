@@ -52,8 +52,8 @@ def get_fixtures_from_db(
                 WHEN f.home_goals < f.away_goals THEN 'A'
                 ELSE 'D'
             END as FTR,
-            f.home_xG,
-            f.away_xG,
+            COALESCE(f.home_xG, ms_h.expected_goals) as home_xG,
+            COALESCE(f.away_xG, ms_a.expected_goals) as away_xG,
             f.league_type,
             f.referee,
             f.venue_name,
@@ -73,7 +73,7 @@ def get_fixtures_from_db(
             ms_h.goalkeeper_saves as Home_GKSaves,
             ms_h.total_passes as Home_TotalPasses,
             ms_h.pass_accuracy as Home_Pass_Accuracy,
-            ms_h.expected_goals as Home_xG_Stats,
+            ms_h.expected_goals as Home_xG_Stats,  -- kept for diagnostics; home_xG uses COALESCE above
             -- Away team stats from match_stats
             ms_a.shots_on_goal as Away_ShotsOnGoal,
             ms_a.shots_off_goal as Away_ShotsOffGoal,
@@ -90,7 +90,7 @@ def get_fixtures_from_db(
             ms_a.goalkeeper_saves as Away_GKSaves,
             ms_a.total_passes as Away_TotalPasses,
             ms_a.pass_accuracy as Away_Pass_Accuracy,
-            ms_a.expected_goals as Away_xG_Stats
+            ms_a.expected_goals as Away_xG_Stats  -- kept for diagnostics; away_xG uses COALESCE above
         FROM fixtures f
         LEFT JOIN match_stats ms_h ON f.fixture_id = ms_h.fixture_id
             AND f.home_team_id = ms_h.team_id
@@ -136,7 +136,9 @@ def get_fixtures_from_db(
                     'Away_Shots_Inside_Box', 'Home_Pass_Accuracy', 'Away_Pass_Accuracy',
                     'Home_GKSaves', 'Away_GKSaves', 'Home_TotalPasses', 'Away_TotalPasses',
                     'Home_Fouls', 'Away_Fouls', 'Home_Offsides', 'Away_Offsides',
-                    'Home_BlockedShots', 'Away_BlockedShots']
+                    'Home_BlockedShots', 'Away_BlockedShots',
+                    'Home_ShotsOffGoal', 'Away_ShotsOffGoal',
+                    'Home_ShotsOutsideBox', 'Away_ShotsOutsideBox']
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -387,6 +389,8 @@ def build_historical_from_api(
         'Home_Fouls', 'Away_Fouls',
         'Home_Offsides', 'Away_Offsides',
         'Home_BlockedShots', 'Away_BlockedShots',
+        'Home_ShotsOffGoal', 'Away_ShotsOffGoal',
+        'Home_ShotsOutsideBox', 'Away_ShotsOutsideBox',
     ]
 
     available_cols = [c for c in expected_cols if c in df.columns]

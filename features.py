@@ -176,7 +176,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out = _ensure_cols(out, ["home_xG", "Home_Possession", "Home_Shots_Inside_Box",
                                   "Home_Pass_Accuracy", "Home_GKSaves",
                                   "Home_TotalPasses", "Home_Fouls", "Home_Offsides",
-                                  "Home_BlockedShots"])
+                                  "Home_BlockedShots", "Home_ShotsOffGoal",
+                                  "Home_ShotsOutsideBox"])
         out["xG"] = out["home_xG"]
         out["Possession"] = out["Home_Possession"]
         out["ShotsInBox"] = out["Home_Shots_Inside_Box"]
@@ -186,6 +187,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["Fouls"] = out["Home_Fouls"]
         out["Offsides"] = out["Home_Offsides"]
         out["BlockedShots"] = out["Home_BlockedShots"]
+        out["ShotsOffGoal"] = out["Home_ShotsOffGoal"]
+        out["ShotsOutBox"] = out["Home_ShotsOutsideBox"]
         
     else:  # Away
         out["Team"] = out["AwayTeam"]
@@ -207,7 +210,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out = _ensure_cols(out, ["away_xG", "Away_Possession", "Away_Shots_Inside_Box",
                                   "Away_Pass_Accuracy", "Away_GKSaves",
                                   "Away_TotalPasses", "Away_Fouls", "Away_Offsides",
-                                  "Away_BlockedShots"])
+                                  "Away_BlockedShots", "Away_ShotsOffGoal",
+                                  "Away_ShotsOutsideBox"])
         out["xG"] = out["away_xG"]
         out["Possession"] = out["Away_Possession"]
         out["ShotsInBox"] = out["Away_Shots_Inside_Box"]
@@ -217,6 +221,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["Fouls"] = out["Away_Fouls"]
         out["Offsides"] = out["Away_Offsides"]
         out["BlockedShots"] = out["Away_BlockedShots"]
+        out["ShotsOffGoal"] = out["Away_ShotsOffGoal"]
+        out["ShotsOutBox"] = out["Away_ShotsOutsideBox"]
     
     out["Side"] = side
     out["CleanSheet"] = (out["GoalsAgainst"] == 0).astype(int)
@@ -227,7 +233,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
             "Win","Draw","Loss","Shots","ShotsT","Corners","CardsY","CardsR",
             "CleanSheet","FailedToScore","BTTS",
             "xG","Possession","ShotsInBox","PassAcc",
-            "GKSaves","TotalPasses","Fouls","Offsides","BlockedShots"]
+            "GKSaves","TotalPasses","Fouls","Offsides","BlockedShots",
+            "ShotsOffGoal","ShotsOutBox"]
     
     return out[[c for c in cols if c in out.columns]]
 
@@ -260,7 +267,8 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         
         # Advanced stats (if available from API-Football match_stats)
         for col in ["xG", "Possession", "ShotsInBox", "PassAcc",
-                     "GKSaves", "TotalPasses", "Fouls", "Offsides", "BlockedShots"]:
+                     "GKSaves", "TotalPasses", "Fouls", "Offsides", "BlockedShots",
+                     "ShotsOffGoal", "ShotsOutBox"]:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
     
