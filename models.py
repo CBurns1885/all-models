@@ -1016,9 +1016,7 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     sub = df.dropna(subset=[target_col]).copy()
     if sub.empty:
         raise RuntimeError(f"No data for target {target_col}")
-    
-    error_count = 0
-    
+
     y = sub[target_col].astype("category")
     classes = list(y.cat.categories)
     y_int = y.cat.codes.values

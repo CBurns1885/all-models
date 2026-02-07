@@ -340,9 +340,12 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
             
             if pd.notna(row[curr_col]) and pd.notna(row[next_col]):
                 if row[curr_col] < row[next_col]:
-                    avg = (row[curr_col] + row[next_col]) / 2
-                    row[curr_col] = min(avg + 0.05, 0.99)
-                    row[next_col] = max(avg - 0.05, 0.01)
+                    # Preserve original values as much as possible:
+                    # keep higher line's value, nudge lower line just above it
+                    row[curr_col] = min(row[next_col] + 0.01, 0.99)
+                    # Only adjust next_col if curr_col hit the ceiling
+                    if row[curr_col] <= row[next_col]:
+                        row[next_col] = max(row[curr_col] - 0.01, 0.01)
                 
                 # Update Under probabilities
                 row[f'P_OU_{curr_line}_U'] = 1 - row[curr_col]
@@ -356,10 +359,11 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
                 row['P_OU_0_5_U'] = min(row['P_OU_0_5_U'], 0.02)
                 row['P_OU_0_5_O'] = max(row['P_OU_0_5_O'], 0.98)
             
-            # Under 0.5 high means BTTS=Yes must be zero
+            # Under 0.5 high means BTTS=Yes should be very low (capped at complement)
             if row['P_OU_0_5_U'] > 0.5:
-                row['P_BTTS_Y'] = 0.0
-                row['P_BTTS_N'] = 1.0
+                max_btts_y = 1.0 - row['P_OU_0_5_U']  # e.g. if U=0.7, cap at 0.3
+                row['P_BTTS_Y'] = min(row['P_BTTS_Y'], max_btts_y)
+                row['P_BTTS_N'] = 1.0 - row['P_BTTS_Y']
     
     # 3. BTTS and O/U 1.5 consistency
     if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row:
@@ -691,9 +695,9 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
         # Get fixture info
         league = fixtures_df.iloc[i]['League'] if fixtures_df is not None and 'League' in fixtures_df.columns else None
         
-        # Initialize
+        # Initialize with NaN so missing markets don't get treated as real predictions
         for col in out_cols:
-            row[col] = 0.0
+            row[col] = np.nan
         
         # Map predictions (same as predict2.py)
         if "y_1X2" in preds:
@@ -1570,10 +1574,10 @@ def predict_week(fixtures_csv: Path) -> Path:
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
 
-    # Calculate max probability across all P_ columns for filtering
-    p_cols = [col for col in df_out.columns if col.startswith('P_')]
-    if p_cols:
-        df_out['MaxConfidence'] = df_out[p_cols].max(axis=1)
+    # Calculate max probability across all prediction columns for filtering
+    pred_cols = [col for col in df_out.columns if col.startswith('P_') or col.startswith('BLEND_')]
+    if pred_cols:
+        df_out['MaxConfidence'] = df_out[pred_cols].max(axis=1)
 
     # Sort by Date, then League for better readability
     if 'Date' in df_out.columns:
