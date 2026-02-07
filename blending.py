@@ -188,8 +188,13 @@ def learn_blend_weights() -> Dict[str, float]:
         if any(v is None for v in dc_rows):
             continue
         p_dc = np.vstack(dc_rows)
-        # optimize alpha
-        alpha = _opt_alpha(y_int, p_ml, p_dc)
+        # Filter out rows where DC produced all-zeros (league not in DC params)
+        # These would bias alpha toward ML since log(0) penalizes DC heavily
+        valid_mask = p_dc.sum(axis=1) > 0
+        if valid_mask.sum() < 50:
+            continue  # Not enough valid DC rows to learn meaningful weights
+        # optimize alpha only on rows where DC has real predictions
+        alpha = _opt_alpha(y_int[valid_mask], p_ml[valid_mask], p_dc[valid_mask])
         weights[target] = alpha
 
     # save

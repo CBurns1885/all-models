@@ -171,7 +171,7 @@ def calculate_league_profiles(df: pd.DataFrame) -> Dict:
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
     """Calibrate probability based on league-specific patterns and style."""
     if league not in league_profiles:
-        return prob
+        return max(0.01, min(0.99, prob))
 
     profile = league_profiles[league]
     style = profile.get('style', 'balanced')
@@ -200,7 +200,7 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
         return max(0.01, min(0.99, calibrated - goal_style_adj * 0.5))
 
     elif 'OU_0_5_O' in market:
-        return min(prob * 1.05, 0.99)  # Boost slightly (0.5 goals is very likely)
+        return max(0.01, min(prob * 1.05, 0.99))  # Boost slightly (0.5 goals is very likely)
 
     elif 'OU_1_5_O' in market:
         league_avg = profile.get('over15_rate', 0.7)
@@ -864,9 +864,9 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
                 df.at[idx, h_col] = max(0.01, min(0.99, df.at[idx, h_col] + h_adj))
                 df.at[idx, a_col] = max(0.01, min(0.99, df.at[idx, a_col] + a_adj))
 
-                # Normalize to ensure sum <= 1
+                # Normalize to ensure sum = 1
                 total = df.at[idx, h_col] + df.at[idx, d_col] + df.at[idx, a_col]
-                if total > 1:
+                if total > 0 and abs(total - 1.0) > 1e-6:
                     df.at[idx, h_col] /= total
                     df.at[idx, d_col] /= total
                     df.at[idx, a_col] /= total
@@ -1393,7 +1393,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
             </div>
             <div class='stat-box'>
                 <div class='number'>{elite_count}</div>
-                <div class='label'>Elite (85%+)</div>
+                <div class='label'>Elite (95%+)</div>
             </div>
             <div class='stat-box'>
                 <div class='number'>{very_high}</div>
@@ -1555,6 +1555,16 @@ def predict_week(fixtures_csv: Path) -> Path:
     # Apply injury adjustments (if injury data available)
     log_header("APPLY INJURY ADJUSTMENTS")
     df_out = apply_injury_adjustments(df_out, fx)
+
+    # Re-enforce cross-market constraints after injury adjustments
+    log_header("RE-ENFORCE CONSTRAINTS POST-INJURY")
+    for idx in df_out.index:
+        row_series = df_out.loc[idx]
+        constrained = enforce_cross_market_constraints(row_series)
+        for col in constrained.index:
+            if col.startswith('P_') or col.startswith('BLEND_'):
+                df_out.at[idx, col] = constrained[col]
+    print(f"[OK] Re-enforced constraints on {len(df_out)} rows")
 
     # Calculate confidence scores
     log_header("CALCULATE CONFIDENCE")
