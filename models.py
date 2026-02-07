@@ -779,7 +779,7 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
 
         # Over/Under total goals
         elif target.startswith("y_OU_"):
-            l = target.split("_")[-1]
+            l = target.split("_", 2)[2]
             vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
 
         # Asian Handicap
@@ -789,7 +789,7 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
 
         # Team Goals Over/Under - derive from score grid
         elif target.startswith("y_HomeTG_"):
-            line = float(target.split("_")[-1].replace("_", "."))
+            line = float(target.split("_", 2)[2].replace("_", "."))
             # Calculate P(HomeGoals > line) from score grid
             p_over = 0.0
             for h in range(max_goals + 1):
@@ -799,7 +799,7 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
             vec = [1.0 - p_over, p_over]  # [Under, Over]
 
         elif target.startswith("y_AwayTG_"):
-            line = float(target.split("_")[-1].replace("_", "."))
+            line = float(target.split("_", 2)[2].replace("_", "."))
             p_over = 0.0
             for a in range(max_goals + 1):
                 if a > line:
@@ -1229,13 +1229,9 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                         m.fit(Xt, yt)
                         proba = m.predict_proba(Xv)
             except Exception as e:
-                # If XGBoost (or any model) fails during CV, skip it and continue
-                if name == "xgb":
-                    print(f"[WARN]  XGBoost failed in fold {fold}: {e}. Continuing without XGBoost.")
-                    continue
-                else:
-                    print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Continuing without this model.")
-                    continue
+                # Model failed in this fold - insert uniform proba to maintain OOF shape
+                print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Using uniform proba.")
+                proba = np.full((len(Xv), len(classes)), 1.0 / len(classes))
             # align width
             if proba.shape[1] != len(classes):
                 P2 = np.zeros((len(Xv), len(classes)))
