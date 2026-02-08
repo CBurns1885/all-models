@@ -132,6 +132,12 @@ def prepare_results_for_update(results_df: pd.DataFrame) -> pd.DataFrame:
         print("[WARN] Missing goals data (FTHG/FTAG), limited market calculation")
         return df
 
+    # Ensure goals are numeric, coerce invalid to NaN
+    df['FTHG'] = pd.to_numeric(df['FTHG'], errors='coerce')
+    df['FTAG'] = pd.to_numeric(df['FTAG'], errors='coerce')
+
+    # Only compute outcomes for rows with valid goal data
+    goals_valid = df['FTHG'].notna() & df['FTAG'].notna()
     total_goals = df['FTHG'] + df['FTAG']
     goal_diff = df['FTHG'] - df['FTAG']
     btts = (df['FTHG'] > 0) & (df['FTAG'] > 0)
@@ -190,7 +196,11 @@ def prepare_results_for_update(results_df: pd.DataFrame) -> pd.DataFrame:
     base_cols = ['Date', 'League', 'HomeTeam', 'AwayTeam']
     y_cols = [c for c in df.columns if c.startswith('y_')]
 
-    return df[base_cols + y_cols].dropna(subset=['Date', 'HomeTeam', 'AwayTeam'])
+    # Drop rows missing match info OR goal data (NaN goals produce false outcomes)
+    result = df[base_cols + y_cols].copy()
+    result = result[goals_valid.values]  # Only keep rows with valid goal data
+    result = result.dropna(subset=['Date', 'HomeTeam', 'AwayTeam'])
+    return result
 
 
 def update_accuracy_database():
@@ -280,9 +290,13 @@ def show_recent_performance(weeks: int = 4):
     for week, week_data in df.groupby('week_id'):
         print(f"\n[DATE] Week {week}:")
         for _, row in week_data.iterrows():
-            print(f"   * {row['market']}: {row['avg_accuracy']:.1%} accuracy " +
-                  f"({int(row['correct'])}/{int(row['total'])}) " +
-                  f"[{row['profit']:+.1f} units]")
+            correct = int(row['correct']) if pd.notna(row['correct']) else 0
+            total = int(row['total']) if pd.notna(row['total']) else 0
+            profit = row['profit'] if pd.notna(row['profit']) else 0.0
+            acc = row['avg_accuracy'] if pd.notna(row['avg_accuracy']) else 0.0
+            print(f"   * {row['market']}: {acc:.1%} accuracy " +
+                  f"({correct}/{total}) " +
+                  f"[{profit:+.1f} units]")
 
 
 def check_pending_predictions():
