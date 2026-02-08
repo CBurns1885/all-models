@@ -143,19 +143,24 @@ def _load_base_features() -> pd.DataFrame:
     return df.sort_values(["Date","League"])
 
 def calculate_league_profiles(df: pd.DataFrame) -> Dict:
-    """Calculate actual league profiles from historical data"""
-    profiles = {}
-    
+    """Calculate actual league profiles from historical data.
+    Merges with static LEAGUE_PROFILES so expert-set fields (style, quality,
+    clean_sheet_rate) are preserved while data-driven rates are updated."""
+    # Start from static profiles as base
+    profiles = {k: dict(v) for k, v in LEAGUE_PROFILES.items()}
+
     for league in df['League'].unique():
         league_data = df[df['League'] == league]
         if len(league_data) < 50:
             continue
-            
+
         total_goals = league_data['FTHG'].fillna(0) + league_data['FTAG'].fillna(0)
         home_wins = (league_data['FTR'] == 'H').mean()
         away_wins = (league_data['FTR'] == 'A').mean()
-        
-        profiles[league] = {
+        clean_sheets = ((league_data['FTHG'] == 0) | (league_data['FTAG'] == 0)).mean()
+
+        # Update data-driven fields, preserve static fields (style, quality)
+        dynamic = {
             'avg_goals': total_goals.mean(),
             'home_adv': home_wins - away_wins,
             'btts_rate': ((league_data['FTHG'] > 0) & (league_data['FTAG'] > 0)).mean(),
@@ -164,8 +169,17 @@ def calculate_league_profiles(df: pd.DataFrame) -> Dict:
             'over35_rate': (total_goals > 3.5).mean(),
             'over45_rate': (total_goals > 4.5).mean(),
             'over55_rate': (total_goals > 5.5).mean(),
+            'clean_sheet_rate': clean_sheets,
         }
-    
+
+        if league in profiles:
+            profiles[league].update(dynamic)
+        else:
+            # New league not in static profiles — set defaults
+            dynamic['style'] = 'balanced'
+            dynamic['quality'] = 'medium'
+            profiles[league] = dynamic
+
     return profiles
 
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
@@ -427,35 +441,64 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         if hrow.empty or arow.empty:
             continue
         
-        feat_cols = [c for c in base.columns if not c.startswith("y_") 
+        feat_cols = [c for c in base.columns if not c.startswith("y_")
                      and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
-        
+
+        home_prefix_cols = [c for c in feat_cols if c.startswith("Home_")]
+        away_prefix_cols = [c for c in feat_cols if c.startswith("Away_")]
+        neutral_cols = [c for c in feat_cols if not c.startswith("Home_") and not c.startswith("Away_")]
+
         fused = pd.DataFrame()
-        
-        # Calculate weighted features for home team
-        for col in feat_cols:
-            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
-                weights = hrow['time_weight'].values[-5:]
-                values = hrow[col].fillna(0).values[-5:]
-                if weights.sum() > 0:
-                    weighted_avg = np.average(values, weights=weights)
-                    fused.at[0, col] = weighted_avg
-                else:
-                    fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-            else:
+
+        def _team_weighted_avg(team_matches, team_name, target_prefix, n=5):
+            """Get weighted average of team's own stats from their matches.
+            When team was home, use Home_* columns. When away, use Away_* columns."""
+            was_home = team_matches[team_matches["HomeTeam"] == team_name].tail(n)
+            was_away = team_matches[team_matches["AwayTeam"] == team_name].tail(n)
+
+            results = {}
+            # Get all Home_ prefixed feature names
+            for hcol in home_prefix_cols:
+                suffix = hcol[5:]  # Remove "Home_"
+                acol = f"Away_{suffix}"
+
+                # Collect values: Home_ when team was home, Away_ when team was away
+                vals, wts = [], []
+                if hcol in was_home.columns:
+                    for _, row_m in was_home.iterrows():
+                        v = row_m.get(hcol)
+                        if v is not None and pd.notna(v):
+                            vals.append(float(v))
+                            wts.append(float(row_m.get('time_weight', 1.0)))
+                if acol in was_away.columns:
+                    for _, row_m in was_away.iterrows():
+                        v = row_m.get(acol)
+                        if v is not None and pd.notna(v):
+                            vals.append(float(v))
+                            wts.append(float(row_m.get('time_weight', 1.0)))
+
+                if vals and sum(wts) > 0:
+                    # Sort by recency (most recent last) and take last n
+                    results[f"{target_prefix}_{suffix}"] = np.average(vals[-n:], weights=wts[-n:])
+                elif vals:
+                    results[f"{target_prefix}_{suffix}"] = vals[-1]
+
+            return results
+
+        # Home team: collect their stats mapped to Home_* columns
+        home_stats = _team_weighted_avg(hrow, ht, "Home")
+        for col, val in home_stats.items():
+            fused.at[0, col] = val
+
+        # Away team: collect their stats mapped to Away_* columns
+        away_stats = _team_weighted_avg(arow, at, "Away")
+        for col, val in away_stats.items():
+            fused.at[0, col] = val
+
+        # Neutral columns (League, Date, etc.) - take from most recent match
+        for col in neutral_cols:
+            if col in hrow.columns:
                 fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-        
-        # Update away team features
-        for c in fused.columns:
-            if c.startswith("Away_") and c in arow.columns:
-                if arow[c].dtype in ['float64', 'int64']:
-                    weights = arow['time_weight'].values[-5:]
-                    values = arow[c].fillna(0).values[-5:]
-                    if weights.sum() > 0:
-                        weighted_avg = np.average(values, weights=weights)
-                        fused.at[0, c] = weighted_avg
-                else:
-                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
         
         fused["League"] = lg
         fused["Date"] = dt
@@ -619,7 +662,7 @@ def _collect_market_columns() -> List[str]:
 
     return cols
 
-def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:
+def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None, future_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:
     """Enhanced mapping with all improvements"""
     out_cols = _collect_market_columns()
     n_rows = next(iter(preds.values())).shape[0] if preds else 0
@@ -748,8 +791,24 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
         # handles all constraint enforcement on final values.
         row_series = pd.Series(row)
 
-        # Apply Poisson adjustments
-        row_series = apply_poisson_adjustment(row_series, league=league)
+        # Extract team-specific xG from feature frame (prefer ewm, fallback to ma5)
+        home_xg_val = None
+        away_xg_val = None
+        if future_df is not None and i < len(future_df):
+            fr = future_df.iloc[i]
+            for col in ['Home_xG_ewm', 'Home_xG_ma5', 'Home_xG_ma10']:
+                v = fr.get(col)
+                if v is not None and pd.notna(v) and v > 0:
+                    home_xg_val = float(v)
+                    break
+            for col in ['Away_xG_ewm', 'Away_xG_ma5', 'Away_xG_ma10']:
+                v = fr.get(col)
+                if v is not None and pd.notna(v) and v > 0:
+                    away_xg_val = float(v)
+                    break
+
+        # Apply Poisson adjustments with team-specific xG when available
+        row_series = apply_poisson_adjustment(row_series, home_xg=home_xg_val, away_xg=away_xg_val, league=league)
 
         # Enforce cross-market constraints (final pass)
         row_series = enforce_cross_market_constraints(row_series)
@@ -1473,7 +1532,7 @@ def predict_week(fixtures_csv: Path) -> Path:
     
     # Map predictions with all enhancements
     log_header("APPLY ENHANCEMENTS")
-    rows, out_cols = _map_preds_to_columns(models, preds, fx)
+    rows, out_cols = _map_preds_to_columns(models, preds, fx, df_future)
     
     # Create output
     df_out = pd.DataFrame(rows, columns=out_cols)
