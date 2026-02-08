@@ -317,8 +317,8 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
                 row[f'P_OU_{next_line}_U'] = 1 - row[next_col]
     
     # 2. BTTS and O/U 0.5 logical consistency
-    if 'P_BTTS_Y' in row and 'P_OU_0_5_U' in row:
-        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_U']):
+    if 'P_BTTS_Y' in row and 'P_OU_0_5_U' in row and 'P_OU_0_5_O' in row:
+        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_U']) and pd.notna(row['P_OU_0_5_O']):
             # BTTS=Yes implies Over 0.5 must be very high
             if row['P_BTTS_Y'] > 0.7:
                 row['P_OU_0_5_U'] = min(row['P_OU_0_5_U'], 0.02)
@@ -331,11 +331,11 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
                 row['P_BTTS_N'] = 1.0 - row['P_BTTS_Y']
     
     # 3. BTTS and O/U 1.5 consistency
-    if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row:
+    if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row and 'P_OU_1_5_U' in row:
         if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_1_5_O']):
             # BTTS=Yes requires at least 2 goals (Over 1.5)
             if row['P_BTTS_Y'] > 0.6:
-                row['P_OU_1_5_O'] = max(row['P_OU_1_5_O'], row['P_BTTS_Y'] * 0.9)
+                row['P_OU_1_5_O'] = max(row['P_OU_1_5_O'], min(row['P_BTTS_Y'] * 0.9, 0.99))
                 row['P_OU_1_5_U'] = 1 - row['P_OU_1_5_O']
     
     # 4. 1X2 probabilities sum to 1.0
@@ -357,7 +357,7 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
         if all(pd.notna(row[col]) for col in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
             # BTTS requires both teams to score
             min_btts = row['P_HomeTG_0_5_O'] * row['P_AwayTG_0_5_O']
-            row['P_BTTS_Y'] = max(row['P_BTTS_Y'], min_btts * 0.85)
+            row['P_BTTS_Y'] = max(row['P_BTTS_Y'], min(min_btts * 0.85, 0.99))
             row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
     
     return row
@@ -1031,12 +1031,24 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             M = out.loc[idx, ml_cols].values
             D = out.loc[idx, dc_cols].values
             
-            # Blend: alpha * ML + (1-alpha) * DC
-            B = alpha * M + (1.0 - alpha) * D
-            
+            # Blend: alpha * ML + (1-alpha) * DC, NaN-safe
+            M_safe = np.where(np.isnan(M), 0.0, M)
+            D_safe = np.where(np.isnan(D), 0.0, D)
+            # If one source is all NaN, use the other; if both valid, blend
+            m_valid = np.any(~np.isnan(M))
+            d_valid = np.any(~np.isnan(D))
+            if m_valid and d_valid:
+                B = alpha * M_safe + (1.0 - alpha) * D_safe
+            elif m_valid:
+                B = M_safe
+            elif d_valid:
+                B = D_safe
+            else:
+                B = M_safe  # All NaN → zeros
+
             # Renormalize
             s = B.sum()
-            if s > 0:
+            if s > 0 and np.isfinite(s):
                 B = B / s
             
             # Create BLEND columns

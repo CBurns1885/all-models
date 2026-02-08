@@ -238,7 +238,8 @@ class AccuracyTracker:
         
         # Calculate metrics
         df['accuracy'] = df['correct'] / df['total']
-        df['profit_loss'] = df['correct'] - df['total']  # Simple profit calculation
+        # Profit/loss: if we bet 1 unit per prediction, correct bets win 1 unit, incorrect lose 1 unit
+        df['profit_loss'] = df['correct'] * 2 - df['total']  # Net profit = 2*correct - total (win back stake + profit)
         
         # Insert into weekly_accuracy table
         for _, row in df.iterrows():

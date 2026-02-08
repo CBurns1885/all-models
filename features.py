@@ -617,7 +617,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     # ===========================================================================
 
     # 1X2 Match Result
-    out["y_1X2"] = out["FTR"].astype(str)
+    out["y_1X2"] = out["FTR"].where(out["FTR"].notna()).astype(object)
 
     # BTTS (Both Teams To Score)
     btts = (out["FTHG"] > 0) & (out["FTAG"] > 0)
@@ -630,7 +630,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
 
     # Goal Range (0, 1, 2, 3, 4, 5+)
     bins = pd.cut(total, bins=[-1,0,1,2,3,4,100], labels=["0","1","2","3","4","5+"])
-    out["y_GOAL_RANGE"] = bins.astype(str)
+    out["y_GOAL_RANGE"] = bins.where(bins.notna()).astype(object)
 
     # Exact Total Goals (0, 1, 2, 3, 4, 5, 6+)
     out["y_ExactTotal_0"] = np.where(total == 0, "Y", "N")
@@ -689,7 +689,10 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
         out["y_HT"] = out.apply(get_ht_result, axis=1)
 
         # HT/FT combo
-        out["y_HTFT"] = out["y_HT"].astype(str) + "-" + out["FTR"].astype(str)
+        # Preserve NaN for rows with missing FTR/HT data
+        ht_str = out["y_HT"].where(out["y_HT"].notna())
+        ftr_str = out["FTR"].where(out["FTR"].notna())
+        out["y_HTFT"] = (ht_str + "-" + ftr_str).where(ht_str.notna() & ftr_str.notna())
 
         # HT Over/Under
         out["y_HT_OU_0_5"] = np.where(ht_total > 0.5, "O", "U")

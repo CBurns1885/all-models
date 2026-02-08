@@ -31,22 +31,22 @@ def calculate_market_weights() -> Dict[str, float]:
                SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as correct,
                AVG(CAST(predicted_prob AS FLOAT)) as avg_confidence
         FROM predictions
-        WHERE actual_result IS NOT NULL
+        WHERE actual_outcome IS NOT NULL
         GROUP BY market
         HAVING total >= 10
         """
-        
+
         # If predicted_prob doesn't exist, use simpler query
         try:
             df = pd.read_sql_query(query, conn)
-        except:
+        except Exception:
             # Fallback query without avg_confidence
             query = """
-            SELECT market, 
+            SELECT market,
                    COUNT(*) as total,
                    SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as correct
             FROM predictions
-            WHERE actual_result IS NOT NULL
+            WHERE actual_outcome IS NOT NULL
             GROUP BY market
             HAVING total >= 10
             """
@@ -61,7 +61,7 @@ def calculate_market_weights() -> Dict[str, float]:
         
         # Calculate weights based on accuracy
         df['accuracy'] = df['correct'] / df['total']
-        df['weight'] = df['accuracy'] * df.get('avg_confidence', 0.7)
+        df['weight'] = df['accuracy'] * df['avg_confidence']
         
         # Normalize weights
         total_weight = df['weight'].sum()
