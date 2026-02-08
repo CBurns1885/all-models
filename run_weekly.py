@@ -285,10 +285,10 @@ print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}
 TOTAL_STEPS = 12  # Steps 0-12 (0a/0b share step 0 for progress)
 errors = []
 
-def run_step(step_num, step_name, func, *args, **kwargs):
-    """Run a step with error recovery"""
+def run_step(step_num, step_name, func, *args, critical=False, **kwargs):
+    """Run a step with error recovery. If critical=True, abort pipeline on failure."""
     log_step(step_num, TOTAL_STEPS, step_name)
-    
+
     try:
         result = func(*args, **kwargs)
         print(f"[OK] Step {step_num} complete")
@@ -296,11 +296,16 @@ def run_step(step_num, step_name, func, *args, **kwargs):
     except Exception as e:
         error_msg = f"Step {step_num} ({step_name}): {str(e)}"
         errors.append(error_msg)
-        print(f"[WARN] Step {step_num} failed: {e}")
-        print("   Continuing to next step...")
         import traceback
         traceback.print_exc()
-        return None, error_msg
+        if critical:
+            print(f"[ERROR] Step {step_num} FAILED (critical): {e}")
+            print("   Pipeline cannot continue without this step. Aborting.")
+            raise SystemExit(1)
+        else:
+            print(f"[WARN] Step {step_num} failed: {e}")
+            print("   Continuing to next step...")
+            return None, error_msg
 
 try:
     from data_ingest import build_historical_results
@@ -367,13 +372,13 @@ try:
     def step1():
         build_historical_results(force=False)  # Don't force rebuild unless needed
 
-    run_step(1, "BUILD HISTORICAL DATABASE", step1)
+    run_step(1, "BUILD HISTORICAL DATABASE", step1, critical=True)
 
     # Step 2: Build features
     def step2():
         build_features(force=False)  # Don't force rebuild unless needed
 
-    run_step(2, "BUILD FEATURES", step2)
+    run_step(2, "BUILD FEATURES", step2, critical=True)
 
     # Step 3: Train/load models (with intelligent caching)
     def step3():
@@ -383,7 +388,7 @@ try:
         print(f"  Set FORCE_RETRAIN=1 to force full retraining")
         return smart_train_or_load()
 
-    models, err = run_step(3, "TRAIN/LOAD MODELS", step3)
+    models, err = run_step(3, "TRAIN/LOAD MODELS", step3, critical=True)
 
     # Step 4: Generate predictions
     def step4():
@@ -398,7 +403,7 @@ try:
         else:
             predict_week(fixtures_file)
 
-    run_step(4, "GENERATE PREDICTIONS", step4)
+    run_step(4, "GENERATE PREDICTIONS", step4, critical=True)
 
     # Step 5: Log predictions
     def step5():

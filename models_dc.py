@@ -98,18 +98,21 @@ def _time_weights(dates: pd.Series, league: str = None) -> np.ndarray:
 def _dc_corr(x: int, y: int, lam: float, mu: float, rho: float) -> float:
     """
     Enhanced Dixon-Coles correlation for low scores
-    Handles interdependence of low-scoring games
+    Handles interdependence of low-scoring games.
+    Returns value guaranteed > 0 to prevent negative probabilities.
     """
     if x == 0 and y == 0:
-        return 1 - lam * mu * rho
+        val = 1 - lam * mu * rho
     elif x == 0 and y == 1:
-        return 1 + lam * rho
+        val = 1 + lam * rho
     elif x == 1 and y == 0:
-        return 1 + mu * rho
+        val = 1 + mu * rho
     elif x == 1 and y == 1:
-        return 1 - rho
+        val = 1 - rho
     else:
         return 1.0
+    # Guarantee positive — negative correlation factors produce invalid probabilities
+    return max(val, 1e-6)
 
 # ============================================================================
 # NEGATIVE LOG-LIKELIHOOD (OPTIMIZED)
@@ -182,10 +185,14 @@ def _calculate_recent_form(df_league: pd.DataFrame, window: int = RECENT_FORM_WI
         
         # Overall league average (for comparison)
         league_avg_goals = (df['FTHG'].mean() + df['FTAG'].mean()) / 2
-        
+        if league_avg_goals < 0.01:
+            league_avg_goals = 1.3  # Fallback to reasonable default
+
         # Form multiplier (1.0 = average, >1.0 = good form, <1.0 = poor form)
-        recent_attack[team] = (recent_goals_scored / matches_played) / league_avg_goals
-        recent_defence[team] = league_avg_goals / (recent_goals_conceded / matches_played)
+        goals_per_match = recent_goals_scored / matches_played
+        conceded_per_match = recent_goals_conceded / matches_played
+        recent_attack[team] = goals_per_match / league_avg_goals
+        recent_defence[team] = league_avg_goals / max(conceded_per_match, 0.01)
         
         # Clamp to league-specific range
         lo, hi = LEAGUE_FORM_CLAMP.get(league_code, DEFAULT_FORM_CLAMP) if league_code else DEFAULT_FORM_CLAMP
@@ -255,6 +262,12 @@ def fit_league(df_league: pd.DataFrame, use_form: bool = True) -> DCParams:
         options={'maxiter': 800, 'ftol': 1e-10}
     )
     
+    # Validate optimization result
+    if not res.success:
+        print(f"  [WARN] DC optimization did not converge: {res.message}")
+    if not np.all(np.isfinite(res.x)):
+        raise ValueError("DC optimization produced non-finite parameters")
+
     # Extract fitted parameters
     th = res.x
     att = th[:n] - np.mean(th[:n])  # Mean-centered attack
@@ -336,9 +349,13 @@ def _score_grid(lam: float, mu: float, rho: float,
             # Apply DC correlation
             P[i, j] = base * _dc_corr(i, j, lam, mu, rho)
     
-    # Normalize (safety check)
-    P /= P.sum()
-    
+    # Normalize with safety check for zero/NaN
+    total = P.sum()
+    if total > 1e-12 and np.isfinite(total):
+        P /= total
+    else:
+        P = np.ones_like(P) / P.size  # Fallback to uniform
+
     return P
 
 # ============================================================================
@@ -365,9 +382,9 @@ def price_match(params: DCParams, home: str, away: str,
     if home not in params.attack or away not in params.attack:
         return {}
     
-    # Base expected goals
-    lam = np.exp(params.attack[home] - params.defence[away] + params.home_adv)
-    mu = np.exp(params.attack[away] - params.defence[home])
+    # Base expected goals (clip exponent to prevent extreme values)
+    lam = np.exp(np.clip(params.attack[home] - params.defence[away] + params.home_adv, -5, 5))
+    mu = np.exp(np.clip(params.attack[away] - params.defence[home], -5, 5))
     
     # Apply recent form adjustments if available and requested
     if use_form and params.recent_attack:
