@@ -516,6 +516,60 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     
     return pd.concat(rows, ignore_index=True).sort_values(["Date","League","HomeTeam"])
 
+def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Reorder columns: match details first, key markets next, zero/NaN cols last."""
+    all_cols = list(df.columns)
+
+    # 1. Match details first
+    id_order = ["Date", "League", "HomeTeam", "AwayTeam"]
+    first = [c for c in id_order if c in all_cols]
+
+    # 2. Key prediction markets in logical order
+    market_order = [
+        # 1X2
+        "P_1X2_H", "P_1X2_D", "P_1X2_A",
+        "BLEND_1X2_H", "BLEND_1X2_D", "BLEND_1X2_A",
+        "DC_1X2_H", "DC_1X2_D", "DC_1X2_A",
+        # BTTS
+        "P_BTTS_Y", "P_BTTS_N",
+        "BLEND_BTTS_Y", "BLEND_BTTS_N",
+        "DC_BTTS_Y", "DC_BTTS_N",
+        # Key OU lines
+        "P_OU_1_5_O", "P_OU_1_5_U",
+        "P_OU_2_5_O", "P_OU_2_5_U",
+        "P_OU_3_5_O", "P_OU_3_5_U",
+        "BLEND_OU_1_5_O", "BLEND_OU_1_5_U",
+        "BLEND_OU_2_5_O", "BLEND_OU_2_5_U",
+        "BLEND_OU_3_5_O", "BLEND_OU_3_5_U",
+        "DC_OU_1_5_O", "DC_OU_1_5_U",
+        "DC_OU_2_5_O", "DC_OU_2_5_U",
+        "DC_OU_3_5_O", "DC_OU_3_5_U",
+    ]
+    key_markets = [c for c in market_order if c in all_cols]
+
+    # 3. Confidence/meta columns
+    meta_cols = [c for c in all_cols if c.startswith("CONF_") or c.startswith("AGREE_")
+                 or c in ("MaxConfidence", "AvgConfidence", "BestProb", "BestMarket")]
+    meta = [c for c in meta_cols if c in all_cols]
+
+    used = set(first + key_markets + meta)
+
+    # 4. Remaining columns that have real data (at least one non-zero, non-NaN value)
+    remaining = [c for c in all_cols if c not in used]
+    has_data = []
+    all_zero_or_nan = []
+    for c in remaining:
+        if df[c].dtype in ('object', 'string', 'datetime64[ns]', 'category', 'bool'):
+            has_data.append(c)
+        elif df[c].notna().any() and (df[c].fillna(0) != 0).any():
+            has_data.append(c)
+        else:
+            all_zero_or_nan.append(c)
+
+    ordered = first + key_markets + meta + has_data + all_zero_or_nan
+    return df[ordered]
+
+
 def _collect_market_columns() -> List[str]:
     """All expected probability column names - COMPREHENSIVE VERSION"""
     cols = []
@@ -1595,6 +1649,9 @@ def predict_week(fixtures_csv: Path) -> Path:
         df_out['Date'] = pd.to_datetime(df_out['Date'], errors='coerce')
         df_out = df_out.sort_values(['Date', 'League'], ascending=[True, True])
         print("[OK] Sorted output by Date and League")
+
+    # Reorder columns: match details first, key markets next, zero/NaN cols last
+    df_out = _reorder_columns(df_out)
 
     # Save full version with all columns (NO FILTER - keep everything)
     output_path_full = OUTPUT_DIR / "weekly_bets_full.csv"

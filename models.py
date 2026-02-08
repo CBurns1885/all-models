@@ -1303,13 +1303,10 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 proba = m.predict_proba(X_all)
                 fitted_bases[name] = m
         except Exception as e:
-            # If XGBoost (or any model) fails during final fit, skip it and continue
-            if name == "xgb":
-                print(f"[WARN]  XGBoost failed during final fit: {e}. Continuing without XGBoost.")
-                continue
-            else:
-                print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
-                continue
+            # Model failed during final fit — use uniform proba to maintain
+            # consistent width with OOF (which also uses uniform on failure)
+            print(f"[WARN]  Model {name} failed during final fit: {e}. Using uniform proba.")
+            proba = np.full((len(X_all), len(classes)), 1.0 / len(classes))
         # align width
         if proba.shape[1] != len(classes):
             P2 = np.zeros((len(X_all), len(classes)))
@@ -1317,6 +1314,8 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
             s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
             proba = P2 / s
         full_stack.append(proba)
+    if not full_stack:
+        raise RuntimeError(f"All base models failed for {target_col} — cannot build meta-learner")
     full_stack = np.hstack(full_stack)
     meta.fit(full_stack, y_int)  # refit meta on full stacked features
 

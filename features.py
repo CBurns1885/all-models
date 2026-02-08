@@ -253,7 +253,7 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         team_df[f"GF_ma{w}"] = rolled["GoalsFor"].mean()
         team_df[f"GA_ma{w}"] = rolled["GoalsAgainst"].mean()
         team_df[f"GD_ma{w}"] = team_df[f"GF_ma{w}"] - team_df[f"GA_ma{w}"]
-        team_df[f"PPG_ma{w}"] = (rolled["Win"].sum() * 3 + rolled["Draw"].sum()) / w
+        team_df[f"PPG_ma{w}"] = (rolled["Win"].sum() * 3 + rolled["Draw"].sum()) / rolled["Win"].count().clip(lower=1)
         
         # Shot stats
         for col in ["Shots","ShotsT","Corners","CardsY","CardsR"]:
@@ -276,7 +276,10 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
     ew = team_df.shift(1).ewm(span=EWM_SPAN, adjust=False)
     team_df["GF_ewm"] = ew["GoalsFor"].mean()
     team_df["GA_ewm"] = ew["GoalsAgainst"].mean()
-    team_df["PPG_ewm"] = (ew["Win"].mean() * 3 + ew["Draw"].mean())
+    # Compute EWM of actual points sequence (not of Win/Draw separately)
+    shifted = team_df.shift(1)
+    points = shifted["Win"] * 3 + shifted["Draw"]
+    team_df["PPG_ewm"] = points.ewm(span=EWM_SPAN, adjust=False).mean()
     
     if "xG" in team_df.columns and team_df["xG"].notna().any():
         team_df["xG_ewm"] = ew["xG"].mean()
