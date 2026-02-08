@@ -188,10 +188,13 @@ def objective_factory(alg: str, cvd: CVData):
                 
                 # Handle class mismatch between train/validation splits
                 if P.shape[1] != K:
-                    # Pad or truncate probabilities to match expected classes
                     P_aligned = np.zeros((len(yv_mapped), K))
-                    min_cols = min(P.shape[1], K)
-                    P_aligned[:, :min_cols] = P[:, :min_cols]
+                    # Map sklearn's output columns to correct class indices
+                    model_classes = model_fold.classes_ if hasattr(model_fold, 'classes_') else np.arange(P.shape[1])
+                    for ci, cls_idx in enumerate(model_classes):
+                        cls_int = int(cls_idx)
+                        if 0 <= cls_int < K:
+                            P_aligned[:, cls_int] = P[:, ci]
                     # Renormalize
                     row_sums = P_aligned.sum(axis=1, keepdims=True)
                     row_sums[row_sums == 0] = 1.0
