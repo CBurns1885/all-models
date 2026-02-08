@@ -235,6 +235,22 @@ def _init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_fixtures_season ON fixtures(season)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_standings_team ON standings(team_name, league_code, season)")
 
+    # Odds table - stores bookmaker odds per fixture/market
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fixture_odds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fixture_id INTEGER,
+            bookmaker TEXT,
+            market TEXT,
+            selection TEXT,
+            odd REAL,
+            fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (fixture_id) REFERENCES fixtures(fixture_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_odds_fixture ON fixture_odds(fixture_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_odds_market ON fixture_odds(fixture_id, market)")
+
     conn.commit()
     conn.close()
 
@@ -800,6 +816,230 @@ def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
     print(f"\n[OK] Live data fetched:")
     print(f"  Total injuries: {total_home_inj} (home) + {total_away_inj} (away)")
     print(f"  Lineups confirmed: {lineups_available}/{len(df)} fixtures")
+
+    return df
+
+
+# =========================================================================
+# ODDS FETCHING
+# =========================================================================
+
+# Preferred bookmaker order (first available wins)
+PREFERRED_BOOKMAKERS = ['Bet365', 'Pinnacle', 'Unibet', '1xBet', 'Bwin', 'William Hill']
+
+# Map API-Football market/selection names to our column naming convention
+_ODDS_MARKET_MAP = {
+    'Match Winner': {
+        'Home': 'ODDS_1X2_H',
+        'Draw': 'ODDS_1X2_D',
+        'Away': 'ODDS_1X2_A',
+    },
+    'Both Teams Score': {
+        'Yes': 'ODDS_BTTS_Y',
+        'No': 'ODDS_BTTS_N',
+    },
+    'Double Chance': {
+        'Home/Draw': 'ODDS_DC_1X',
+        'Home/Away': 'ODDS_DC_12',
+        'Draw/Away': 'ODDS_DC_X2',
+    },
+}
+
+# Over/Under lines from the API come as "Over X.5" / "Under X.5"
+_OU_LINES = ['0.5', '1.5', '2.5', '3.5', '4.5', '5.5']
+
+
+def _parse_odds_response(bookmaker_bets: List[Dict]) -> Dict[str, float]:
+    """
+    Parse a single bookmaker's bets into our ODDS_* column format.
+
+    Args:
+        bookmaker_bets: List of bet dicts from one bookmaker
+
+    Returns:
+        Dict mapping column name to decimal odd (e.g. {'ODDS_1X2_H': 1.50, ...})
+    """
+    result = {}
+
+    for bet in bookmaker_bets:
+        bet_name = bet.get('name', '')
+        values = bet.get('values', [])
+
+        # Named markets (1X2, BTTS, DC)
+        if bet_name in _ODDS_MARKET_MAP:
+            mapping = _ODDS_MARKET_MAP[bet_name]
+            for v in values:
+                col = mapping.get(v.get('value'))
+                if col:
+                    try:
+                        result[col] = float(v['odd'])
+                    except (ValueError, TypeError):
+                        pass
+
+        # Goals Over/Under
+        elif bet_name == 'Goals Over/Under':
+            for v in values:
+                val = v.get('value', '')  # e.g. "Over 2.5", "Under 2.5"
+                for line in _OU_LINES:
+                    line_str = line.replace('.', '_')
+                    if val == f'Over {line}':
+                        try:
+                            result[f'ODDS_OU_{line_str}_O'] = float(v['odd'])
+                        except (ValueError, TypeError):
+                            pass
+                    elif val == f'Under {line}':
+                        try:
+                            result[f'ODDS_OU_{line_str}_U'] = float(v['odd'])
+                        except (ValueError, TypeError):
+                            pass
+
+        # Asian Handicap
+        elif bet_name == 'Asian Handicap':
+            for v in values:
+                val = v.get('value', '')  # e.g. "Home -0.5", "Away +0.5"
+                try:
+                    odd_val = float(v['odd'])
+                except (ValueError, TypeError):
+                    continue
+                # Parse "Home -1.5" or "Away +0.5" etc
+                parts = val.split()
+                if len(parts) >= 2:
+                    side = parts[0]  # Home or Away
+                    handicap = parts[1]  # e.g. "-0.5", "+1.5"
+                    h_str = handicap.replace('.', '_').replace('+', 'p').replace('-', 'm')
+                    if side == 'Home':
+                        result[f'ODDS_AH_{h_str}_H'] = odd_val
+                    elif side == 'Away':
+                        result[f'ODDS_AH_{h_str}_A'] = odd_val
+
+        # HT/FT
+        elif bet_name == 'HT/FT Double':
+            for v in values:
+                val = v.get('value', '')
+                # API returns e.g. "Home/Home", "Draw/Away"
+                short_map = {'Home': 'H', 'Draw': 'D', 'Away': 'A'}
+                parts = val.split('/')
+                if len(parts) == 2:
+                    ht = short_map.get(parts[0])
+                    ft = short_map.get(parts[1])
+                    if ht and ft:
+                        try:
+                            result[f'ODDS_HTFT_{ht}_{ft}'] = float(v['odd'])
+                        except (ValueError, TypeError):
+                            pass
+
+    return result
+
+
+def fetch_odds_for_fixture(fixture_id: int) -> Dict[str, float]:
+    """
+    Fetch bookmaker odds for a specific fixture from API-Football.
+
+    Uses preferred bookmaker priority — first available bookmaker's odds win.
+
+    Args:
+        fixture_id: API-Football fixture ID
+
+    Returns:
+        Dict mapping ODDS_* column names to decimal odds values
+    """
+    data = _make_request('odds', {'fixture': fixture_id})
+
+    if not data or 'response' not in data or not data['response']:
+        return {}
+
+    # May have multiple response items; take first
+    resp = data['response'][0] if data['response'] else {}
+    bookmakers = resp.get('bookmakers', [])
+
+    if not bookmakers:
+        return {}
+
+    # Try preferred bookmakers in order
+    bm_dict = {bm['name']: bm for bm in bookmakers}
+    selected_bm = None
+    for pref in PREFERRED_BOOKMAKERS:
+        if pref in bm_dict:
+            selected_bm = bm_dict[pref]
+            break
+
+    # Fallback to first available
+    if not selected_bm:
+        selected_bm = bookmakers[0]
+
+    odds = _parse_odds_response(selected_bm.get('bets', []))
+
+    # Store in database for historical tracking
+    if odds:
+        _store_odds(fixture_id, selected_bm.get('name', 'Unknown'), odds)
+
+    return odds
+
+
+def _store_odds(fixture_id: int, bookmaker: str, odds: Dict[str, float]):
+    """Store parsed odds in the database."""
+    try:
+        conn = sqlite3.connect(API_FOOTBALL_DB)
+        cursor = conn.cursor()
+
+        # Clear old odds for this fixture to avoid duplicates
+        cursor.execute("DELETE FROM fixture_odds WHERE fixture_id = ?", (fixture_id,))
+
+        for col_name, odd_value in odds.items():
+            # Extract market and selection from column name (e.g. ODDS_1X2_H → 1X2, H)
+            parts = col_name.replace('ODDS_', '').rsplit('_', 1)
+            market = parts[0] if len(parts) > 1 else col_name
+            selection = parts[-1] if len(parts) > 1 else ''
+
+            cursor.execute("""
+                INSERT INTO fixture_odds (fixture_id, bookmaker, market, selection, odd)
+                VALUES (?, ?, ?, ?, ?)
+            """, (fixture_id, bookmaker, market, selection, odd_value))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[WARN] Could not store odds for fixture {fixture_id}: {e}")
+
+
+def fetch_odds_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fetch bookmaker odds for all upcoming fixtures and merge into DataFrame.
+
+    Adds ODDS_* columns (e.g. ODDS_1X2_H, ODDS_OU_2_5_O) to the fixtures DataFrame.
+
+    Args:
+        fixtures_df: DataFrame with upcoming fixtures (must have fixture_id column)
+
+    Returns:
+        DataFrame with ODDS_* columns added
+    """
+    if 'fixture_id' not in fixtures_df.columns:
+        print("[WARN] No fixture_id column - cannot fetch odds")
+        return fixtures_df
+
+    log_header("Fetching Bookmaker Odds")
+
+    df = fixtures_df.copy()
+    all_odds_cols = set()
+    odds_rows = []
+
+    for idx, row in df.iterrows():
+        fixture_id = row['fixture_id']
+        odds = fetch_odds_for_fixture(fixture_id)
+        odds_rows.append(odds)
+        all_odds_cols.update(odds.keys())
+
+        if (idx + 1) % 10 == 0:
+            print(f"  Fetched odds for {idx + 1}/{len(df)} fixtures...")
+
+    # Add all ODDS_* columns to DataFrame
+    for col in sorted(all_odds_cols):
+        df[col] = [row.get(col) for row in odds_rows]
+
+    fixtures_with_odds = sum(1 for r in odds_rows if r)
+    print(f"\n[OK] Odds fetched: {fixtures_with_odds}/{len(df)} fixtures have odds")
+    print(f"   Markets: {len(all_odds_cols)} odds columns added")
 
     return df
 

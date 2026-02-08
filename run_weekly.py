@@ -130,7 +130,7 @@ fixtures_file = None
 
 # Try API-Football first
 try:
-    from api_client import download_upcoming_fixtures, test_api_connection, fetch_live_data_for_upcoming
+    from api_client import download_upcoming_fixtures, test_api_connection, fetch_live_data_for_upcoming, fetch_odds_for_upcoming
 
     print("Testing API-Football connection...")
     if test_api_connection():
@@ -145,10 +145,17 @@ try:
             print("\n[LIVE] Fetching injuries and lineups...")
             fixtures_df = fetch_live_data_for_upcoming(fixtures_df)
 
+            # Fetch bookmaker odds for upcoming fixtures
+            print("\n[ODDS] Fetching bookmaker odds...")
+            try:
+                fixtures_df = fetch_odds_for_upcoming(fixtures_df)
+            except Exception as e:
+                print(f"[WARN] Odds fetch failed: {e} — continuing without odds")
+
             # Save to outputs
             fixtures_file = OUTPUT_DIR / "upcoming_fixtures.csv"
             fixtures_df.to_csv(fixtures_file, index=False)
-            print(f"[OK] Downloaded {len(fixtures_df)} fixtures via API (with live data)")
+            print(f"[OK] Downloaded {len(fixtures_df)} fixtures via API (with live data + odds)")
         else:
             print("[WARN] No fixtures from API, trying fallback...")
     else:
