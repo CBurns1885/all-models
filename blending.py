@@ -128,18 +128,22 @@ def learn_blend_weights() -> Dict[str, float]:
     for target, m in models.items():
         if target not in df_val.columns:
             continue
-        sub = df_val.dropna(subset=[target]).copy()
+        sub = df_val.dropna(subset=[target, "League", "HomeTeam", "AwayTeam"]).copy()
         if len(sub) < 50:  # Need enough validation samples
             continue
 
         # ML probs (on held-out validation data)
         ml_dict = ml_predict({target: m}, sub)
         p_ml_full = ml_dict[target]  # shape (n, K_ml)
+        if np.any(np.isnan(p_ml_full)):
+            print(f"  [SKIP] {target}: ML model returned NaN probabilities")
+            continue
         ml_labels = list(m.classes_)
-        # Desired label order (from the data's categorical order)
-        desired_labels = list(sub[target].astype("category").cat.categories)
+        # Use model's class order (consistent between train and inference)
+        sub_cat = sub[target].astype("category")
+        desired_labels = list(sub_cat.cat.categories)
         p_ml = _align_probs_to_labels(p_ml_full, ml_labels, desired_labels)
-        y_int = sub[target].astype("category").cat.codes.values
+        y_int = sub_cat.cat.codes.values
 
         # DC probs (skip if target not supported)
         if not _dc_supported(target):

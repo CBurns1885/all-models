@@ -143,19 +143,24 @@ def _load_base_features() -> pd.DataFrame:
     return df.sort_values(["Date","League"])
 
 def calculate_league_profiles(df: pd.DataFrame) -> Dict:
-    """Calculate actual league profiles from historical data"""
-    profiles = {}
-    
+    """Calculate actual league profiles from historical data.
+    Merges with static LEAGUE_PROFILES so expert-set fields (style, quality,
+    clean_sheet_rate) are preserved while data-driven rates are updated."""
+    # Start from static profiles as base
+    profiles = {k: dict(v) for k, v in LEAGUE_PROFILES.items()}
+
     for league in df['League'].unique():
         league_data = df[df['League'] == league]
         if len(league_data) < 50:
             continue
-            
+
         total_goals = league_data['FTHG'].fillna(0) + league_data['FTAG'].fillna(0)
         home_wins = (league_data['FTR'] == 'H').mean()
         away_wins = (league_data['FTR'] == 'A').mean()
-        
-        profiles[league] = {
+        clean_sheets = ((league_data['FTHG'] == 0) | (league_data['FTAG'] == 0)).mean()
+
+        # Update data-driven fields, preserve static fields (style, quality)
+        dynamic = {
             'avg_goals': total_goals.mean(),
             'home_adv': home_wins - away_wins,
             'btts_rate': ((league_data['FTHG'] > 0) & (league_data['FTAG'] > 0)).mean(),
@@ -164,8 +169,17 @@ def calculate_league_profiles(df: pd.DataFrame) -> Dict:
             'over35_rate': (total_goals > 3.5).mean(),
             'over45_rate': (total_goals > 4.5).mean(),
             'over55_rate': (total_goals > 5.5).mean(),
+            'clean_sheet_rate': clean_sheets,
         }
-    
+
+        if league in profiles:
+            profiles[league].update(dynamic)
+        else:
+            # New league not in static profiles — set defaults
+            dynamic['style'] = 'balanced'
+            dynamic['quality'] = 'medium'
+            profiles[league] = dynamic
+
     return profiles
 
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
@@ -231,98 +245,49 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
         # Under markets - inverse of style adjustment
         return max(0.01, min(0.99, prob - goal_style_adj))
 
-    # ========== HOME/AWAY ADVANTAGE CALIBRATION ==========
+    # ========== RESULT & DIRECTIONAL MARKETS ==========
+    # NOTE: Do NOT apply home advantage adjustments here.
+    # The ML models already learn home advantage from features, and the
+    # Dixon-Coles model has explicit home advantage parameters.
+    # Adding a third layer of home bias caused systematic over-prediction
+    # of home wins and collapsed accuracy from 75% to near 0%.
 
-    # Match result markets
-    elif '1X2_H' in market:
-        return min(prob * (1 + home_adv * 0.3), 0.95)
+    # 1X2 - just bound, no home bias
+    elif '1X2_H' in market or '1X2_A' in market or '1X2_D' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif '1X2_A' in market:
-        return max(prob * (1 - home_adv * 0.3), 0.05)
+    # Double Chance - just bound
+    elif 'DC_1X' in market or 'DC1X' in market or 'DC_X2' in market or 'DCX2' in market or 'DC_12' in market or 'DC12' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif '1X2_D' in market:
-        # Draw less likely in leagues with high home advantage
-        return max(0.05, min(0.45, prob * (1 - home_adv * 0.15)))
+    # Draw No Bet - just bound
+    elif 'DNB_H' in market or 'DNB_A' in market:
+        return max(0.01, min(0.99, prob))
 
-    # Double Chance markets
-    elif 'DC_1X' in market or 'DC1X' in market:
-        # Home or Draw - boosted by home advantage
-        return min(prob * (1 + home_adv * 0.15), 0.95)
+    # Home/Away team goals - just bound
+    elif 'HomeTG_' in market or 'HomeExact' in market or 'AwayTG_' in market or 'AwayExact' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif 'DC_X2' in market or 'DCX2' in market:
-        # Away or Draw - reduced by home advantage
-        return max(prob * (1 - home_adv * 0.15), 0.15)
+    # Team to score - just bound
+    elif 'HomeToScore' in market or 'AwayToScore' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif 'DC_12' in market or 'DC12' in market:
-        # Home or Away (no draw) - slight boost in high home adv leagues
-        return min(prob * (1 + home_adv * 0.08), 0.95)
-
-    # Draw No Bet
-    elif 'DNB_H' in market:
-        return min(prob * (1 + home_adv * 0.25), 0.90)
-
-    elif 'DNB_A' in market:
-        return max(prob * (1 - home_adv * 0.25), 0.10)
-
-    # Home/Away team goals
-    elif 'HomeTG_' in market or 'HomeExact' in market:
-        # Home team goals - boosted by home advantage
-        line_boost = home_adv * 0.12
-        return max(0.01, min(0.99, prob + line_boost))
-
-    elif 'AwayTG_' in market or 'AwayExact' in market:
-        # Away team goals - reduced by home advantage
-        line_boost = home_adv * 0.12
-        return max(0.01, min(0.99, prob - line_boost))
-
-    # Team to score
-    elif 'HomeToScore' in market:
-        return min(prob * (1 + home_adv * 0.10), 0.95)
-
-    elif 'AwayToScore' in market:
-        return max(prob * (1 - home_adv * 0.10), 0.20)
-
-    # Win to Nil / Clean Sheet - with home/away distinction
-    elif 'HomeWTN' in market:
-        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.5) * calibration_weight
-        # Home WTN boosted by home advantage
-        return max(0.01, min(0.60, base * (1 + home_adv * 0.20) - goal_style_adj * 0.3))
-
-    elif 'AwayWTN' in market:
-        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.35) * calibration_weight
-        # Away WTN reduced by home advantage
-        return max(0.01, min(0.40, base * (1 - home_adv * 0.20) - goal_style_adj * 0.3))
-
-    elif 'HomeCS' in market:
+    # Win to Nil / Clean Sheet - use league clean_sheet_rate but no home bias
+    elif 'WTN' in market or 'HomeCS' in market or 'AwayCS' in market:
         base = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
-        return max(0.01, min(0.65, base * (1 + home_adv * 0.15) - goal_style_adj * 0.4))
-
-    elif 'AwayCS' in market:
-        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.8) * calibration_weight
-        return max(0.01, min(0.55, base * (1 - home_adv * 0.15) - goal_style_adj * 0.4))
+        return max(0.01, min(0.99, base - goal_style_adj * 0.3))
 
     elif 'NoGoal' in market:
-        # 0-0 draw - defensive leagues boost, high home adv reduces
         base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.15) * calibration_weight
         return max(0.01, min(0.15, base - goal_style_adj * 0.5))
 
-    # Win by margin - home/away
-    elif 'HomeWin' in market:
-        boost = home_adv * 0.15
-        return max(0.01, min(0.85, prob + boost))
+    # Win by margin - just bound
+    elif 'HomeWin' in market or 'AwayWin' in market:
+        return max(0.01, min(0.99, prob))
 
-    elif 'AwayWin' in market:
-        boost = home_adv * 0.15
-        return max(0.01, min(0.60, prob - boost))
-
-    # Asian Handicap - home advantage affects line perception
+    # Asian Handicap - just bound
     elif 'AH_' in market:
-        if '_H' in market or market.endswith('_H'):
-            # Home covers handicap
-            return max(0.01, min(0.85, prob + home_adv * 0.08))
-        elif '_A' in market or market.endswith('_A'):
-            # Away covers handicap
-            return max(0.01, min(0.85, prob - home_adv * 0.08))
+        return max(0.01, min(0.99, prob))
 
     return prob
 
@@ -340,33 +305,37 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
             
             if pd.notna(row[curr_col]) and pd.notna(row[next_col]):
                 if row[curr_col] < row[next_col]:
-                    avg = (row[curr_col] + row[next_col]) / 2
-                    row[curr_col] = min(avg + 0.05, 0.99)
-                    row[next_col] = max(avg - 0.05, 0.01)
+                    # Preserve original values as much as possible:
+                    # keep higher line's value, nudge lower line just above it
+                    row[curr_col] = min(row[next_col] + 0.01, 0.99)
+                    # Only adjust next_col if curr_col hit the ceiling
+                    if row[curr_col] <= row[next_col]:
+                        row[next_col] = max(row[curr_col] - 0.01, 0.01)
                 
                 # Update Under probabilities
                 row[f'P_OU_{curr_line}_U'] = 1 - row[curr_col]
                 row[f'P_OU_{next_line}_U'] = 1 - row[next_col]
     
     # 2. BTTS and O/U 0.5 logical consistency
-    if 'P_BTTS_Y' in row and 'P_OU_0_5_U' in row:
-        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_U']):
+    if 'P_BTTS_Y' in row and 'P_OU_0_5_U' in row and 'P_OU_0_5_O' in row:
+        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_U']) and pd.notna(row['P_OU_0_5_O']):
             # BTTS=Yes implies Over 0.5 must be very high
             if row['P_BTTS_Y'] > 0.7:
                 row['P_OU_0_5_U'] = min(row['P_OU_0_5_U'], 0.02)
                 row['P_OU_0_5_O'] = max(row['P_OU_0_5_O'], 0.98)
             
-            # Under 0.5 high means BTTS=Yes must be zero
+            # Under 0.5 high means BTTS=Yes should be very low (capped at complement)
             if row['P_OU_0_5_U'] > 0.5:
-                row['P_BTTS_Y'] = 0.0
-                row['P_BTTS_N'] = 1.0
+                max_btts_y = 1.0 - row['P_OU_0_5_U']  # e.g. if U=0.7, cap at 0.3
+                row['P_BTTS_Y'] = min(row['P_BTTS_Y'], max_btts_y)
+                row['P_BTTS_N'] = 1.0 - row['P_BTTS_Y']
     
     # 3. BTTS and O/U 1.5 consistency
-    if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row:
+    if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row and 'P_OU_1_5_U' in row:
         if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_1_5_O']):
             # BTTS=Yes requires at least 2 goals (Over 1.5)
             if row['P_BTTS_Y'] > 0.6:
-                row['P_OU_1_5_O'] = max(row['P_OU_1_5_O'], row['P_BTTS_Y'] * 0.9)
+                row['P_OU_1_5_O'] = max(row['P_OU_1_5_O'], min(row['P_BTTS_Y'] * 0.9, 0.99))
                 row['P_OU_1_5_U'] = 1 - row['P_OU_1_5_O']
     
     # 4. 1X2 probabilities sum to 1.0
@@ -388,7 +357,7 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
         if all(pd.notna(row[col]) for col in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
             # BTTS requires both teams to score
             min_btts = row['P_HomeTG_0_5_O'] * row['P_AwayTG_0_5_O']
-            row['P_BTTS_Y'] = max(row['P_BTTS_Y'], min_btts * 0.85)
+            row['P_BTTS_Y'] = max(row['P_BTTS_Y'], min(min_btts * 0.85, 0.99))
             row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
     
     return row
@@ -472,35 +441,64 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         if hrow.empty or arow.empty:
             continue
         
-        feat_cols = [c for c in base.columns if not c.startswith("y_") 
+        feat_cols = [c for c in base.columns if not c.startswith("y_")
                      and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
-        
+
+        home_prefix_cols = [c for c in feat_cols if c.startswith("Home_")]
+        away_prefix_cols = [c for c in feat_cols if c.startswith("Away_")]
+        neutral_cols = [c for c in feat_cols if not c.startswith("Home_") and not c.startswith("Away_")]
+
         fused = pd.DataFrame()
-        
-        # Calculate weighted features for home team
-        for col in feat_cols:
-            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
-                weights = hrow['time_weight'].values[-5:]
-                values = hrow[col].fillna(0).values[-5:]
-                if weights.sum() > 0:
-                    weighted_avg = np.average(values, weights=weights)
-                    fused.at[0, col] = weighted_avg
-                else:
-                    fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-            else:
+
+        def _team_weighted_avg(team_matches, team_name, target_prefix, n=5):
+            """Get weighted average of team's own stats from their matches.
+            When team was home, use Home_* columns. When away, use Away_* columns."""
+            was_home = team_matches[team_matches["HomeTeam"] == team_name].tail(n)
+            was_away = team_matches[team_matches["AwayTeam"] == team_name].tail(n)
+
+            results = {}
+            # Get all Home_ prefixed feature names
+            for hcol in home_prefix_cols:
+                suffix = hcol[5:]  # Remove "Home_"
+                acol = f"Away_{suffix}"
+
+                # Collect values: Home_ when team was home, Away_ when team was away
+                vals, wts = [], []
+                if hcol in was_home.columns:
+                    for _, row_m in was_home.iterrows():
+                        v = row_m.get(hcol)
+                        if v is not None and pd.notna(v):
+                            vals.append(float(v))
+                            wts.append(float(row_m.get('time_weight', 1.0)))
+                if acol in was_away.columns:
+                    for _, row_m in was_away.iterrows():
+                        v = row_m.get(acol)
+                        if v is not None and pd.notna(v):
+                            vals.append(float(v))
+                            wts.append(float(row_m.get('time_weight', 1.0)))
+
+                if vals and sum(wts) > 0:
+                    # Sort by recency (most recent last) and take last n
+                    results[f"{target_prefix}_{suffix}"] = np.average(vals[-n:], weights=wts[-n:])
+                elif vals:
+                    results[f"{target_prefix}_{suffix}"] = vals[-1]
+
+            return results
+
+        # Home team: collect their stats mapped to Home_* columns
+        home_stats = _team_weighted_avg(hrow, ht, "Home")
+        for col, val in home_stats.items():
+            fused.at[0, col] = val
+
+        # Away team: collect their stats mapped to Away_* columns
+        away_stats = _team_weighted_avg(arow, at, "Away")
+        for col, val in away_stats.items():
+            fused.at[0, col] = val
+
+        # Neutral columns (League, Date, etc.) - take from most recent match
+        for col in neutral_cols:
+            if col in hrow.columns:
                 fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-        
-        # Update away team features
-        for c in fused.columns:
-            if c.startswith("Away_") and c in arow.columns:
-                if arow[c].dtype in ['float64', 'int64']:
-                    weights = arow['time_weight'].values[-5:]
-                    values = arow[c].fillna(0).values[-5:]
-                    if weights.sum() > 0:
-                        weighted_avg = np.average(values, weights=weights)
-                        fused.at[0, c] = weighted_avg
-                else:
-                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
         
         fused["League"] = lg
         fused["Date"] = dt
@@ -517,6 +515,60 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         raise RuntimeError("No fixtures matched with historical features.")
     
     return pd.concat(rows, ignore_index=True).sort_values(["Date","League","HomeTeam"])
+
+def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Reorder columns: match details first, key markets next, zero/NaN cols last."""
+    all_cols = list(df.columns)
+
+    # 1. Match details first
+    id_order = ["Date", "League", "HomeTeam", "AwayTeam"]
+    first = [c for c in id_order if c in all_cols]
+
+    # 2. Key prediction markets in logical order
+    market_order = [
+        # 1X2
+        "P_1X2_H", "P_1X2_D", "P_1X2_A",
+        "BLEND_1X2_H", "BLEND_1X2_D", "BLEND_1X2_A",
+        "DC_1X2_H", "DC_1X2_D", "DC_1X2_A",
+        # BTTS
+        "P_BTTS_Y", "P_BTTS_N",
+        "BLEND_BTTS_Y", "BLEND_BTTS_N",
+        "DC_BTTS_Y", "DC_BTTS_N",
+        # Key OU lines
+        "P_OU_1_5_O", "P_OU_1_5_U",
+        "P_OU_2_5_O", "P_OU_2_5_U",
+        "P_OU_3_5_O", "P_OU_3_5_U",
+        "BLEND_OU_1_5_O", "BLEND_OU_1_5_U",
+        "BLEND_OU_2_5_O", "BLEND_OU_2_5_U",
+        "BLEND_OU_3_5_O", "BLEND_OU_3_5_U",
+        "DC_OU_1_5_O", "DC_OU_1_5_U",
+        "DC_OU_2_5_O", "DC_OU_2_5_U",
+        "DC_OU_3_5_O", "DC_OU_3_5_U",
+    ]
+    key_markets = [c for c in market_order if c in all_cols]
+
+    # 3. Confidence/meta columns
+    meta_cols = [c for c in all_cols if c.startswith("CONF_") or c.startswith("AGREE_")
+                 or c in ("MaxConfidence", "AvgConfidence", "BestProb", "BestMarket")]
+    meta = [c for c in meta_cols if c in all_cols]
+
+    used = set(first + key_markets + meta)
+
+    # 4. Remaining columns that have real data (at least one non-zero, non-NaN value)
+    remaining = [c for c in all_cols if c not in used]
+    has_data = []
+    all_zero_or_nan = []
+    for c in remaining:
+        if df[c].dtype in ('object', 'string', 'datetime64[ns]', 'category', 'bool'):
+            has_data.append(c)
+        elif df[c].notna().any() and (df[c].fillna(0) != 0).any():
+            has_data.append(c)
+        else:
+            all_zero_or_nan.append(c)
+
+    ordered = first + key_markets + meta + has_data + all_zero_or_nan
+    return df[ordered]
+
 
 def _collect_market_columns() -> List[str]:
     """All expected probability column names - COMPREHENSIVE VERSION"""
@@ -664,7 +716,7 @@ def _collect_market_columns() -> List[str]:
 
     return cols
 
-def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:
+def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None, future_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:
     """Enhanced mapping with all improvements"""
     out_cols = _collect_market_columns()
     n_rows = next(iter(preds.values())).shape[0] if preds else 0
@@ -691,9 +743,9 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
         # Get fixture info
         league = fixtures_df.iloc[i]['League'] if fixtures_df is not None and 'League' in fixtures_df.columns else None
         
-        # Initialize
+        # Initialize with NaN so missing markets don't get treated as real predictions
         for col in out_cols:
-            row[col] = 0.0
+            row[col] = np.nan
         
         # Map predictions (same as predict2.py)
         if "y_1X2" in preds:
@@ -786,18 +838,31 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
                         row[market], market, league, league_profiles
                     )
 
-        # Apply cross-market calibration constraints BEFORE Poisson/blending
-        try:
-            from calibration import enforce_calibration_constraints
-            row = enforce_calibration_constraints(row)
-        except ImportError:
-            pass
-
         # Convert to series
+        # NOTE: Removed pre-Poisson enforce_calibration_constraints call.
+        # Poisson adjustment immediately overrides OU values, making a pre-Poisson
+        # constraint pass wasteful. The post-Poisson enforce_cross_market_constraints
+        # handles all constraint enforcement on final values.
         row_series = pd.Series(row)
 
-        # Apply Poisson adjustments
-        row_series = apply_poisson_adjustment(row_series, league=league)
+        # Extract team-specific xG from feature frame (prefer ewm, fallback to ma5)
+        home_xg_val = None
+        away_xg_val = None
+        if future_df is not None and i < len(future_df):
+            fr = future_df.iloc[i]
+            for col in ['Home_xG_ewm', 'Home_xG_ma5', 'Home_xG_ma10']:
+                v = fr.get(col)
+                if v is not None and pd.notna(v) and v > 0:
+                    home_xg_val = float(v)
+                    break
+            for col in ['Away_xG_ewm', 'Away_xG_ma5', 'Away_xG_ma10']:
+                v = fr.get(col)
+                if v is not None and pd.notna(v) and v > 0:
+                    away_xg_val = float(v)
+                    break
+
+        # Apply Poisson adjustments with team-specific xG when available
+        row_series = apply_poisson_adjustment(row_series, home_xg=home_xg_val, away_xg=away_xg_val, league=league)
 
         # Enforce cross-market constraints (final pass)
         row_series = enforce_cross_market_constraints(row_series)
@@ -966,12 +1031,24 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             M = out.loc[idx, ml_cols].values
             D = out.loc[idx, dc_cols].values
             
-            # Blend: alpha * ML + (1-alpha) * DC
-            B = alpha * M + (1.0 - alpha) * D
-            
+            # Blend: alpha * ML + (1-alpha) * DC, NaN-safe
+            M_safe = np.where(np.isnan(M), 0.0, M)
+            D_safe = np.where(np.isnan(D), 0.0, D)
+            # If one source is all NaN, use the other; if both valid, blend
+            m_valid = np.any(~np.isnan(M))
+            d_valid = np.any(~np.isnan(D))
+            if m_valid and d_valid:
+                B = alpha * M_safe + (1.0 - alpha) * D_safe
+            elif m_valid:
+                B = M_safe
+            elif d_valid:
+                B = D_safe
+            else:
+                B = M_safe  # All NaN → zeros
+
             # Renormalize
             s = B.sum()
-            if s > 0:
+            if s > 0 and np.isfinite(s):
                 B = B / s
             
             # Create BLEND columns
@@ -1521,7 +1598,7 @@ def predict_week(fixtures_csv: Path) -> Path:
     
     # Map predictions with all enhancements
     log_header("APPLY ENHANCEMENTS")
-    rows, out_cols = _map_preds_to_columns(models, preds, fx)
+    rows, out_cols = _map_preds_to_columns(models, preds, fx, df_future)
     
     # Create output
     df_out = pd.DataFrame(rows, columns=out_cols)
@@ -1570,16 +1647,23 @@ def predict_week(fixtures_csv: Path) -> Path:
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
 
-    # Calculate max probability across all P_ columns for filtering
-    p_cols = [col for col in df_out.columns if col.startswith('P_')]
-    if p_cols:
-        df_out['MaxConfidence'] = df_out[p_cols].max(axis=1)
+    # Calculate max probability across competitive prediction columns for filtering.
+    # Exclude near-certain markets (OU_0_5) that inflate confidence to ~90.5% for
+    # every match regardless of actual prediction quality.
+    near_certain = {'P_OU_0_5_O', 'P_OU_0_5_U', 'BLEND_OU_0_5_O', 'BLEND_OU_0_5_U'}
+    pred_cols = [col for col in df_out.columns
+                 if (col.startswith('P_') or col.startswith('BLEND_')) and col not in near_certain]
+    if pred_cols:
+        df_out['MaxConfidence'] = df_out[pred_cols].max(axis=1)
 
     # Sort by Date, then League for better readability
     if 'Date' in df_out.columns:
         df_out['Date'] = pd.to_datetime(df_out['Date'], errors='coerce')
         df_out = df_out.sort_values(['Date', 'League'], ascending=[True, True])
         print("[OK] Sorted output by Date and League")
+
+    # Reorder columns: match details first, key markets next, zero/NaN cols last
+    df_out = _reorder_columns(df_out)
 
     # Save full version with all columns (NO FILTER - keep everything)
     output_path_full = OUTPUT_DIR / "weekly_bets_full.csv"

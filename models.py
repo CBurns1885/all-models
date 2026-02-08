@@ -1016,9 +1016,7 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     sub = df.dropna(subset=[target_col]).copy()
     if sub.empty:
         raise RuntimeError(f"No data for target {target_col}")
-    
-    error_count = 0
-    
+
     y = sub[target_col].astype("category")
     classes = list(y.cat.categories)
     y_int = y.cat.codes.values
@@ -1232,10 +1230,14 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 # Model failed in this fold - insert uniform proba to maintain OOF shape
                 print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Using uniform proba.")
                 proba = np.full((len(Xv), len(classes)), 1.0 / len(classes))
-            # align width
+            # align width — map sklearn columns to correct class indices
             if proba.shape[1] != len(classes):
                 P2 = np.zeros((len(Xv), len(classes)))
-                P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
+                model_classes = m.classes_ if hasattr(m, 'classes_') else np.arange(proba.shape[1])
+                for ci, cls_idx in enumerate(model_classes):
+                    cls_int = int(cls_idx)
+                    if 0 <= cls_int < len(classes):
+                        P2[:, cls_int] = proba[:, ci]
                 s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
                 proba = P2 / s
             fold_stack.append(proba)
@@ -1305,20 +1307,23 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 proba = m.predict_proba(X_all)
                 fitted_bases[name] = m
         except Exception as e:
-            # If XGBoost (or any model) fails during final fit, skip it and continue
-            if name == "xgb":
-                print(f"[WARN]  XGBoost failed during final fit: {e}. Continuing without XGBoost.")
-                continue
-            else:
-                print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
-                continue
-        # align width
+            # Model failed during final fit — use uniform proba to maintain
+            # consistent width with OOF (which also uses uniform on failure)
+            print(f"[WARN]  Model {name} failed during final fit: {e}. Using uniform proba.")
+            proba = np.full((len(X_all), len(classes)), 1.0 / len(classes))
+        # align width — map sklearn columns to correct class indices
         if proba.shape[1] != len(classes):
             P2 = np.zeros((len(X_all), len(classes)))
-            P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
+            model_classes = m.classes_ if hasattr(m, 'classes_') else np.arange(proba.shape[1])
+            for ci, cls_idx in enumerate(model_classes):
+                cls_int = int(cls_idx)
+                if 0 <= cls_int < len(classes):
+                    P2[:, cls_int] = proba[:, ci]
             s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
             proba = P2 / s
         full_stack.append(proba)
+    if not full_stack:
+        raise RuntimeError(f"All base models failed for {target_col} — cannot build meta-learner")
     full_stack = np.hstack(full_stack)
     meta.fit(full_stack, y_int)  # refit meta on full stacked features
 

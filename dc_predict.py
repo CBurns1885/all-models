@@ -15,7 +15,14 @@ def build_dc_for_fixtures(fixtures_csv: Path) -> Path:
     rows=[]
     for _,r in fx.iterrows():
         dc={}
-        if r["League"] in params: dc=price_match(params[r["League"]],r["HomeTeam"],r["AwayTeam"])
+        if r["League"] in params:
+            try:
+                dc=price_match(params[r["League"]],r["HomeTeam"],r["AwayTeam"])
+            except Exception as e:
+                print(f"  [WARN] DC price_match failed for {r.get('HomeTeam','?')} vs {r.get('AwayTeam','?')}: {e}")
+                dc={}
+        if not dc:
+            print(f"  [INFO] No DC for {r.get('HomeTeam','?')} vs {r.get('AwayTeam','?')} ({r.get('League','?')})")
         rows.append(dc)
     out=pd.concat([fx.reset_index(drop=True),pd.DataFrame(rows)],axis=1)
     out_path=OUTPUT_DIR/"dc_probabilities.csv"

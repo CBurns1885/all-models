@@ -30,6 +30,8 @@ class TemperatureScaler:
         return softmax(logits / self.T)
 
 def softmax(z):
+    # Replace NaN with 0 before softmax to prevent entire output going NaN
+    z = np.where(np.isnan(z), 0.0, z)
     z = z - z.max(axis=1, keepdims=True)
     e = np.exp(z)
     return e / e.sum(axis=1, keepdims=True)
@@ -50,8 +52,8 @@ class DirichletCalibrator:
         self.lr.fit(X, y)
         return self
     def transform(self, P: np.ndarray):
+        P = np.where(np.isnan(P), 1.0 / P.shape[1], P)  # Replace NaN with uniform
         X = np.log(np.clip(P, 1e-12, 1-1e-12))
-        # predict_proba returns calibrated vector
         return self.lr.predict_proba(X)
 
 
@@ -136,6 +138,12 @@ class IsotonicOrdinalCalibrator:
         if not self.is_fitted:
             raise RuntimeError("Calibrator not fitted")
 
+        # Replace NaN with uniform before calibration
+        nan_mask = np.isnan(P)
+        if nan_mask.any():
+            P = P.copy()
+            P[nan_mask] = 1.0 / P.shape[1]
+
         n_samples = P.shape[0]
 
         if self.method == "cumulative":
@@ -164,7 +172,7 @@ class IsotonicOrdinalCalibrator:
             # Ensure non-negative and normalize
             P_cal = np.maximum(P_cal, 0.0)
             row_sums = P_cal.sum(axis=1, keepdims=True)
-            row_sums[row_sums == 0] = 1.0
+            row_sums[(row_sums == 0) | ~np.isfinite(row_sums)] = 1.0
             P_cal = P_cal / row_sums
 
         elif self.method == "adjacent":
@@ -175,7 +183,7 @@ class IsotonicOrdinalCalibrator:
 
             # Normalize to sum to 1
             row_sums = P_cal.sum(axis=1, keepdims=True)
-            row_sums[row_sums == 0] = 1.0
+            row_sums[(row_sums == 0) | ~np.isfinite(row_sums)] = 1.0
             P_cal = P_cal / row_sums
 
         return P_cal
@@ -251,6 +259,8 @@ class BetaCalibrator:
             p = P
 
         eps = 1e-12
+        # Replace NaN with 0.5 (no information) before calibration
+        p = np.where(np.isnan(p), 0.5, p)
         p = np.clip(p, eps, 1 - eps)
 
         # Apply calibration: logit(p_cal) = a * logit(p) + c
@@ -306,6 +316,7 @@ class PlattScaler:
             p = P
 
         eps = 1e-12
+        p = np.where(np.isnan(p), 0.5, p)
         p = np.clip(p, eps, 1 - eps)
         log_odds = np.log(p / (1 - p))
 
@@ -351,6 +362,11 @@ def get_calibrator_for_market(target_col: str, n_classes: int):
             return DirichletCalibrator()
 
 
+def _is_valid(v):
+    """Check if value is not None and not NaN (NaN != NaN)"""
+    return v is not None and v == v
+
+
 def enforce_calibration_constraints(predictions: dict) -> dict:
     """
     Enforce cross-market mathematical constraints on calibrated predictions
@@ -372,7 +388,7 @@ def enforce_calibration_constraints(predictions: dict) -> dict:
     # --- 1. O/U Over monotonicity: P(O line_i) >= P(O line_{i+1}) ---
     ou_lines = ['0_5', '1_5', '2_5', '3_5', '4_5', '5_5']
     over_keys = [f'P_OU_{l}_O' for l in ou_lines]
-    present_overs = [(k, l) for k, l in zip(over_keys, ou_lines) if k in p and p[k] is not None]
+    present_overs = [(k, l) for k, l in zip(over_keys, ou_lines) if k in p and _is_valid(p[k])]
 
     if len(present_overs) >= 2:
         # Enforce non-increasing order via isotonic projection
@@ -386,10 +402,10 @@ def enforce_calibration_constraints(predictions: dict) -> dict:
                 p[under_k] = 1.0 - v
 
     # --- 2. BTTS consistency with O/U ---
-    if 'P_BTTS_Y' in p and p.get('P_BTTS_Y') is not None:
+    if 'P_BTTS_Y' in p and _is_valid(p.get('P_BTTS_Y')):
         btts_y = p['P_BTTS_Y']
         # BTTS=Yes requires at least 2 goals → must be <= P(Over 1.5)
-        if 'P_OU_1_5_O' in p and p.get('P_OU_1_5_O') is not None:
+        if 'P_OU_1_5_O' in p and _is_valid(p.get('P_OU_1_5_O')):
             if btts_y > p['P_OU_1_5_O']:
                 # Soft adjustment: move both towards average
                 avg = (btts_y + p['P_OU_1_5_O']) / 2
@@ -399,14 +415,14 @@ def enforce_calibration_constraints(predictions: dict) -> dict:
                 p['P_OU_1_5_U'] = 1.0 - p['P_OU_1_5_O']
 
         # If U0.5 is high, BTTS must be near zero
-        if 'P_OU_0_5_U' in p and p.get('P_OU_0_5_U') is not None:
+        if 'P_OU_0_5_U' in p and _is_valid(p.get('P_OU_0_5_U')):
             if p['P_OU_0_5_U'] > 0.5:
                 p['P_BTTS_Y'] = min(p.get('P_BTTS_Y', 0), 0.01)
                 p['P_BTTS_N'] = 1.0 - p['P_BTTS_Y']
 
     # --- 3. 1X2 normalization ---
     hda_keys = ['P_1X2_H', 'P_1X2_D', 'P_1X2_A']
-    if all(k in p and p[k] is not None for k in hda_keys):
+    if all(k in p and _is_valid(p[k]) for k in hda_keys):
         total = sum(p[k] for k in hda_keys)
         if total > 0:
             for k in hda_keys:
@@ -416,7 +432,7 @@ def enforce_calibration_constraints(predictions: dict) -> dict:
     for prefix in ['P_HomeTG_', 'P_AwayTG_']:
         tg_lines = ['0_5', '1_5', '2_5', '3_5']
         tg_overs = [(f'{prefix}{l}_O', l) for l in tg_lines]
-        present_tg = [(k, l) for k, l in tg_overs if k in p and p[k] is not None]
+        present_tg = [(k, l) for k, l in tg_overs if k in p and _is_valid(p[k])]
         if len(present_tg) >= 2:
             vals = [p[k] for k, _ in present_tg]
             adjusted = _isotonic_decreasing(vals)
@@ -428,11 +444,11 @@ def enforce_calibration_constraints(predictions: dict) -> dict:
 
     # --- 5. CS 0-0 must not exceed Under 0.5 ---
     if 'P_CS_0_0' in p and 'P_OU_0_5_U' in p:
-        if p.get('P_CS_0_0') is not None and p.get('P_OU_0_5_U') is not None:
+        if _is_valid(p.get('P_CS_0_0')) and _is_valid(p.get('P_OU_0_5_U')):
             p['P_CS_0_0'] = min(p['P_CS_0_0'], p['P_OU_0_5_U'])
 
     # --- 6. BTTS and team goals consistency ---
-    if all(k in p and p.get(k) is not None for k in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
+    if all(k in p and _is_valid(p.get(k)) for k in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
         min_btts = p['P_HomeTG_0_5_O'] * p['P_AwayTG_0_5_O']
         p['P_BTTS_Y'] = max(p['P_BTTS_Y'], min_btts * 0.85)
         p['P_BTTS_N'] = 1.0 - p['P_BTTS_Y']

@@ -26,7 +26,7 @@ def needs_retraining(models_dir: Path = MODEL_ARTIFACTS_DIR, days_threshold: int
     try:
         df = _load_features()
         current_leagues = sorted(df['League'].unique().tolist()) if 'League' in df.columns else []
-    except:
+    except Exception:
         current_leagues = []
 
     current_settings = {

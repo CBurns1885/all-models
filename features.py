@@ -253,7 +253,7 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         team_df[f"GF_ma{w}"] = rolled["GoalsFor"].mean()
         team_df[f"GA_ma{w}"] = rolled["GoalsAgainst"].mean()
         team_df[f"GD_ma{w}"] = team_df[f"GF_ma{w}"] - team_df[f"GA_ma{w}"]
-        team_df[f"PPG_ma{w}"] = (rolled["Win"].sum() * 3 + rolled["Draw"].sum()) / w
+        team_df[f"PPG_ma{w}"] = (rolled["Win"].sum() * 3 + rolled["Draw"].sum()) / rolled["Win"].count().clip(lower=1)
         
         # Shot stats
         for col in ["Shots","ShotsT","Corners","CardsY","CardsR"]:
@@ -276,7 +276,10 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
     ew = team_df.shift(1).ewm(span=EWM_SPAN, adjust=False)
     team_df["GF_ewm"] = ew["GoalsFor"].mean()
     team_df["GA_ewm"] = ew["GoalsAgainst"].mean()
-    team_df["PPG_ewm"] = (ew["Win"].mean() * 3 + ew["Draw"].mean())
+    # Compute EWM of actual points sequence (not of Win/Draw separately)
+    shifted = team_df.shift(1)
+    points = shifted["Win"] * 3 + shifted["Draw"]
+    team_df["PPG_ewm"] = points.ewm(span=EWM_SPAN, adjust=False).mean()
     
     if "xG" in team_df.columns and team_df["xG"].notna().any():
         team_df["xG_ewm"] = ew["xG"].mean()
@@ -614,7 +617,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     # ===========================================================================
 
     # 1X2 Match Result
-    out["y_1X2"] = out["FTR"].astype(str)
+    out["y_1X2"] = out["FTR"].where(out["FTR"].notna()).astype(object)
 
     # BTTS (Both Teams To Score)
     btts = (out["FTHG"] > 0) & (out["FTAG"] > 0)
@@ -627,7 +630,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
 
     # Goal Range (0, 1, 2, 3, 4, 5+)
     bins = pd.cut(total, bins=[-1,0,1,2,3,4,100], labels=["0","1","2","3","4","5+"])
-    out["y_GOAL_RANGE"] = bins.astype(str)
+    out["y_GOAL_RANGE"] = bins.where(bins.notna()).astype(object)
 
     # Exact Total Goals (0, 1, 2, 3, 4, 5, 6+)
     out["y_ExactTotal_0"] = np.where(total == 0, "Y", "N")
@@ -686,7 +689,10 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
         out["y_HT"] = out.apply(get_ht_result, axis=1)
 
         # HT/FT combo
-        out["y_HTFT"] = out["y_HT"].astype(str) + "-" + out["FTR"].astype(str)
+        # Preserve NaN for rows with missing FTR/HT data
+        ht_str = out["y_HT"].where(out["y_HT"].notna())
+        ftr_str = out["FTR"].where(out["FTR"].notna())
+        out["y_HTFT"] = (ht_str + "-" + ftr_str).where(ht_str.notna() & ftr_str.notna())
 
         # HT Over/Under
         out["y_HT_OU_0_5"] = np.where(ht_total > 0.5, "O", "U")

@@ -87,15 +87,16 @@ def extract_ou_predictions(df: pd.DataFrame, min_confidence: float = DEFAULT_CON
                     pred['Line'] = line_display
                     pred['Selection'] = 'Over'
                     pred['DC_Prob'] = dc_prob
-                    pred['Blend_Prob'] = blend_prob if pd.notna(blend_prob) else dc_prob
-                    pred['Best_Prob'] = max(dc_prob, blend_prob if pd.notna(blend_prob) else 0)
-                    pred['Source'] = 'DC' if dc_prob > blend_prob else 'Blend'
+                    blend_valid = pd.notna(blend_prob) and blend_prob > 0
+                    pred['Blend_Prob'] = blend_prob if blend_valid else dc_prob
+                    pred['Best_Prob'] = max(dc_prob, blend_prob) if blend_valid else dc_prob
+                    pred['Source'] = 'Blend' if blend_valid and blend_prob >= dc_prob else 'DC'
                     ou_predictions.append(pred)
-            
+
             # Under predictions
             dc_under_col = f'DC_OU_{line}_U'
             blend_under_col = f'BLEND_OU_{line}_U'
-            
+
             if dc_under_col in df.columns:
                 dc_prob = row.get(dc_under_col, 0)
                 blend_prob = row.get(blend_under_col, 0) if blend_under_col in df.columns else 0
@@ -105,9 +106,10 @@ def extract_ou_predictions(df: pd.DataFrame, min_confidence: float = DEFAULT_CON
                     pred['Line'] = line_display
                     pred['Selection'] = 'Under'
                     pred['DC_Prob'] = dc_prob
-                    pred['Blend_Prob'] = blend_prob if pd.notna(blend_prob) else dc_prob
-                    pred['Best_Prob'] = max(dc_prob, blend_prob if pd.notna(blend_prob) else 0)
-                    pred['Source'] = 'DC' if dc_prob > blend_prob else 'Blend'
+                    blend_valid = pd.notna(blend_prob) and blend_prob > 0
+                    pred['Blend_Prob'] = blend_prob if blend_valid else dc_prob
+                    pred['Best_Prob'] = max(dc_prob, blend_prob) if blend_valid else dc_prob
+                    pred['Source'] = 'Blend' if blend_valid and blend_prob >= dc_prob else 'DC'
                     ou_predictions.append(pred)
     
     if ou_predictions:
@@ -341,11 +343,11 @@ def _generate_html_report(df: pd.DataFrame, historical: dict, min_conf: float):
             <div class='stat-value'>{total}</div>
         </div>
         <div class='stat-card'>
-            <div class='stat-label'>Elite Confidence (85%+)</div>
+            <div class='stat-label'>Elite Confidence (95%+)</div>
             <div class='stat-value'>{elite_conf}</div>
         </div>
         <div class='stat-card'>
-            <div class='stat-label'>High Confidence (75%+)</div>
+            <div class='stat-label'>High Confidence (92%+)</div>
             <div class='stat-value'>{high_conf}</div>
         </div>
         <div class='stat-card'>
@@ -445,8 +447,8 @@ def _generate_html_report(df: pd.DataFrame, historical: dict, min_conf: float):
         <p><span class='badge blend-badge'>BLEND</span> Blended ML + DC probability</p>
         <p><span class='badge over-badge'>Over</span> Over line prediction</p>
         <p><span class='badge under-badge'>Under</span> Under line prediction</p>
-        <p><strong>Green rows:</strong> Elite confidence (85%+)</p>
-        <p><strong>Yellow rows:</strong> High confidence (75-84%)</p>
+        <p><strong>Green rows:</strong> Elite confidence (95%+)</p>
+        <p><strong>Yellow rows:</strong> High confidence (92-94%)</p>
     </div>
 </body>
 </html>
@@ -480,8 +482,6 @@ def _generate_csv_report(df: pd.DataFrame):
     df_export = df_export.sort_values(['Date', 'League', 'Best_Prob_%'], ascending=[True, True, False])
     
     df_export.to_csv(OU_REPORT_CSV, index=False)
-    print(f"CSV report: {OU_REPORT_CSV}")
-
     print(f"CSV report: {OU_REPORT_CSV}")
 
 

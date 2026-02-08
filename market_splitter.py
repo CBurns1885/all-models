@@ -241,7 +241,8 @@ class MarketSplitter:
                 sort_cols.append('League')
             if 'Confidence' in market_df.columns:
                 sort_cols.append('Confidence')
-                market_df = market_df.sort_values(sort_cols, ascending=[True, True, False])
+                asc = [True] * (len(sort_cols) - 1) + [False]  # All ascending except Confidence (descending)
+                market_df = market_df.sort_values(sort_cols, ascending=asc)
             elif sort_cols:
                 market_df = market_df.sort_values(sort_cols)
 
@@ -367,8 +368,8 @@ class MarketSplitter:
         """Generate HTML report for a market"""
         # Summary stats
         total_matches = len(df)
-        high_confidence = len(df[df.get('Confidence', 0) >= 0.75]) if 'Confidence' in df.columns else 0
-        elite_confidence = len(df[df.get('Confidence', 0) >= 0.85]) if 'Confidence' in df.columns else 0
+        high_confidence = len(df[df['Confidence'] >= 0.75]) if 'Confidence' in df.columns else 0
+        elite_confidence = len(df[df['Confidence'] >= 0.85]) if 'Confidence' in df.columns else 0
 
         # Group by league
         league_counts = df.groupby('League').size().to_dict() if 'League' in df.columns else {}

@@ -407,7 +407,7 @@ def build_historical_from_api(
 
     # Show xG availability
     xg_available = df['home_xG'].notna().sum()
-    print(f"  xG available: {xg_available}/{len(df)} fixtures ({xg_available/len(df)*100:.1f}%)")
+    print(f"  xG available: {xg_available}/{len(df)} fixtures ({xg_available/max(len(df),1)*100:.1f}%)")
 
     return out_path
 
