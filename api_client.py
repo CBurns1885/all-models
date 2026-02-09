@@ -1044,6 +1044,120 @@ def fetch_odds_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def backfill_historic_odds(
+    leagues: List[str] = None,
+    seasons: List[int] = None,
+    max_fixtures: int = None,
+    dry_run: bool = False
+) -> int:
+    """
+    Backfill bookmaker odds for historic completed fixtures.
+
+    Resumable: skips fixtures that already have odds in fixture_odds table.
+
+    Args:
+        leagues: League codes to backfill (default: all in DB)
+        seasons: Seasons to backfill (default: all in DB)
+        max_fixtures: Stop after this many API calls (for quota management)
+        dry_run: If True, count fixtures needing odds without calling API
+
+    Returns:
+        Number of fixtures successfully backfilled
+    """
+    _init_database()
+    conn = sqlite3.connect(API_FOOTBALL_DB)
+
+    # Build WHERE clause for optional league/season filtering
+    conditions = ["f.status = 'FT'"]
+    params = []
+    if leagues:
+        placeholders = ','.join(['?'] * len(leagues))
+        conditions.append(f"f.league_code IN ({placeholders})")
+        params.extend(leagues)
+    if seasons:
+        placeholders = ','.join(['?'] * len(seasons))
+        conditions.append(f"f.season IN ({placeholders})")
+        params.extend(seasons)
+
+    where = ' AND '.join(conditions)
+
+    # Find fixtures without odds (resumable)
+    query = f"""
+        SELECT f.fixture_id, f.date, f.league_code, f.home_team, f.away_team
+        FROM fixtures f
+        LEFT JOIN (
+            SELECT DISTINCT fixture_id FROM fixture_odds
+        ) fo ON f.fixture_id = fo.fixture_id
+        WHERE {where}
+          AND fo.fixture_id IS NULL
+        ORDER BY f.date DESC
+    """
+    df = pd.read_sql_query(query, conn, params=params)
+
+    # Also count fixtures that already have odds
+    count_query = f"""
+        SELECT COUNT(DISTINCT fo.fixture_id) as with_odds
+        FROM fixture_odds fo
+        JOIN fixtures f ON fo.fixture_id = f.fixture_id
+        WHERE {where.replace('fo.fixture_id IS NULL', '1=1')}
+    """
+    try:
+        already = pd.read_sql_query(count_query, conn, params=params).iloc[0]['with_odds']
+    except Exception:
+        already = 0
+
+    conn.close()
+
+    total_needed = len(df)
+    print(f"\n[ODDS BACKFILL] Historic Odds Status:")
+    print(f"  Fixtures needing odds: {total_needed}")
+    print(f"  Fixtures already have odds: {already}")
+    if leagues:
+        print(f"  Leagues: {leagues}")
+    if seasons:
+        print(f"  Seasons: {seasons}")
+
+    if dry_run:
+        if total_needed > 0:
+            est_minutes = total_needed * 0.6 / 60  # ~0.6s per call including processing
+            print(f"  Estimated time: ~{est_minutes:.0f} minutes")
+            print(f"  API calls needed: {total_needed}")
+        return 0
+
+    if total_needed == 0:
+        print("[OK] All fixtures already have odds!")
+        return 0
+
+    if max_fixtures:
+        to_fetch = min(total_needed, max_fixtures)
+        df = df.head(to_fetch)
+        print(f"  Limiting to {to_fetch} fixtures (--max-fixtures)")
+    else:
+        to_fetch = total_needed
+
+    print(f"\n  Starting backfill of {to_fetch} fixtures...\n")
+
+    success = 0
+    failed = 0
+    for i, (_, row) in enumerate(df.iterrows()):
+        fixture_id = int(row['fixture_id'])
+        odds = fetch_odds_for_fixture(fixture_id)
+
+        if odds:
+            success += 1
+        else:
+            failed += 1
+
+        if (i + 1) % 50 == 0 or i == to_fetch - 1:
+            pct = (i + 1) / to_fetch * 100
+            remaining = to_fetch - (i + 1)
+            eta_min = remaining * 0.6 / 60
+            print(f"  [{i+1}/{to_fetch}] {pct:.1f}% | {success} with odds, {failed} empty | ETA: ~{eta_min:.0f}m")
+
+    print(f"\n[OK] Backfill complete: {success} fixtures with odds, {failed} empty/unavailable")
+    return success
+
+
 def get_database_stats() -> Dict:
     """
     Get statistics about the current database
@@ -1137,8 +1251,16 @@ if __name__ == "__main__":
                        help='Download data for missing leagues (cups, smaller leagues)')
     parser.add_argument('--download-all', action='store_true',
                        help='Download all configured leagues')
+    parser.add_argument('--backfill-odds', action='store_true',
+                       help='Backfill historic bookmaker odds for completed fixtures')
+    parser.add_argument('--max-fixtures', type=int, default=None,
+                       help='Max fixtures to fetch odds for (API quota management)')
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Count fixtures needing odds without calling API')
     parser.add_argument('--seasons', nargs='+', type=int, default=None,
                        help='Seasons to download (e.g., 2023 2024 2025)')
+    parser.add_argument('--leagues', nargs='+', type=str, default=None,
+                       help='League codes to filter (e.g., E0 D1 SP1)')
     args = parser.parse_args()
 
     print("="*60)
@@ -1162,7 +1284,14 @@ if __name__ == "__main__":
             _init_database()
 
         # Handle command line options
-        if args.download_missing:
+        if args.backfill_odds:
+            backfill_historic_odds(
+                leagues=args.leagues,
+                seasons=args.seasons,
+                max_fixtures=args.max_fixtures,
+                dry_run=args.dry_run
+            )
+        elif args.download_missing:
             download_missing_leagues(seasons=args.seasons)
         elif args.download_all:
             from config import LEAGUE_CODES

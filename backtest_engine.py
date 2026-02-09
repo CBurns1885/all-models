@@ -208,9 +208,23 @@ class BacktestEngine:
             if brier_scores:
                 market_results['brier_score'] = np.mean(brier_scores)
             
-            # Simple profit calculation (assuming odds of 2.0 for correct predictions)
-            # In real backtest, you'd use actual odds
-            market_results['profit'] = correct - len(actual)  # Units won/lost
+            # Profit calculation using actual bookmaker odds where available
+            try:
+                from odds_utils import get_odds_for_prediction
+                profit = 0.0
+                for idx in actual.index:
+                    pred_out = pred_class.get(idx)
+                    if pred_out is None:
+                        continue
+                    actual_odds = get_odds_for_prediction(predictions.loc[idx], market, pred_out)
+                    bet_odds = actual_odds if actual_odds is not None else 2.0
+                    if pred_out == actual[idx]:
+                        profit += (bet_odds - 1.0)
+                    else:
+                        profit -= 1.0
+                market_results['profit'] = profit
+            except ImportError:
+                market_results['profit'] = correct * 2 - len(actual)
             
             results['markets'][market] = market_results
         
@@ -258,7 +272,14 @@ class BacktestEngine:
             
             # Generate predictions
             predictions = self.predict_period(models, test_df)
-            
+
+            # Merge bookmaker odds for realistic ROI
+            try:
+                from odds_utils import merge_odds_into_df
+                predictions = merge_odds_into_df(predictions)
+            except Exception:
+                pass
+
             # Evaluate
             period_results = self.evaluate_predictions(predictions)
             period_results['period_start'] = test_start

@@ -38,6 +38,7 @@ def get_fixtures_from_db(
     # Build query - join match_stats for home and away team statistics
     query = """
         SELECT
+            f.fixture_id as fixture_id,
             f.league_code as League,
             f.season as Season,
             f.date as Date,
@@ -375,7 +376,7 @@ def build_historical_from_api(
 
     # Ensure expected column order (for compatibility)
     expected_cols = [
-        'League', 'Date', 'Season', 'HomeTeam', 'AwayTeam',
+        'fixture_id', 'League', 'Date', 'Season', 'HomeTeam', 'AwayTeam',
         'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG',
         'B365H', 'B365D', 'B365A', 'PSCH', 'PSCD', 'PSCA',
         'home_xG', 'away_xG', 'league_type', 'referee', 'venue_name',
