@@ -376,6 +376,13 @@ class MarketBacktester:
 
         print(f"[OK] Matched {len(merged)} predictions with results")
 
+        # Merge bookmaker odds for realistic ROI
+        try:
+            from odds_utils import merge_odds_into_df
+            merged = merge_odds_into_df(merged)
+        except Exception as e:
+            print(f"[INFO] Odds not available for backtest: {e}")
+
         # Evaluate each market
         print("\n[4/5] Evaluating market performance...")
         print("="*60)
@@ -388,7 +395,10 @@ class MarketBacktester:
             if 'error' in result:
                 print(f"  {market_name:20s} [SKIP] {result['error']}")
             else:
-                print(f"  {market_name:20s} [OK] {result['total_predictions']:4d} predictions, {result['accuracy']:5.1%} accuracy, ROI: {result['roi']:+6.1f}%")
+                roi_str = f"Fair: {result['roi_fair']:+6.1f}%"
+                if result.get('roi_actual') is not None:
+                    roi_str += f" | Actual: {result['roi_actual']:+6.1f}% ({result['odds_coverage']:.0%} coverage)"
+                print(f"  {market_name:20s} [OK] {result['total_predictions']:4d} preds, {result['accuracy']:5.1%} acc, {roi_str}")
 
         # Convert to DataFrame
         df_results = pd.DataFrame(market_results)
@@ -485,6 +495,13 @@ class MarketBacktester:
             suffixes=('_pred', '_actual')
         )
 
+        # Preserve fixture_id for odds lookup (may come from results side as _actual suffix)
+        if 'fixture_id' not in merged.columns:
+            if 'fixture_id_actual' in merged.columns:
+                merged['fixture_id'] = merged['fixture_id_actual']
+            elif 'fixture_id_pred' in merged.columns:
+                merged['fixture_id'] = merged['fixture_id_pred']
+
         print(f"[OK] Matched {len(merged)} predictions with actual results")
         return merged
 
@@ -537,8 +554,8 @@ class MarketBacktester:
 
         brier_score = np.mean(brier_scores) if brier_scores else np.nan
 
-        # Calculate ROI (assuming unit stakes at fair odds)
-        roi = self.calculate_roi(df_market, pred_cols, actual_col, outcomes)
+        # Calculate ROI using actual bookmaker odds where available
+        roi_result = self.calculate_roi(df_market, pred_cols, actual_col, outcomes, market_name=market_name)
 
         # Confidence distribution
         conf_bins = {
@@ -554,20 +571,31 @@ class MarketBacktester:
             'correct_predictions': int(correct),
             'accuracy': accuracy,
             'brier_score': brier_score,
-            'roi': roi,
+            'roi_fair': roi_result['roi_fair'],
+            'roi_actual': roi_result['roi_actual'],
+            'odds_coverage': roi_result['odds_coverage'],
             'avg_confidence': df_market['MaxProb'].mean(),
             'confidence_distribution': conf_bins,
             'type': config['type']
         }
 
     def calculate_roi(self, df: pd.DataFrame, pred_cols: List[str],
-                     actual_col: str, outcomes: List[str]) -> float:
+                     actual_col: str, outcomes: List[str],
+                     market_name: str = None) -> dict:
         """
-        Calculate ROI assuming betting at fair odds
-        Fair odds = 1 / predicted_probability
+        Calculate ROI using actual bookmaker odds where available,
+        falling back to fair odds (1/probability) otherwise.
+
+        Returns dict with roi_actual (bookmaker odds), roi_fair (model odds),
+        and odds_coverage (fraction with real odds).
         """
-        total_stake = 0
-        total_return = 0
+        from odds_utils import get_odds_for_prediction
+
+        total_stake_actual = 0
+        total_return_actual = 0
+        total_stake_fair = 0
+        total_return_fair = 0
+        bets_with_odds = 0
 
         for idx, row in df.iterrows():
             # Get predicted outcome and its probability
@@ -576,28 +604,39 @@ class MarketBacktester:
             pred_outcome = outcomes[pred_idx]
             pred_prob = pred_probs[pred_idx]
 
-            # Fair odds
-            if pred_prob > 0:
-                fair_odds = 1.0 / pred_prob
-            else:
+            if pred_prob <= 0:
                 continue
 
-            # Actual outcome
             actual_outcome = str(row[actual_col])
+            fair_odds = 1.0 / pred_prob
 
-            # Calculate return
-            stake = 1.0
-            total_stake += stake
+            # Look up actual bookmaker odds
+            actual_odds = None
+            if market_name is not None:
+                actual_odds = get_odds_for_prediction(row, market_name, pred_outcome)
 
+            # Fair odds ROI (always calculated)
+            total_stake_fair += 1.0
             if pred_outcome == actual_outcome:
-                total_return += stake * fair_odds
+                total_return_fair += fair_odds
 
-        if total_stake > 0:
-            roi = ((total_return - total_stake) / total_stake) * 100
-        else:
-            roi = 0.0
+            # Actual odds ROI (when available)
+            if actual_odds is not None:
+                bets_with_odds += 1
+                total_stake_actual += 1.0
+                if pred_outcome == actual_outcome:
+                    total_return_actual += actual_odds
 
-        return roi
+        roi_fair = ((total_return_fair - total_stake_fair) / total_stake_fair * 100) if total_stake_fair > 0 else 0.0
+        roi_actual = ((total_return_actual - total_stake_actual) / total_stake_actual * 100) if total_stake_actual > 0 else None
+        coverage = bets_with_odds / total_stake_fair if total_stake_fair > 0 else 0.0
+
+        return {
+            'roi_fair': roi_fair,
+            'roi_actual': roi_actual,
+            'odds_coverage': coverage,
+            'bets_with_odds': bets_with_odds,
+        }
 
     def run_analysis(self, output_dir: Path = OUTPUT_DIR) -> pd.DataFrame:
         """Run complete multi-market analysis"""
@@ -648,6 +687,13 @@ class MarketBacktester:
             print("\n[TIP] Wait for matches to complete, then run backtest again")
             print("[TIP] Or use older prediction folders that have completed matches")
             return pd.DataFrame()
+
+        # Merge bookmaker odds for realistic ROI
+        try:
+            from odds_utils import merge_odds_into_df
+            merged = merge_odds_into_df(merged)
+        except Exception as e:
+            print(f"[INFO] Odds not available: {e}")
 
         # Evaluate each market
         print("\n" + "="*60)
@@ -842,7 +888,7 @@ class MarketBacktester:
             total = int(row['total_predictions'])
             accuracy = row['accuracy']
             brier = row['brier_score']
-            roi = row['roi']
+            roi = row.get('roi_actual') if pd.notna(row.get('roi_actual')) else row.get('roi_fair', 0)
             avg_conf = row['avg_confidence']
 
             # Accuracy class
@@ -883,7 +929,8 @@ class MarketBacktester:
 
         good_markets = df[df['accuracy'] >= 0.60]
         for idx, row in good_markets.iterrows():
-            html += f"<li><strong>{row['market']}</strong>: {row['accuracy']:.1%} accuracy, {int(row['total_predictions'])} predictions, ROI: {row['roi']:+.1f}%</li>\n"
+            roi_val = row.get('roi_actual') if pd.notna(row.get('roi_actual')) else row.get('roi_fair', 0)
+            html += f"<li><strong>{row['market']}</strong>: {row['accuracy']:.1%} accuracy, {int(row['total_predictions'])} predictions, ROI: {roi_val:+.1f}%</li>\n"
 
         html += """
         </ul>
@@ -931,7 +978,8 @@ def run_market_backtest(weeks: int = 4, min_confidence: float = 0.90, use_histor
         print("TOP 10 MARKETS BY ACCURACY")
         print("="*60)
         for idx, row in results.head(10).iterrows():
-            print(f"{list(results.index).index(idx)+1:2d}. {row['market']:20s} - {row['accuracy']:.1%} ({int(row['total_predictions'])} predictions, ROI: {row['roi']:+.1f}%)")
+            roi_val = row.get('roi_actual') if pd.notna(row.get('roi_actual')) else row.get('roi_fair', 0)
+            print(f"{list(results.index).index(idx)+1:2d}. {row['market']:20s} - {row['accuracy']:.1%} ({int(row['total_predictions'])} predictions, ROI: {roi_val:+.1f}%)")
 
         print("\n" + "="*60)
         print("ANALYSIS COMPLETE")

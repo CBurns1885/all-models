@@ -279,9 +279,29 @@ class BacktestEngine:
             
             brier = np.mean(brier_scores) if brier_scores else 0
             
-            # ROI calculation (simplified - assumes even odds)
-            roi = ((correct / total) - 0.5) * 100 if total > 0 else 0
-            
+            # ROI calculation using actual bookmaker odds where available
+            try:
+                from odds_utils import get_odds_for_prediction
+                profit = 0.0
+                bets_with_odds = 0
+                for idx in actual.index:
+                    pred_out = predicted.get(idx)
+                    if pred_out is None:
+                        continue
+                    actual_odds = get_odds_for_prediction(df.loc[idx], market_name, pred_out)
+                    if actual_odds is not None:
+                        bets_with_odds += 1
+                        bet_odds = actual_odds
+                    else:
+                        bet_odds = 2.0  # fallback to even money
+                    if pred_out == actual[idx]:
+                        profit += (bet_odds - 1.0)
+                    else:
+                        profit -= 1.0
+                roi = (profit / total * 100) if total > 0 else 0
+            except ImportError:
+                roi = ((correct / total) - 0.5) * 100 if total > 0 else 0
+
             results['markets'][market_name] = {
                 'total': int(total),
                 'correct': int(correct),
@@ -340,9 +360,16 @@ class BacktestEngine:
                 continue
             
             # Generate predictions
-            print(f"   🔮 Generating predictions...")
+            print(f"   Generating predictions...")
             test_with_preds = self.generate_predictions(test_df)
-            
+
+            # Merge bookmaker odds for realistic ROI
+            try:
+                from odds_utils import merge_odds_into_df
+                test_with_preds = merge_odds_into_df(test_with_preds)
+            except Exception:
+                pass
+
             # Evaluate
             period_results = self.evaluate_predictions(test_with_preds)
             period_results['period_start'] = test_start
@@ -388,8 +415,15 @@ class BacktestEngine:
             
             if total_matches > 0:
                 accuracy = total_correct / total_matches
-                roi = ((accuracy - 0.5) * 100)
-                
+
+                # Aggregate ROI from individual period results
+                total_roi_sum = sum(
+                    result['markets'][market].get('roi_pct', 0)
+                    for result in self.results
+                    if market in result.get('markets', {})
+                )
+                roi = total_roi_sum / len([r for r in self.results if market in r.get('markets', {})])
+
                 market_summary[market] = {
                     'Total_Matches': total_matches,
                     'Correct': total_correct,
@@ -397,9 +431,12 @@ class BacktestEngine:
                     'Brier_Score': round(np.mean(brier_scores), 3),
                     'ROI_%': round(roi, 1)
                 }
-        
+
         summary_df = pd.DataFrame.from_dict(market_summary, orient='index')
-        summary_df = summary_df.sort_values('Accuracy', ascending=False)
+        if 'Accuracy_%' in summary_df.columns:
+            summary_df = summary_df.sort_values('Accuracy_%', ascending=False)
+        elif len(summary_df) > 0:
+            summary_df = summary_df.sort_values('Accuracy_%', ascending=False)
         
         print("\n📊 OVERALL MARKET PERFORMANCE:")
         print(summary_df.to_string())

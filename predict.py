@@ -547,12 +547,33 @@ def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
     ]
     key_markets = [c for c in market_order if c in all_cols]
 
+    # 2b. Odds columns paired with their markets
+    odds_order = [
+        # 1X2 odds
+        "ODDS_1X2_H", "ODDS_1X2_D", "ODDS_1X2_A",
+        # BTTS odds
+        "ODDS_BTTS_Y", "ODDS_BTTS_N",
+        # OU odds (key lines)
+        "ODDS_OU_0_5_O", "ODDS_OU_0_5_U",
+        "ODDS_OU_1_5_O", "ODDS_OU_1_5_U",
+        "ODDS_OU_2_5_O", "ODDS_OU_2_5_U",
+        "ODDS_OU_3_5_O", "ODDS_OU_3_5_U",
+        "ODDS_OU_4_5_O", "ODDS_OU_4_5_U",
+        "ODDS_OU_5_5_O", "ODDS_OU_5_5_U",
+        # Double Chance odds
+        "ODDS_DC_1X", "ODDS_DC_12", "ODDS_DC_X2",
+    ]
+    odds_named = [c for c in odds_order if c in all_cols]
+    # Also grab any remaining ODDS_ columns not explicitly listed (AH, HTFT, etc.)
+    odds_extra = [c for c in all_cols if c.startswith("ODDS_") and c not in odds_named]
+    odds_cols_ordered = odds_named + sorted(odds_extra)
+
     # 3. Confidence/meta columns
     meta_cols = [c for c in all_cols if c.startswith("CONF_") or c.startswith("AGREE_")
                  or c in ("MaxConfidence", "AvgConfidence", "BestProb", "BestMarket")]
     meta = [c for c in meta_cols if c in all_cols]
 
-    used = set(first + key_markets + meta)
+    used = set(first + key_markets + odds_cols_ordered + meta)
 
     # 4. Remaining columns that have real data (at least one non-zero, non-NaN value)
     remaining = [c for c in all_cols if c not in used]
@@ -566,7 +587,7 @@ def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
         else:
             all_zero_or_nan.append(c)
 
-    ordered = first + key_markets + meta + has_data + all_zero_or_nan
+    ordered = first + key_markets + odds_cols_ordered + meta + has_data + all_zero_or_nan
     return df[ordered]
 
 
@@ -1642,6 +1663,16 @@ def predict_week(fixtures_csv: Path) -> Path:
             if col.startswith('P_') or col.startswith('BLEND_'):
                 df_out.at[idx, col] = constrained[col]
     print(f"[OK] Re-enforced constraints on {len(df_out)} rows")
+
+    # Merge odds from fixtures (if available from API-Football)
+    log_header("MERGE BOOKMAKER ODDS")
+    odds_cols = [c for c in fx.columns if c.startswith('ODDS_')]
+    if odds_cols:
+        for col in odds_cols:
+            df_out[col] = fx[col].values[:len(df_out)]
+        print(f"[OK] Merged {len(odds_cols)} odds columns from API-Football")
+    else:
+        print("[INFO] No odds data available in fixtures")
 
     # Calculate confidence scores
     log_header("CALCULATE CONFIDENCE")
