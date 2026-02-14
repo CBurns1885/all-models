@@ -247,117 +247,60 @@ PRETUNED_PARAMS = {
 # MARKET TIERS - Focused on high-value betting markets
 # ============================================================================
 
-CORE_MARKETS = [
-    # Match Result
-    "y_1X2",        # Match result - most important
+# PRIMARY TRAINED MARKETS — only these get their own ML model.
+# Every market here has a genuinely independent signal worth learning.
+# Everything else (DC, DNB, combos) is DERIVED from these mathematically.
+PRIMARY_TRAINED_MARKETS = [
+    # Match Result — the foundation; DC & DNB are derived from its probs
+    "y_1X2",
 
-    # Goals Markets (most popular)
-    "y_BTTS",       # Both teams to score
-    "y_OU_0_5",     # Over/Under 0.5
-    "y_OU_1_5",     # Over/Under 1.5
-    "y_OU_2_5",     # Over/Under 2.5 - most popular
-    "y_OU_3_5",     # Over/Under 3.5
-    "y_OU_4_5",     # Over/Under 4.5
-    "y_GOAL_RANGE", # Goal bands
+    # Goals Markets — each O/U line is its own binary classification
+    "y_BTTS",
+    "y_OU_0_5",
+    "y_OU_1_5",
+    "y_OU_2_5",      # most popular line
+    "y_OU_3_5",
+    "y_OU_4_5",
 
-    # Double Chance
-    "y_DC_1X",      # Home or Draw
-    "y_DC_X2",      # Away or Draw
-    "y_DC_12",      # Home or Away (no draw)
-
-    # Draw No Bet
-    "y_DNB_H",
-    "y_DNB_A",
-
-    # Team Goals
-    "y_HomeTG_0_5", "y_HomeTG_1_5", "y_HomeTG_2_5",
-    "y_AwayTG_0_5", "y_AwayTG_1_5", "y_AwayTG_2_5",
-
-    # To Score
-    "y_HomeToScore",
-    "y_AwayToScore",
-
-    # Asian Handicap (core lines)
-    "y_AH_-0_5", "y_AH_0_0", "y_AH_+0_5",
-    "y_AH_-1_0", "y_AH_+1_0",
-
-    # Win to Nil
-    "y_HomeWTN",
-    "y_AwayWTN",
-
-    # Multi-goal
-    "y_Match2+Goals",
-    "y_Match3+Goals",
+    # Team-specific goals (independent signal from total goals)
+    "y_HomeTG_0_5",
+    "y_HomeTG_1_5",
+    "y_AwayTG_0_5",
+    "y_AwayTG_1_5",
 ]
+# 12 models total — focused, fast, each with real independent signal
 
-SECONDARY_MARKETS = [
-    # Extended Asian Handicap
-    "y_AH_-1_5", "y_AH_-2_0", "y_AH_+1_5", "y_AH_+2_0",
+# DERIVED MARKETS — NOT trained, computed from PRIMARY predictions:
+#   y_DC_1X   = P(H) + P(D)                from y_1X2
+#   y_DC_X2   = P(D) + P(A)                from y_1X2
+#   y_DC_12   = P(H) + P(A)                from y_1X2
+#   y_DNB_H   = P(H) / (P(H) + P(A))      from y_1X2 (exclude draw)
+#   y_DNB_A   = P(A) / (P(H) + P(A))      from y_1X2 (exclude draw)
+#   y_HomeToScore = P(HomeTG > 0.5)        = y_HomeTG_0_5 Over
+#   y_AwayToScore = P(AwayTG > 0.5)        = y_AwayTG_0_5 Over
+#   y_HomeWin_BTTS_Y  = P(H) * P(BTTS_Y)  approx, from y_1X2 + y_BTTS
+#   y_HomeCS  = P(AwayTG < 0.5)            = y_AwayTG_0_5 Under
+#   y_AwayCS  = P(HomeTG < 0.5)            = y_HomeTG_0_5 Under
+#   etc.
 
-    # Team exact goals
-    "y_HomeExact_0", "y_HomeExact_1", "y_HomeExact_2", "y_HomeExact_3+",
-    "y_AwayExact_0", "y_AwayExact_1", "y_AwayExact_2", "y_AwayExact_3+",
+# Legacy names kept for backward compatibility
+CORE_MARKETS = PRIMARY_TRAINED_MARKETS
 
-    # Exact total goals
-    "y_ExactTotal_0", "y_ExactTotal_1", "y_ExactTotal_2",
-    "y_ExactTotal_3", "y_ExactTotal_4", "y_ExactTotal_5", "y_ExactTotal_6+",
+TIER1_CORE_MARKETS = PRIMARY_TRAINED_MARKETS
 
-    # Clean sheets
-    "y_HomeCS", "y_AwayCS", "y_NoGoal",
-
-    # Win by margin
-    "y_HomeWinBy1", "y_HomeWinBy2", "y_HomeWinBy3+",
-    "y_AwayWinBy1", "y_AwayWinBy2", "y_AwayWinBy3+",
-    "y_HomeWin2+", "y_AwayWin2+",
-
-    # Result + BTTS combos
+TIER2_VALUE_MARKETS = [
+    # These are still listed for output generation, but are DERIVED not trained
+    "y_DC_1X", "y_DC_X2", "y_DC_12",
+    "y_DNB_H", "y_DNB_A",
+    "y_HomeToScore", "y_AwayToScore",
+    "y_AH_-0_5", "y_AH_+0_5", "y_AH_-1_0", "y_AH_+1_0", "y_AH_0_0",
     "y_HomeWin_BTTS_Y", "y_HomeWin_BTTS_N",
     "y_AwayWin_BTTS_Y", "y_AwayWin_BTTS_N",
-    "y_Draw_BTTS_Y", "y_Draw_BTTS_N",
-
-    # Result + O/U combos
-    "y_HomeWin_O25", "y_HomeWin_U25",
-    "y_AwayWin_O25", "y_AwayWin_U25",
-    "y_Draw_O25", "y_Draw_U25",
-
-    # DC + combos
-    "y_DC1X_O25", "y_DC1X_U25",
-    "y_DCX2_O25", "y_DCX2_U25",
-    "y_DC12_O25", "y_DC12_U25",
-    "y_DC1X_BTTS_Y", "y_DC1X_BTTS_N",
-    "y_DCX2_BTTS_Y", "y_DCX2_BTTS_N",
-
-    # European Handicap
-    "y_EH_m1_H", "y_EH_m1_D", "y_EH_m1_A",
-    "y_EH_p1_H", "y_EH_p1_D", "y_EH_p1_A",
+    "y_DC1X_O25", "y_DCX2_O25",
 ]
 
-# Skip these in BALANCED mode (complex/rare)
-# Tier 1: Core high-value markets (13 markets - ALWAYS train)
-TIER1_CORE_MARKETS = [
-    "y_1X2",              # Match result
-    "y_BTTS",             # Both teams to score
-    "y_OU_0_5", "y_OU_1_5", "y_OU_2_5", "y_OU_3_5", "y_OU_4_5",  # O/U goals
-    "y_DC_1X", "y_DC_12", "y_DC_X2",  # Double chance
-    "y_DNB_H", "y_DNB_A",  # Draw no bet
-    "y_HomeToScore", "y_AwayToScore",  # Team to score
-]
+PROFITABLE_MARKETS = PRIMARY_TRAINED_MARKETS + TIER2_VALUE_MARKETS
 
-# Tier 2: Advanced value markets (15 markets - train in BALANCED/FULL)
-TIER2_VALUE_MARKETS = [
-    "y_HomeTG_0_5", "y_HomeTG_1_5",  # Home team goals O/U
-    "y_AwayTG_0_5", "y_AwayTG_1_5",  # Away team goals O/U
-    "y_AH_-0_5", "y_AH_+0_5", "y_AH_-1_0", "y_AH_+1_0", "y_AH_0_0",  # Asian handicap
-    "y_HomeWin_BTTS_Y", "y_AwayWin_BTTS_Y",  # Result + BTTS combos
-    "y_HomeWin_BTTS_N", "y_AwayWin_BTTS_N",
-    "y_DC1X_O25", "y_DCX2_O25",  # DC + O/U combos
-]
-
-# Combined tier 1+2 (28 markets total)
-PROFITABLE_MARKETS = TIER1_CORE_MARKETS + TIER2_VALUE_MARKETS
-
-# Legacy names for backward compatibility
-CORE_MARKETS = TIER1_CORE_MARKETS
 SECONDARY_MARKETS = TIER2_VALUE_MARKETS
 
 # Skip these in FAST mode (rarely bet, complex)
@@ -420,23 +363,25 @@ def get_pretuned_params(model: str, market_type: str) -> Dict:
 
 
 def should_train_market(target: str) -> bool:
-    """Check if market should be trained in current speed mode."""
-    config = get_speed_config()
+    """Check if a market needs its own trained ML model.
 
-    if not config.skip_rare_markets:
-        return True
-
+    Only PRIMARY_TRAINED_MARKETS get a model.  All other markets
+    (DC, DNB, combos, etc.) are derived mathematically from the
+    primary predictions — no model needed.
+    """
     mode = get_speed_mode()
 
     if mode == SpeedMode.FAST:
-        # Only train Tier 1 core markets (13 markets)
-        return target in TIER1_CORE_MARKETS
-    elif mode == SpeedMode.BALANCED:
-        # Train Tier 1 + Tier 2 (28 markets total)
-        return target in PROFITABLE_MARKETS
+        # Bare minimum: 1X2 + BTTS + the main O/U lines
+        fast_subset = [
+            "y_1X2", "y_BTTS",
+            "y_OU_1_5", "y_OU_2_5", "y_OU_3_5",
+        ]
+        return target in fast_subset
     else:
-        # FULL mode: train all except explicitly skipped
-        return target not in SKIP_IN_FAST_MODE
+        # BALANCED and FULL both train only PRIMARY — the difference
+        # is in n_estimators, n_folds, etc., not market count.
+        return target in PRIMARY_TRAINED_MARKETS
 
 
 def get_models_for_mode() -> list:

@@ -818,6 +818,133 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
                 row[f"P_AwayTG_{l}_O"] = pick(p, ak, "O")
                 row[f"P_AwayTG_{l}_U"] = pick(p, ak, "U")
         
+        # ====================================================================
+        # DERIVE secondary markets from primary model outputs.
+        # These are mathematically determined — no separate model needed.
+        # ====================================================================
+        p_h = row.get("P_1X2_H", 0)
+        p_d = row.get("P_1X2_D", 0)
+        p_a = row.get("P_1X2_A", 0)
+        p_btts_y = row.get("P_BTTS_Y", 0)
+        p_btts_n = row.get("P_BTTS_N", 0)
+        p_ou25_o = row.get("P_OU_2_5_O", 0)
+        p_ou25_u = row.get("P_OU_2_5_U", 0)
+
+        # Double Chance (direct sums from 1X2)
+        if "y_DC_1X" not in preds:
+            row["P_DC_1X_Y"] = min(p_h + p_d, 0.99)
+            row["P_DC_1X_N"] = max(1 - row["P_DC_1X_Y"], 0.01)
+        if "y_DC_X2" not in preds:
+            row["P_DC_X2_Y"] = min(p_d + p_a, 0.99)
+            row["P_DC_X2_N"] = max(1 - row["P_DC_X2_Y"], 0.01)
+        if "y_DC_12" not in preds:
+            row["P_DC_12_Y"] = min(p_h + p_a, 0.99)
+            row["P_DC_12_N"] = max(1 - row["P_DC_12_Y"], 0.01)
+
+        # Draw No Bet (1X2 excluding draw, renormalised)
+        ha_sum = p_h + p_a
+        if "y_DNB_H" not in preds and ha_sum > 0:
+            row["P_DNB_H_Y"] = p_h / ha_sum
+            row["P_DNB_H_N"] = p_a / ha_sum
+        if "y_DNB_A" not in preds and ha_sum > 0:
+            row["P_DNB_A_Y"] = p_a / ha_sum
+            row["P_DNB_A_N"] = p_h / ha_sum
+
+        # Team To Score (from team goal O/U 0.5)
+        if "y_HomeToScore" not in preds:
+            row["P_HomeToScore_Y"] = row.get("P_HomeTG_0_5_O", 0.7)
+            row["P_HomeToScore_N"] = row.get("P_HomeTG_0_5_U", 0.3)
+        if "y_AwayToScore" not in preds:
+            row["P_AwayToScore_Y"] = row.get("P_AwayTG_0_5_O", 0.6)
+            row["P_AwayToScore_N"] = row.get("P_AwayTG_0_5_U", 0.4)
+
+        # Clean Sheets (from opponent team goals O/U 0.5)
+        if "y_HomeCS" not in preds:
+            row["P_HomeCS_Y"] = row.get("P_AwayTG_0_5_U", 0.35)
+            row["P_HomeCS_N"] = row.get("P_AwayTG_0_5_O", 0.65)
+        if "y_AwayCS" not in preds:
+            row["P_AwayCS_Y"] = row.get("P_HomeTG_0_5_U", 0.28)
+            row["P_AwayCS_N"] = row.get("P_HomeTG_0_5_O", 0.72)
+
+        # Win to Nil = win AND opponent scores 0
+        if "y_HomeWTN" not in preds:
+            p_away_nil = row.get("P_AwayTG_0_5_U", 0.35)
+            row["P_HomeWTN_Y"] = p_h * p_away_nil
+            row["P_HomeWTN_N"] = 1 - row["P_HomeWTN_Y"]
+        if "y_AwayWTN" not in preds:
+            p_home_nil = row.get("P_HomeTG_0_5_U", 0.28)
+            row["P_AwayWTN_Y"] = p_a * p_home_nil
+            row["P_AwayWTN_N"] = 1 - row["P_AwayWTN_Y"]
+
+        # Result + BTTS combos (approximate: treat result & BTTS as independent)
+        if "y_HomeWin_BTTS_Y" not in preds:
+            row["P_HomeWin_BTTS_Y_Y"] = p_h * p_btts_y
+            row["P_HomeWin_BTTS_Y_N"] = 1 - row["P_HomeWin_BTTS_Y_Y"]
+        if "y_HomeWin_BTTS_N" not in preds:
+            row["P_HomeWin_BTTS_N_Y"] = p_h * p_btts_n
+            row["P_HomeWin_BTTS_N_N"] = 1 - row["P_HomeWin_BTTS_N_Y"]
+        if "y_AwayWin_BTTS_Y" not in preds:
+            row["P_AwayWin_BTTS_Y_Y"] = p_a * p_btts_y
+            row["P_AwayWin_BTTS_Y_N"] = 1 - row["P_AwayWin_BTTS_Y_Y"]
+        if "y_AwayWin_BTTS_N" not in preds:
+            row["P_AwayWin_BTTS_N_Y"] = p_a * p_btts_n
+            row["P_AwayWin_BTTS_N_N"] = 1 - row["P_AwayWin_BTTS_N_Y"]
+        if "y_Draw_BTTS_Y" not in preds:
+            row["P_Draw_BTTS_Y_Y"] = p_d * p_btts_y
+            row["P_Draw_BTTS_Y_N"] = 1 - row["P_Draw_BTTS_Y_Y"]
+        if "y_Draw_BTTS_N" not in preds:
+            row["P_Draw_BTTS_N_Y"] = p_d * p_btts_n
+            row["P_Draw_BTTS_N_N"] = 1 - row["P_Draw_BTTS_N_Y"]
+
+        # Result + O/U 2.5 combos
+        if "y_HomeWin_O25" not in preds:
+            row["P_HomeWin_O25_Y"] = p_h * p_ou25_o
+            row["P_HomeWin_O25_N"] = 1 - row["P_HomeWin_O25_Y"]
+        if "y_HomeWin_U25" not in preds:
+            row["P_HomeWin_U25_Y"] = p_h * p_ou25_u
+            row["P_HomeWin_U25_N"] = 1 - row["P_HomeWin_U25_Y"]
+        if "y_AwayWin_O25" not in preds:
+            row["P_AwayWin_O25_Y"] = p_a * p_ou25_o
+            row["P_AwayWin_O25_N"] = 1 - row["P_AwayWin_O25_Y"]
+        if "y_AwayWin_U25" not in preds:
+            row["P_AwayWin_U25_Y"] = p_a * p_ou25_u
+            row["P_AwayWin_U25_N"] = 1 - row["P_AwayWin_U25_Y"]
+
+        # DC + O/U combos
+        dc_1x = min(p_h + p_d, 0.99)
+        dc_x2 = min(p_d + p_a, 0.99)
+        if "y_DC1X_O25" not in preds:
+            row["P_DC1X_O25_Y"] = dc_1x * p_ou25_o
+            row["P_DC1X_O25_N"] = 1 - row["P_DC1X_O25_Y"]
+        if "y_DCX2_O25" not in preds:
+            row["P_DCX2_O25_Y"] = dc_x2 * p_ou25_o
+            row["P_DCX2_O25_N"] = 1 - row["P_DCX2_O25_Y"]
+
+        # DC + BTTS combos
+        if "y_DC1X_BTTS_Y" not in preds:
+            row["P_DC1X_BTTS_Y_Y"] = dc_1x * p_btts_y
+            row["P_DC1X_BTTS_Y_N"] = 1 - row["P_DC1X_BTTS_Y_Y"]
+        if "y_DC1X_BTTS_N" not in preds:
+            row["P_DC1X_BTTS_N_Y"] = dc_1x * p_btts_n
+            row["P_DC1X_BTTS_N_N"] = 1 - row["P_DC1X_BTTS_N_Y"]
+        if "y_DCX2_BTTS_Y" not in preds:
+            row["P_DCX2_BTTS_Y_Y"] = dc_x2 * p_btts_y
+            row["P_DCX2_BTTS_Y_N"] = 1 - row["P_DCX2_BTTS_Y_Y"]
+        if "y_DCX2_BTTS_N" not in preds:
+            row["P_DCX2_BTTS_N_Y"] = dc_x2 * p_btts_n
+            row["P_DCX2_BTTS_N_N"] = 1 - row["P_DCX2_BTTS_N_Y"]
+
+        # No-goal (both teams fail to score)
+        if "y_NoGoal" not in preds:
+            p_h_nil = row.get("P_HomeTG_0_5_U", 0.28)
+            p_a_nil = row.get("P_AwayTG_0_5_U", 0.35)
+            row["P_NoGoal_Y"] = p_h_nil * p_a_nil
+            row["P_NoGoal_N"] = 1 - row["P_NoGoal_Y"]
+
+        # ====================================================================
+        # End of derived markets
+        # ====================================================================
+
         if "y_HomeCardsY_BAND" in preds:
             p = preds["y_HomeCardsY_BAND"][i]
             for b in ["0-2","3","4-5","6+"]:
