@@ -439,76 +439,151 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
     return row
 
 def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
-    """Enhanced feature building with time weighting"""
+    """Build feature frame for upcoming fixtures.
+
+    Uses the SAME feature values the model was trained on: for each fixture,
+    finds each team's most recent historical row (where that team played at
+    home or away) and takes the rolling features already computed during
+    training.  This eliminates the previous train/serve skew where inference
+    re-computed features with different weighting.
+
+    The key insight: features.parquet already contains Home_GF_ma3 etc.
+    computed with shift(1).rolling().  The most recent row for a team in
+    that parquet already represents "form going into the next match" because
+    shift(1) ensures features use only prior matches.
+    """
     base = _load_base_features()
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
-    
-    # Add time weights for recent form emphasis
-    current_date = datetime.now()
-    base['days_ago'] = (current_date - pd.to_datetime(base['Date'])).dt.days
-    base['time_weight'] = np.exp(-base['days_ago'] / 180)  # 180-day half-life
-    
+
+    # Columns that are valid features (not targets, not result/leakage cols)
+    leakage_cols = {"FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
+                    "HomeGoals", "AwayGoals", "OU25",
+                    "HS", "AS", "HST", "AST", "HC", "AC",
+                    "HY", "AY", "HR", "AR", "HF", "AF"}
+
     rows = []
     for _, r in fx.iterrows():
         lg, dt, ht, at = r["League"], r["Date"], r["HomeTeam"], r["AwayTeam"]
         hist_lg = base[base["League"] == lg]
-        
-        # Get last 10 games for each team with time weighting
-        hrow = hist_lg[(hist_lg["HomeTeam"]==ht) | (hist_lg["AwayTeam"]==ht)]
-        hrow = hrow[hrow["Date"]<dt].sort_values("Date").tail(10)
-        
-        arow = hist_lg[(hist_lg["HomeTeam"]==at) | (hist_lg["AwayTeam"]==at)]
-        arow = arow[arow["Date"]<dt].sort_values("Date").tail(10)
-        
-        if hrow.empty or arow.empty:
+
+        # Find the most recent match for each team BEFORE the fixture date
+        ht_matches = hist_lg[
+            ((hist_lg["HomeTeam"] == ht) | (hist_lg["AwayTeam"] == ht))
+            & (hist_lg["Date"] < dt)
+        ].sort_values("Date")
+
+        at_matches = hist_lg[
+            ((hist_lg["HomeTeam"] == at) | (hist_lg["AwayTeam"] == at))
+            & (hist_lg["Date"] < dt)
+        ].sort_values("Date")
+
+        if ht_matches.empty or at_matches.empty:
             continue
-        
-        feat_cols = [c for c in base.columns if not c.startswith("y_") 
-                     and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
-        
-        fused = pd.DataFrame()
-        
-        # Calculate weighted features for home team
-        for col in feat_cols:
-            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
-                weights = hrow['time_weight'].values[-5:]
-                values = hrow[col].fillna(0).values[-5:]
-                if weights.sum() > 0:
-                    weighted_avg = np.average(values, weights=weights)
-                    fused.at[0, col] = weighted_avg
+
+        # Take the most recent row for each team
+        ht_last = ht_matches.iloc[-1]
+        at_last = at_matches.iloc[-1]
+
+        fused = {}
+
+        # --- Home team features ---
+        # If the home team's last match was also at home, take Home_* directly.
+        # If it was away, take Away_* (their perspective) and map to Home_*.
+        ht_was_home = (ht_last["HomeTeam"] == ht)
+        for col in base.columns:
+            if col.startswith("Home_"):
+                suffix = col[5:]  # strip "Home_"
+                if ht_was_home:
+                    fused[col] = ht_last.get(col, np.nan)
                 else:
-                    fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-            else:
-                fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-        
-        # Update away team features
-        for c in fused.columns:
-            if c.startswith("Away_") and c in arow.columns:
-                if arow[c].dtype in ['float64', 'int64']:
-                    weights = arow['time_weight'].values[-5:]
-                    values = arow[c].fillna(0).values[-5:]
-                    if weights.sum() > 0:
-                        weighted_avg = np.average(values, weights=weights)
-                        fused.at[0, c] = weighted_avg
+                    fused[col] = ht_last.get(f"Away_{suffix}", np.nan)
+
+        # --- Away team features ---
+        at_was_away = (at_last["AwayTeam"] == at)
+        for col in base.columns:
+            if col.startswith("Away_"):
+                suffix = col[5:]  # strip "Away_"
+                if at_was_away:
+                    fused[col] = at_last.get(col, np.nan)
                 else:
-                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
-        
+                    fused[col] = at_last.get(f"Home_{suffix}", np.nan)
+
+        # --- Elo features: take from the most recent row for each team ---
+        for elo_col in ["Elo_Home", "Elo_Mom_Home"]:
+            if elo_col in base.columns:
+                if ht_was_home:
+                    fused[elo_col] = ht_last.get(elo_col, np.nan)
+                else:
+                    # Team was away last time, so their Elo was stored as Elo_Away
+                    mapped = elo_col.replace("Home", "Away")
+                    fused[elo_col] = ht_last.get(mapped, np.nan)
+
+        for elo_col in ["Elo_Away", "Elo_Mom_Away"]:
+            if elo_col in base.columns:
+                if at_was_away:
+                    fused[elo_col] = at_last.get(elo_col, np.nan)
+                else:
+                    mapped = elo_col.replace("Away", "Home")
+                    fused[elo_col] = at_last.get(mapped, np.nan)
+
+        # Elo derived
+        if "Elo_Diff" in base.columns:
+            elo_h = fused.get("Elo_Home", 1500)
+            elo_a = fused.get("Elo_Away", 1500)
+            fused["Elo_Diff"] = (elo_h if pd.notna(elo_h) else 1500) - (elo_a if pd.notna(elo_a) else 1500)
+        if "Elo_Mom_Diff" in base.columns:
+            mom_h = fused.get("Elo_Mom_Home", 0)
+            mom_a = fused.get("Elo_Mom_Away", 0)
+            fused["Elo_Mom_Diff"] = (mom_h if pd.notna(mom_h) else 0) - (mom_a if pd.notna(mom_a) else 0)
+
+        # --- Contextual features: compute fresh ---
+        match_date = pd.to_datetime(dt)
+        fused["DayOfWeek"] = match_date.dayofweek
+        fused["IsWeekend"] = 1 if match_date.dayofweek >= 5 else 0
+        fused["Month"] = match_date.month
+        m = match_date.month
+        fused["SeasonProgress"] = max(0, min(1, (m - 8) / 10 if m >= 8 else (m + 4) / 10))
+
+        # Rest days
+        if not ht_matches.empty:
+            last_date_h = pd.to_datetime(ht_matches.iloc[-1]["Date"])
+            fused["Home_RestDays"] = min((match_date - last_date_h).days, 21)
+        else:
+            fused["Home_RestDays"] = 7
+        if not at_matches.empty:
+            last_date_a = pd.to_datetime(at_matches.iloc[-1]["Date"])
+            fused["Away_RestDays"] = min((match_date - last_date_a).days, 21)
+        else:
+            fused["Away_RestDays"] = 7
+        fused["RestDiff"] = fused["Home_RestDays"] - fused["Away_RestDays"]
+
+        # --- Market/odds features: use most recent home row's odds ---
+        # (We don't have odds for the future match at this point, so carry
+        # forward the last known odds implied probabilities)
+        for col in base.columns:
+            if col not in fused and not col.startswith("y_") and col not in leakage_cols:
+                if col in ["League", "Date", "HomeTeam", "AwayTeam"]:
+                    continue
+                # For odds-implied and other non-rolling features, use last value
+                fused[col] = ht_last.get(col, np.nan)
+
+        # --- Set identity and targets ---
         fused["League"] = lg
         fused["Date"] = dt
         fused["HomeTeam"] = ht
         fused["AwayTeam"] = at
-        
+
         for c in base.columns:
             if c.startswith("y_"):
                 fused[c] = pd.NA
-        
+
         rows.append(fused)
-    
+
     if not rows:
         raise RuntimeError("No fixtures matched with historical features.")
-    
-    return pd.concat(rows, ignore_index=True).sort_values(["League","Date","HomeTeam"])
+
+    return pd.DataFrame(rows).sort_values(["League","Date","HomeTeam"]).reset_index(drop=True)
 
 def _collect_market_columns() -> List[str]:
     """All expected probability column names - COMPREHENSIVE VERSION"""

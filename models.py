@@ -324,10 +324,19 @@ def _dc_supported(t: str) -> bool:
 # Preprocess
 # --------------------------------------------------------------------------------------
 def _feature_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-    id_cols = {"League","Date","HomeTeam","AwayTeam"}
+    id_cols = {"League","Date","HomeTeam","AwayTeam","Season","Referee",
+               "fixture_id","Home_ID","Away_ID","League_ID"}
     target_cols = set([c for c in df.columns if c.startswith("y_")])
-    result_cols = {"FTHG", "FTAG", "FTR"}  # Add this line
-    cand = [c for c in df.columns if c not in id_cols and c not in target_cols and c not in result_cols]  # Add result_cols here
+    # CRITICAL: Exclude ALL result columns — including half-time scores.
+    # HTHG/HTAG/HTR are outcomes, NOT features. Using them leaks the result.
+    result_cols = {"FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
+                   "HomeGoals", "AwayGoals", "OU25"}
+    # Also exclude raw match stats that are from the CURRENT match (not rolling).
+    # These are the match's own shots/corners/cards — knowing them = knowing the match.
+    raw_match_stats = {"HS", "AS", "HST", "AST", "HC", "AC",
+                       "HY", "AY", "HR", "AR", "HF", "AF"}
+    exclude = id_cols | target_cols | result_cols | raw_match_stats
+    cand = [c for c in df.columns if c not in exclude]
     cat = [c for c in cand if str(df[c].dtype) in ("object","string","category","bool")]
     num = [c for c in cand if c not in cat]
     return num, cat

@@ -226,23 +226,26 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
     for w in windows:
         shifted = team_df.shift(1)
         rolled = shifted.rolling(window=w, min_periods=1)
-        
+
         # Core stats
         team_df[f"GF_ma{w}"] = rolled["GoalsFor"].mean()
         team_df[f"GA_ma{w}"] = rolled["GoalsAgainst"].mean()
         team_df[f"GD_ma{w}"] = team_df[f"GF_ma{w}"] - team_df[f"GA_ma{w}"]
-        team_df[f"PPG_ma{w}"] = (rolled["Win"].sum() * 3 + rolled["Draw"].sum()) / w
-        
+        # PPG: use rolling mean of points (not sum/w, which underestimates
+        # when fewer than w matches are available due to min_periods=1)
+        points = shifted["Win"] * 3 + shifted["Draw"]
+        team_df[f"PPG_ma{w}"] = points.rolling(window=w, min_periods=1).mean()
+
         # Shot stats
         for col in ["Shots","ShotsT","Corners","CardsY","CardsR"]:
-            if col in team_df.columns:
+            if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
-        
+
         # Derived rates
         team_df[f"CleanSheet_rate{w}"] = rolled["CleanSheet"].mean()
         team_df[f"FTS_rate{w}"] = rolled["FailedToScore"].mean()
         team_df[f"BTTS_rate{w}"] = rolled["BTTS"].mean()
-        
+
         # Advanced stats (if available)
         for col in ["xG", "Possession", "ShotsInBox", "BigChances", "PassAcc"]:
             if col in team_df.columns and team_df[col].notna().any():
@@ -831,15 +834,29 @@ def build_features(force: bool = False) -> Path:
 
 
 def get_feature_columns() -> List[str]:
-    """Return list of feature columns (not targets or metadata)"""
-    exclude = ['Date', 'League', 'HomeTeam', 'AwayTeam', 'Referee',
-               'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR',
-               'fixture_id', 'Home_ID', 'Away_ID', 'League_ID', 'Season']
-    
+    """Return list of feature columns (not targets, metadata, or raw match stats).
+
+    Must stay in sync with models.py:_feature_columns() exclusion list.
+    Raw match stats (HS, AS, HST, etc.) are from the CURRENT match and would
+    leak the result if used as features. Only ROLLING versions (Home_Shots_ma3
+    etc.) are valid features.
+    """
+    exclude = {
+        # IDs / metadata
+        'Date', 'League', 'HomeTeam', 'AwayTeam', 'Referee', 'Season',
+        'fixture_id', 'Home_ID', 'Away_ID', 'League_ID',
+        # Result columns (LEAKAGE if used as features)
+        'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR',
+        'HomeGoals', 'AwayGoals', 'OU25',
+        # Raw current-match stats (LEAKAGE)
+        'HS', 'AS', 'HST', 'AST', 'HC', 'AC',
+        'HY', 'AY', 'HR', 'AR', 'HF', 'AF',
+    }
+
     df = pd.read_parquet(FEATURES_PARQUET)
-    
-    return [col for col in df.columns 
-            if col not in exclude 
+
+    return [col for col in df.columns
+            if col not in exclude
             and not col.startswith('y_')]
 
 
