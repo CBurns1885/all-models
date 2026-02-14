@@ -53,9 +53,24 @@ def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # Keep only required columns
-    keep_cols = ["League","Date","HomeTeam","AwayTeam","FTHG","FTAG","FTR",
-                "B365H","B365D","B365A","PSCH","PSCD","PSCA","Season"]
+    # Keep required columns + match statistics for feature engineering
+    keep_cols = [
+        # Match metadata & result
+        "League","Date","HomeTeam","AwayTeam","FTHG","FTAG","FTR",
+        # Half-time (target only — NOT used as features)
+        "HTHG","HTAG","HTR",
+        # Match statistics (critical for rolling form features)
+        "HS","AS","HST","AST",  # Shots, Shots on Target
+        "HC","AC",              # Corners
+        "HY","AY","HR","AR",    # Cards (Yellow, Red)
+        "HF","AF",              # Fouls
+        # Odds
+        "B365H","B365D","B365A","PSCH","PSCD","PSCA",
+        "AvgH","AvgD","AvgA","MaxH","MaxD","MaxA",
+        "BbOU","BbMx>2.5","BbAv>2.5","BbMx<2.5","BbAv<2.5",  # O/U odds
+        # Season
+        "Season",
+    ]
     available_cols = [c for c in keep_cols if c in df.columns]
     return df[available_cols]
 

@@ -171,24 +171,14 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["HY"]
         out["CardsR"] = out["HR"]
         
-        # Advanced stats (from API-Football match_stats)
-        # xG comes as home_xG (lowercase) from the adapter
-        out = _ensure_cols(out, ["home_xG", "Home_Possession", "Home_Shots_Inside_Box",
-                                  "Home_Pass_Accuracy", "Home_GKSaves",
-                                  "Home_TotalPasses", "Home_Fouls", "Home_Offsides",
-                                  "Home_BlockedShots", "Home_ShotsOffGoal",
-                                  "Home_ShotsOutsideBox"])
-        out["xG"] = out["home_xG"]
-        out["Possession"] = out["Home_Possession"]
-        out["ShotsInBox"] = out["Home_Shots_Inside_Box"]
-        out["PassAcc"] = out["Home_Pass_Accuracy"]
-        out["GKSaves"] = out["Home_GKSaves"]
-        out["TotalPasses"] = out["Home_TotalPasses"]
-        out["Fouls"] = out["Home_Fouls"]
-        out["Offsides"] = out["Home_Offsides"]
-        out["BlockedShots"] = out["Home_BlockedShots"]
-        out["ShotsOffGoal"] = out["Home_ShotsOffGoal"]
-        out["ShotsOutBox"] = out["Home_ShotsOutsideBox"]
+        # Advanced stats (from API-Football)
+        out = _ensure_cols(out, ["Home_xG", "Home_Possession", "Home_Shots_Inside_Box", 
+                                  "Home_Big_Chances", "Home_Pass_Accuracy"])
+        out["xG"] = out.get("Home_xG", np.nan)
+        out["Possession"] = out.get("Home_Possession", np.nan)
+        out["ShotsInBox"] = out.get("Home_Shots_Inside_Box", np.nan)
+        out["BigChances"] = out.get("Home_Big_Chances", np.nan)
+        out["PassAcc"] = out.get("Home_Pass_Accuracy", np.nan)
         
     else:  # Away
         out["Team"] = out["AwayTeam"]
@@ -206,23 +196,13 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["AY"]
         out["CardsR"] = out["AR"]
         
-        # xG comes as away_xG (lowercase) from the adapter
-        out = _ensure_cols(out, ["away_xG", "Away_Possession", "Away_Shots_Inside_Box",
-                                  "Away_Pass_Accuracy", "Away_GKSaves",
-                                  "Away_TotalPasses", "Away_Fouls", "Away_Offsides",
-                                  "Away_BlockedShots", "Away_ShotsOffGoal",
-                                  "Away_ShotsOutsideBox"])
-        out["xG"] = out["away_xG"]
-        out["Possession"] = out["Away_Possession"]
-        out["ShotsInBox"] = out["Away_Shots_Inside_Box"]
-        out["PassAcc"] = out["Away_Pass_Accuracy"]
-        out["GKSaves"] = out["Away_GKSaves"]
-        out["TotalPasses"] = out["Away_TotalPasses"]
-        out["Fouls"] = out["Away_Fouls"]
-        out["Offsides"] = out["Away_Offsides"]
-        out["BlockedShots"] = out["Away_BlockedShots"]
-        out["ShotsOffGoal"] = out["Away_ShotsOffGoal"]
-        out["ShotsOutBox"] = out["Away_ShotsOutsideBox"]
+        out = _ensure_cols(out, ["Away_xG", "Away_Possession", "Away_Shots_Inside_Box",
+                                  "Away_Big_Chances", "Away_Pass_Accuracy"])
+        out["xG"] = out.get("Away_xG", np.nan)
+        out["Possession"] = out.get("Away_Possession", np.nan)
+        out["ShotsInBox"] = out.get("Away_Shots_Inside_Box", np.nan)
+        out["BigChances"] = out.get("Away_Big_Chances", np.nan)
+        out["PassAcc"] = out.get("Away_Pass_Accuracy", np.nan)
     
     out["Side"] = side
     out["CleanSheet"] = (out["GoalsAgainst"] == 0).astype(int)
@@ -232,9 +212,7 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
     cols = ["League","Date","Team","Opp","Side","GoalsFor","GoalsAgainst",
             "Win","Draw","Loss","Shots","ShotsT","Corners","CardsY","CardsR",
             "CleanSheet","FailedToScore","BTTS",
-            "xG","Possession","ShotsInBox","PassAcc",
-            "GKSaves","TotalPasses","Fouls","Offsides","BlockedShots",
-            "ShotsOffGoal","ShotsOutBox"]
+            "xG","Possession","ShotsInBox","BigChances","PassAcc"]
     
     return out[[c for c in cols if c in out.columns]]
 
@@ -248,27 +226,28 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
     for w in windows:
         shifted = team_df.shift(1)
         rolled = shifted.rolling(window=w, min_periods=1)
-        
+
         # Core stats
         team_df[f"GF_ma{w}"] = rolled["GoalsFor"].mean()
         team_df[f"GA_ma{w}"] = rolled["GoalsAgainst"].mean()
         team_df[f"GD_ma{w}"] = team_df[f"GF_ma{w}"] - team_df[f"GA_ma{w}"]
-        team_df[f"PPG_ma{w}"] = (rolled["Win"].sum() * 3 + rolled["Draw"].sum()) / rolled["Win"].count().clip(lower=1)
-        
+        # PPG: use rolling mean of points (not sum/w, which underestimates
+        # when fewer than w matches are available due to min_periods=1)
+        points = shifted["Win"] * 3 + shifted["Draw"]
+        team_df[f"PPG_ma{w}"] = points.rolling(window=w, min_periods=1).mean()
+
         # Shot stats
         for col in ["Shots","ShotsT","Corners","CardsY","CardsR"]:
-            if col in team_df.columns:
+            if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
-        
+
         # Derived rates
         team_df[f"CleanSheet_rate{w}"] = rolled["CleanSheet"].mean()
         team_df[f"FTS_rate{w}"] = rolled["FailedToScore"].mean()
         team_df[f"BTTS_rate{w}"] = rolled["BTTS"].mean()
-        
-        # Advanced stats (if available from API-Football match_stats)
-        for col in ["xG", "Possession", "ShotsInBox", "PassAcc",
-                     "GKSaves", "TotalPasses", "Fouls", "Offsides", "BlockedShots",
-                     "ShotsOffGoal", "ShotsOutBox"]:
+
+        # Advanced stats (if available)
+        for col in ["xG", "Possession", "ShotsInBox", "BigChances", "PassAcc"]:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
     
@@ -276,10 +255,7 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
     ew = team_df.shift(1).ewm(span=EWM_SPAN, adjust=False)
     team_df["GF_ewm"] = ew["GoalsFor"].mean()
     team_df["GA_ewm"] = ew["GoalsAgainst"].mean()
-    # Compute EWM of actual points sequence (not of Win/Draw separately)
-    shifted = team_df.shift(1)
-    points = shifted["Win"] * 3 + shifted["Draw"]
-    team_df["PPG_ewm"] = points.ewm(span=EWM_SPAN, adjust=False).mean()
+    team_df["PPG_ewm"] = (ew["Win"].mean() * 3 + ew["Draw"].mean())
     
     if "xG" in team_df.columns and team_df["xG"].notna().any():
         team_df["xG_ewm"] = ew["xG"].mean()
@@ -350,211 +326,40 @@ def _add_contextual_features(df: pd.DataFrame) -> pd.DataFrame:
         (m - 8) / 10 if m >= 8 else (m + 4) / 10
     ).clip(0, 1)
     
-    # Calculate rest days (keyed by original index to avoid misalignment)
+    # Calculate rest days
     team_dates: Dict[str, pd.Timestamp] = {}
-    rest_by_idx: Dict[int, Tuple[int, int]] = {}
-
-    for idx, row in out.sort_values('Date').iterrows():
+    home_rest, away_rest = [], []
+    
+    for idx, row in df.sort_values('Date').iterrows():
         ht, at = row['HomeTeam'], row['AwayTeam']
-        match_date = row['Date']
-
+        match_date = pd.to_datetime(row['Date'])
+        
         # Home team rest
         if ht in team_dates:
-            h_rest = min((match_date - team_dates[ht]).days, 21)
+            days = (match_date - team_dates[ht]).days
+            home_rest.append(min(days, 21))
         else:
-            h_rest = 7  # Default
-
+            home_rest.append(7)  # Default
+        
         # Away team rest
         if at in team_dates:
-            a_rest = min((match_date - team_dates[at]).days, 21)
+            days = (match_date - team_dates[at]).days
+            away_rest.append(min(days, 21))
         else:
-            a_rest = 7
-
-        rest_by_idx[idx] = (h_rest, a_rest)
-
-        # Update last match dates for both teams
+            away_rest.append(7)
+        
+        # Update last match dates
         team_dates[ht] = match_date
         team_dates[at] = match_date
-
-    out['Home_RestDays'] = out.index.map(lambda i: rest_by_idx.get(i, (7, 7))[0])
-    out['Away_RestDays'] = out.index.map(lambda i: rest_by_idx.get(i, (7, 7))[1])
+    
+    rest_df = pd.DataFrame({
+        'Home_RestDays': home_rest,
+        'Away_RestDays': away_rest
+    }, index=df.sort_values('Date').index)
+    
+    out = out.merge(rest_df, left_index=True, right_index=True, how='left')
     out['RestDiff'] = out['Home_RestDays'] - out['Away_RestDays']
-
-    # League standings features (if available from API)
-    try:
-        from api_football_adapter import get_standings_from_db
-        standings = get_standings_from_db()
-        if not standings.empty:
-            # Join home team standings
-            home_standings = standings.rename(columns={
-                col: f'Home_{col}' for col in standings.columns
-                if col not in ['League', 'Season', 'Team']
-            })
-            out = out.merge(
-                home_standings, left_on=['League', 'HomeTeam'],
-                right_on=['League', 'Team'], how='left'
-            )
-            if 'Team' in out.columns:
-                out = out.drop(columns=['Team'])
-            if 'Season_y' in out.columns:
-                out = out.drop(columns=['Season_y'])
-                out = out.rename(columns={'Season_x': 'Season'})
-
-            # Join away team standings
-            away_standings = standings.rename(columns={
-                col: f'Away_{col}' for col in standings.columns
-                if col not in ['League', 'Season', 'Team']
-            })
-            out = out.merge(
-                away_standings, left_on=['League', 'AwayTeam'],
-                right_on=['League', 'Team'], how='left'
-            )
-            if 'Team' in out.columns:
-                out = out.drop(columns=['Team'])
-            if 'Season_y' in out.columns:
-                out = out.drop(columns=['Season_y'])
-                out = out.rename(columns={'Season_x': 'Season'})
-
-            # Derived features: position diff, points diff
-            if 'Home_LeaguePosition' in out.columns and 'Away_LeaguePosition' in out.columns:
-                out['PositionDiff'] = out['Away_LeaguePosition'] - out['Home_LeaguePosition']
-                out['PointsDiff'] = out.get('Home_LeaguePoints', 0) - out.get('Away_LeaguePoints', 0)
-                out['PPGDiff'] = out.get('Home_LeaguePPG', 0) - out.get('Away_LeaguePPG', 0)
-                out['FormScoreDiff'] = out.get('Home_LeagueFormScore', 0) - out.get('Away_LeagueFormScore', 0)
-                print(f"   Added league standings features for {standings['League'].nunique()} leagues")
-    except (ImportError, Exception) as e:
-        print(f"   [INFO] League standings not available: {e}")
-
-    # Referee tendencies (cards/fouls per game from historical data)
-    if 'referee' in out.columns and out['referee'].notna().any():
-        try:
-            ref_cols_needed = ['HY', 'AY', 'HR', 'AR', 'Home_Fouls', 'Away_Fouls']
-            ref_cols_avail = [c for c in ref_cols_needed if c in out.columns]
-            if ref_cols_avail:
-                out_sorted = out.sort_values('Date')
-                # Total cards per match by referee
-                if 'HY' in out.columns and 'AY' in out.columns:
-                    out_sorted['_TotalCards'] = (
-                        out_sorted['HY'].fillna(0) + out_sorted['AY'].fillna(0) +
-                        out_sorted.get('HR', pd.Series(0, index=out_sorted.index)).fillna(0) +
-                        out_sorted.get('AR', pd.Series(0, index=out_sorted.index)).fillna(0)
-                    )
-                if 'Home_Fouls' in out.columns and 'Away_Fouls' in out.columns:
-                    out_sorted['_TotalFouls'] = (
-                        out_sorted['Home_Fouls'].fillna(0) + out_sorted['Away_Fouls'].fillna(0)
-                    )
-                # Total goals per match (for referee goal tendency)
-                out_sorted['_TotalGoals'] = out_sorted['FTHG'].fillna(0) + out_sorted['FTAG'].fillna(0)
-
-                # Expanding mean per referee (only uses past matches)
-                for stat, out_col in [('_TotalCards', 'Ref_AvgCards'),
-                                       ('_TotalFouls', 'Ref_AvgFouls'),
-                                       ('_TotalGoals', 'Ref_AvgGoals')]:
-                    if stat in out_sorted.columns:
-                        ref_means = (
-                            out_sorted.groupby('referee')[stat]
-                            .transform(lambda x: x.shift(1).expanding().mean())
-                        )
-                        out.loc[out_sorted.index, out_col] = ref_means.values
-
-                # Count how many matches this referee has done (experience proxy)
-                ref_counts = (
-                    out_sorted.groupby('referee').cumcount()
-                )
-                out.loc[out_sorted.index, 'Ref_MatchCount'] = ref_counts.values
-
-                # Clean up temp columns
-                for c in ['_TotalCards', '_TotalFouls', '_TotalGoals']:
-                    if c in out.columns:
-                        out = out.drop(columns=[c])
-
-                ref_feature_count = sum(1 for c in ['Ref_AvgCards', 'Ref_AvgFouls', 'Ref_AvgGoals', 'Ref_MatchCount']
-                                       if c in out.columns)
-                print(f"   Added {ref_feature_count} referee tendency features")
-        except Exception as e:
-            print(f"   [INFO] Referee features skipped: {e}")
-
-    # Injury count features (if available from API)
-    try:
-        from api_football_adapter import get_injury_counts_from_db
-        injuries = get_injury_counts_from_db()
-        if not injuries.empty:
-            # Merge home team injuries
-            home_inj = injuries.rename(columns={'InjuryCount': 'Home_InjuryCount', 'Team': '_Team'})
-            out = out.merge(
-                home_inj[['League', 'Date', '_Team', 'Home_InjuryCount']],
-                left_on=['League', 'Date', 'HomeTeam'],
-                right_on=['League', 'Date', '_Team'],
-                how='left'
-            )
-            if '_Team' in out.columns:
-                out = out.drop(columns=['_Team'])
-
-            # Merge away team injuries
-            away_inj = injuries.rename(columns={'InjuryCount': 'Away_InjuryCount', 'Team': '_Team'})
-            out = out.merge(
-                away_inj[['League', 'Date', '_Team', 'Away_InjuryCount']],
-                left_on=['League', 'Date', 'AwayTeam'],
-                right_on=['League', 'Date', '_Team'],
-                how='left'
-            )
-            if '_Team' in out.columns:
-                out = out.drop(columns=['_Team'])
-
-            out['Home_InjuryCount'] = out['Home_InjuryCount'].fillna(0)
-            out['Away_InjuryCount'] = out['Away_InjuryCount'].fillna(0)
-            out['InjuryDiff'] = out['Home_InjuryCount'] - out['Away_InjuryCount']
-
-            inj_matches = (out['Home_InjuryCount'] > 0).sum() + (out['Away_InjuryCount'] > 0).sum()
-            print(f"   Added injury features ({inj_matches} team-match injury records)")
-    except (ImportError, Exception) as e:
-        print(f"   [INFO] Injury features not available: {e}")
-
-    # League quality tier features (allows model to learn league-specific patterns)
-    LEAGUE_TIERS = {
-        # Elite (top 5 European leagues)
-        'E0': 1, 'SP1': 1, 'I1': 1, 'D1': 1, 'F1': 1,
-        # High quality
-        'E1': 2, 'SP2': 2, 'I2': 2, 'D2': 2, 'F2': 2, 'N1': 2,
-        'P1': 2, 'B1': 2, 'SC0': 2, 'T1': 2,
-        # Medium quality
-        'E2': 3, 'E3': 3, 'SC1': 3, 'A1': 3, 'G1': 3, 'SWZ': 3,
-        'POL': 3, 'RUS': 3, 'EC': 3,
-    }
-    LEAGUE_AVG_GOALS = {
-        'E0': 2.72, 'E1': 2.65, 'E2': 2.58, 'E3': 2.61, 'EC': 2.65,
-        'SP1': 2.48, 'SP2': 2.35, 'I1': 2.68, 'I2': 2.45,
-        'D1': 3.05, 'D2': 2.85, 'F1': 2.55, 'F2': 2.42,
-        'N1': 2.95, 'B1': 2.78, 'P1': 2.52, 'SC0': 2.65, 'SC1': 2.58,
-        'T1': 3.10, 'G1': 2.35, 'A1': 2.92, 'SWZ': 2.75,
-        'POL': 2.62, 'RUS': 2.45,
-    }
-    LEAGUE_HOME_ADV = {
-        'E0': 0.12, 'E1': 0.10, 'E2': 0.11, 'E3': 0.13, 'EC': 0.12,
-        'SP1': 0.15, 'SP2': 0.14, 'I1': 0.11, 'I2': 0.12,
-        'D1': 0.09, 'D2': 0.10, 'F1': 0.13, 'F2': 0.12,
-        'N1': 0.08, 'B1': 0.10, 'P1': 0.16, 'SC0': 0.11, 'SC1': 0.13,
-        'T1': 0.14, 'G1': 0.18, 'A1': 0.10, 'SWZ': 0.09,
-        'POL': 0.12, 'RUS': 0.14,
-    }
-    LEAGUE_STYLE = {
-        # 1 = attacking, 0 = balanced, -1 = defensive
-        'E0': 0, 'E1': 0, 'E2': 0, 'E3': 0, 'EC': 0,
-        'SP1': -1, 'SP2': -1, 'I1': 0, 'I2': -1,
-        'D1': 1, 'D2': 1, 'F1': 0, 'F2': -1,
-        'N1': 1, 'B1': 0, 'P1': -1, 'SC0': 0, 'SC1': 0,
-        'T1': 1, 'G1': -1, 'A1': 1, 'SWZ': 0,
-        'POL': 0, 'RUS': -1,
-    }
-
-    if 'League' in out.columns:
-        out['League_Tier'] = out['League'].map(LEAGUE_TIERS).fillna(4).astype(int)
-        out['League_AvgGoals'] = out['League'].map(LEAGUE_AVG_GOALS).fillna(2.60)
-        out['League_HomeAdv'] = out['League'].map(LEAGUE_HOME_ADV).fillna(0.12)
-        out['League_Style'] = out['League'].map(LEAGUE_STYLE).fillna(0).astype(int)
-        tier_count = out['League_Tier'].nunique()
-        print(f"   Added league quality tier features ({tier_count} tiers across {out['League'].nunique()} leagues)")
-
+    
     return out
 
 # -----------------------------
@@ -617,7 +422,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     # ===========================================================================
 
     # 1X2 Match Result
-    out["y_1X2"] = out["FTR"].where(out["FTR"].notna()).astype(object)
+    out["y_1X2"] = out["FTR"].astype(str)
 
     # BTTS (Both Teams To Score)
     btts = (out["FTHG"] > 0) & (out["FTAG"] > 0)
@@ -630,7 +435,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
 
     # Goal Range (0, 1, 2, 3, 4, 5+)
     bins = pd.cut(total, bins=[-1,0,1,2,3,4,100], labels=["0","1","2","3","4","5+"])
-    out["y_GOAL_RANGE"] = bins.where(bins.notna()).astype(object)
+    out["y_GOAL_RANGE"] = bins.astype(str)
 
     # Exact Total Goals (0, 1, 2, 3, 4, 5, 6+)
     out["y_ExactTotal_0"] = np.where(total == 0, "Y", "N")
@@ -689,10 +494,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
         out["y_HT"] = out.apply(get_ht_result, axis=1)
 
         # HT/FT combo
-        # Preserve NaN for rows with missing FTR/HT data
-        ht_str = out["y_HT"].where(out["y_HT"].notna())
-        ftr_str = out["FTR"].where(out["FTR"].notna())
-        out["y_HTFT"] = (ht_str + "-" + ftr_str).where(ht_str.notna() & ftr_str.notna())
+        out["y_HTFT"] = out["y_HT"].astype(str) + "-" + out["FTR"].astype(str)
 
         # HT Over/Under
         out["y_HT_OU_0_5"] = np.where(ht_total > 0.5, "O", "U")
@@ -1032,15 +834,29 @@ def build_features(force: bool = False) -> Path:
 
 
 def get_feature_columns() -> List[str]:
-    """Return list of feature columns (not targets or metadata)"""
-    exclude = ['Date', 'League', 'HomeTeam', 'AwayTeam', 'Referee',
-               'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR',
-               'fixture_id', 'Home_ID', 'Away_ID', 'League_ID', 'Season']
-    
+    """Return list of feature columns (not targets, metadata, or raw match stats).
+
+    Must stay in sync with models.py:_feature_columns() exclusion list.
+    Raw match stats (HS, AS, HST, etc.) are from the CURRENT match and would
+    leak the result if used as features. Only ROLLING versions (Home_Shots_ma3
+    etc.) are valid features.
+    """
+    exclude = {
+        # IDs / metadata
+        'Date', 'League', 'HomeTeam', 'AwayTeam', 'Referee', 'Season',
+        'fixture_id', 'Home_ID', 'Away_ID', 'League_ID',
+        # Result columns (LEAKAGE if used as features)
+        'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR',
+        'HomeGoals', 'AwayGoals', 'OU25',
+        # Raw current-match stats (LEAKAGE)
+        'HS', 'AS', 'HST', 'AST', 'HC', 'AC',
+        'HY', 'AY', 'HR', 'AR', 'HF', 'AF',
+    }
+
     df = pd.read_parquet(FEATURES_PARQUET)
-    
-    return [col for col in df.columns 
-            if col not in exclude 
+
+    return [col for col in df.columns
+            if col not in exclude
             and not col.startswith('y_')]
 
 

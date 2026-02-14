@@ -26,7 +26,7 @@ from progress_utils import heartbeat
 from blending import BLEND_WEIGHTS_JSON
 
 ID_COLS = ["League","Date","HomeTeam","AwayTeam"]
-OU_LINES = ["0_5","1_5","2_5","3_5","4_5","5_5"]
+OU_LINES = ["0_5","1_5","2_5","3_5","4_5"]
 AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
 
 # League scoring profiles (learned from historical data)
@@ -34,105 +34,105 @@ AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
 # clean_sheet_rate: Probability of at least one team keeping a clean sheet
 LEAGUE_PROFILES = {
     # England
-    'E0': {'avg_goals': 2.72, 'home_adv': 0.12, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'over55_rate': 0.04, 'clean_sheet_rate': 0.47, 'quality': 'elite', 'style': 'balanced'},
-    'E1': {'avg_goals': 2.65, 'home_adv': 0.10, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'over55_rate': 0.03, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
-    'E2': {'avg_goals': 2.58, 'home_adv': 0.11, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'over55_rate': 0.03, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
-    'E3': {'avg_goals': 2.61, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'over55_rate': 0.03, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
-    'EC': {'avg_goals': 2.65, 'home_adv': 0.12, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'over55_rate': 0.03, 'clean_sheet_rate': 0.49, 'quality': 'medium', 'style': 'balanced'},
+    'E0': {'avg_goals': 2.72, 'home_adv': 0.12, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'elite', 'style': 'balanced'},
+    'E1': {'avg_goals': 2.65, 'home_adv': 0.10, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
+    'E2': {'avg_goals': 2.58, 'home_adv': 0.11, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
+    'E3': {'avg_goals': 2.61, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+    'EC': {'avg_goals': 2.65, 'home_adv': 0.12, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'medium', 'style': 'balanced'},
 
     # Spain (more defensive, tactical)
-    'SP1': {'avg_goals': 2.48, 'home_adv': 0.15, 'btts_rate': 0.46, 'over25_rate': 0.45, 'over15_rate': 0.70, 'over35_rate': 0.20, 'over45_rate': 0.07, 'over55_rate': 0.02, 'clean_sheet_rate': 0.54, 'quality': 'elite', 'style': 'defensive'},
-    'SP2': {'avg_goals': 2.35, 'home_adv': 0.14, 'btts_rate': 0.43, 'over25_rate': 0.41, 'over15_rate': 0.67, 'over35_rate': 0.17, 'over45_rate': 0.06, 'over55_rate': 0.02, 'clean_sheet_rate': 0.57, 'quality': 'high', 'style': 'defensive'},
+    'SP1': {'avg_goals': 2.48, 'home_adv': 0.15, 'btts_rate': 0.46, 'over25_rate': 0.45, 'over15_rate': 0.70, 'over35_rate': 0.20, 'over45_rate': 0.07, 'clean_sheet_rate': 0.54, 'quality': 'elite', 'style': 'defensive'},
+    'SP2': {'avg_goals': 2.35, 'home_adv': 0.14, 'btts_rate': 0.43, 'over25_rate': 0.41, 'over15_rate': 0.67, 'over35_rate': 0.17, 'over45_rate': 0.06, 'clean_sheet_rate': 0.57, 'quality': 'high', 'style': 'defensive'},
 
     # Italy (tactically aware, balanced)
-    'I1': {'avg_goals': 2.68, 'home_adv': 0.11, 'btts_rate': 0.52, 'over25_rate': 0.51, 'over15_rate': 0.77, 'over35_rate': 0.27, 'over45_rate': 0.11, 'over55_rate': 0.04, 'clean_sheet_rate': 0.48, 'quality': 'elite', 'style': 'balanced'},
-    'I2': {'avg_goals': 2.45, 'home_adv': 0.12, 'btts_rate': 0.47, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'over55_rate': 0.02, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
+    'I1': {'avg_goals': 2.68, 'home_adv': 0.11, 'btts_rate': 0.52, 'over25_rate': 0.51, 'over15_rate': 0.77, 'over35_rate': 0.27, 'over45_rate': 0.11, 'clean_sheet_rate': 0.48, 'quality': 'elite', 'style': 'balanced'},
+    'I2': {'avg_goals': 2.45, 'home_adv': 0.12, 'btts_rate': 0.47, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
 
     # Germany (high scoring, end-to-end)
-    'D1': {'avg_goals': 3.05, 'home_adv': 0.09, 'btts_rate': 0.58, 'over25_rate': 0.60, 'over15_rate': 0.85, 'over35_rate': 0.35, 'over45_rate': 0.18, 'over55_rate': 0.06, 'clean_sheet_rate': 0.42, 'quality': 'elite', 'style': 'attacking'},
-    'D2': {'avg_goals': 2.85, 'home_adv': 0.10, 'btts_rate': 0.55, 'over25_rate': 0.56, 'over15_rate': 0.82, 'over35_rate': 0.32, 'over45_rate': 0.15, 'over55_rate': 0.05, 'clean_sheet_rate': 0.45, 'quality': 'high', 'style': 'attacking'},
+    'D1': {'avg_goals': 3.05, 'home_adv': 0.09, 'btts_rate': 0.58, 'over25_rate': 0.60, 'over15_rate': 0.85, 'over35_rate': 0.35, 'over45_rate': 0.18, 'clean_sheet_rate': 0.42, 'quality': 'elite', 'style': 'attacking'},
+    'D2': {'avg_goals': 2.85, 'home_adv': 0.10, 'btts_rate': 0.55, 'over25_rate': 0.56, 'over15_rate': 0.82, 'over35_rate': 0.32, 'over45_rate': 0.15, 'clean_sheet_rate': 0.45, 'quality': 'high', 'style': 'attacking'},
 
     # France (physical, moderate scoring)
-    'F1': {'avg_goals': 2.55, 'home_adv': 0.13, 'btts_rate': 0.48, 'over25_rate': 0.47, 'over15_rate': 0.73, 'over35_rate': 0.23, 'over45_rate': 0.09, 'over55_rate': 0.03, 'clean_sheet_rate': 0.52, 'quality': 'elite', 'style': 'balanced'},
-    'F2': {'avg_goals': 2.42, 'home_adv': 0.12, 'btts_rate': 0.45, 'over25_rate': 0.43, 'over15_rate': 0.68, 'over35_rate': 0.18, 'over45_rate': 0.06, 'over55_rate': 0.02, 'clean_sheet_rate': 0.55, 'quality': 'high', 'style': 'defensive'},
+    'F1': {'avg_goals': 2.55, 'home_adv': 0.13, 'btts_rate': 0.48, 'over25_rate': 0.47, 'over15_rate': 0.73, 'over35_rate': 0.23, 'over45_rate': 0.09, 'clean_sheet_rate': 0.52, 'quality': 'elite', 'style': 'balanced'},
+    'F2': {'avg_goals': 2.42, 'home_adv': 0.12, 'btts_rate': 0.45, 'over25_rate': 0.43, 'over15_rate': 0.68, 'over35_rate': 0.18, 'over45_rate': 0.06, 'clean_sheet_rate': 0.55, 'quality': 'high', 'style': 'defensive'},
 
     # Netherlands (attacking football culture)
-    'N1': {'avg_goals': 2.95, 'home_adv': 0.08, 'btts_rate': 0.60, 'over25_rate': 0.59, 'over15_rate': 0.84, 'over35_rate': 0.34, 'over45_rate': 0.16, 'over55_rate': 0.05, 'clean_sheet_rate': 0.40, 'quality': 'high', 'style': 'attacking'},
+    'N1': {'avg_goals': 2.95, 'home_adv': 0.08, 'btts_rate': 0.60, 'over25_rate': 0.59, 'over15_rate': 0.84, 'over35_rate': 0.34, 'over45_rate': 0.16, 'clean_sheet_rate': 0.40, 'quality': 'high', 'style': 'attacking'},
 
     # Belgium (high scoring, open games)
-    'B1': {'avg_goals': 2.78, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.53, 'over15_rate': 0.79, 'over35_rate': 0.29, 'over45_rate': 0.13, 'over55_rate': 0.04, 'clean_sheet_rate': 0.46, 'quality': 'high', 'style': 'balanced'},
+    'B1': {'avg_goals': 2.78, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.53, 'over15_rate': 0.79, 'over35_rate': 0.29, 'over45_rate': 0.13, 'clean_sheet_rate': 0.46, 'quality': 'high', 'style': 'balanced'},
 
     # Portugal (tactical, strong home advantage)
-    'P1': {'avg_goals': 2.52, 'home_adv': 0.16, 'btts_rate': 0.47, 'over25_rate': 0.46, 'over15_rate': 0.72, 'over35_rate': 0.22, 'over45_rate': 0.08, 'over55_rate': 0.03, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
+    'P1': {'avg_goals': 2.52, 'home_adv': 0.16, 'btts_rate': 0.47, 'over25_rate': 0.46, 'over15_rate': 0.72, 'over35_rate': 0.22, 'over45_rate': 0.08, 'clean_sheet_rate': 0.53, 'quality': 'high', 'style': 'defensive'},
 
     # Scotland
-    'SC0': {'avg_goals': 2.65, 'home_adv': 0.11, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'over55_rate': 0.03, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
-    'SC1': {'avg_goals': 2.58, 'home_adv': 0.13, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'over55_rate': 0.03, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
+    'SC0': {'avg_goals': 2.65, 'home_adv': 0.11, 'btts_rate': 0.51, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.49, 'quality': 'high', 'style': 'balanced'},
+    'SC1': {'avg_goals': 2.58, 'home_adv': 0.13, 'btts_rate': 0.49, 'over25_rate': 0.48, 'over15_rate': 0.74, 'over35_rate': 0.24, 'over45_rate': 0.09, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced'},
 
     # Turkey (high scoring, volatile)
-    'T1': {'avg_goals': 3.10, 'home_adv': 0.14, 'btts_rate': 0.59, 'over25_rate': 0.61, 'over15_rate': 0.86, 'over35_rate': 0.36, 'over45_rate': 0.19, 'over55_rate': 0.06, 'clean_sheet_rate': 0.41, 'quality': 'elite', 'style': 'attacking'},
+    'T1': {'avg_goals': 3.10, 'home_adv': 0.14, 'btts_rate': 0.59, 'over25_rate': 0.61, 'over15_rate': 0.86, 'over35_rate': 0.36, 'over45_rate': 0.19, 'clean_sheet_rate': 0.41, 'quality': 'elite', 'style': 'attacking'},
 
     # Greece
-    'G1': {'avg_goals': 2.35, 'home_adv': 0.18, 'btts_rate': 0.42, 'over25_rate': 0.40, 'over15_rate': 0.66, 'over35_rate': 0.16, 'over45_rate': 0.05, 'over55_rate': 0.02, 'clean_sheet_rate': 0.58, 'quality': 'medium', 'style': 'defensive'},
+    'G1': {'avg_goals': 2.35, 'home_adv': 0.18, 'btts_rate': 0.42, 'over25_rate': 0.40, 'over15_rate': 0.66, 'over35_rate': 0.16, 'over45_rate': 0.05, 'clean_sheet_rate': 0.58, 'quality': 'medium', 'style': 'defensive'},
 
     # Austria
-    'A1': {'avg_goals': 2.92, 'home_adv': 0.10, 'btts_rate': 0.56, 'over25_rate': 0.58, 'over15_rate': 0.83, 'over35_rate': 0.33, 'over45_rate': 0.15, 'over55_rate': 0.05, 'clean_sheet_rate': 0.44, 'quality': 'medium', 'style': 'attacking'},
+    'A1': {'avg_goals': 2.92, 'home_adv': 0.10, 'btts_rate': 0.56, 'over25_rate': 0.58, 'over15_rate': 0.83, 'over35_rate': 0.33, 'over45_rate': 0.15, 'clean_sheet_rate': 0.44, 'quality': 'medium', 'style': 'attacking'},
 
     # Switzerland
-    'SWZ': {'avg_goals': 2.75, 'home_adv': 0.09, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'over55_rate': 0.04, 'clean_sheet_rate': 0.47, 'quality': 'medium', 'style': 'balanced'},
+    'SWZ': {'avg_goals': 2.75, 'home_adv': 0.09, 'btts_rate': 0.53, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'medium', 'style': 'balanced'},
 
     # Poland
-    'POL': {'avg_goals': 2.62, 'home_adv': 0.12, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'over55_rate': 0.03, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+    'POL': {'avg_goals': 2.62, 'home_adv': 0.12, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
 
     # Russia
-    'RUS': {'avg_goals': 2.45, 'home_adv': 0.14, 'btts_rate': 0.46, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'over55_rate': 0.02, 'clean_sheet_rate': 0.54, 'quality': 'medium', 'style': 'defensive'},
+    'RUS': {'avg_goals': 2.45, 'home_adv': 0.14, 'btts_rate': 0.46, 'over25_rate': 0.44, 'over15_rate': 0.69, 'over35_rate': 0.19, 'over45_rate': 0.07, 'clean_sheet_rate': 0.54, 'quality': 'medium', 'style': 'defensive'},
 
     # ========== DOMESTIC CUPS (knockout - more unpredictable) ==========
     # FA Cup (England) - giant killings common, high scoring
-    'FAC': {'avg_goals': 2.85, 'home_adv': 0.08, 'btts_rate': 0.54, 'over25_rate': 0.55, 'over15_rate': 0.80, 'over35_rate': 0.30, 'over45_rate': 0.14, 'over55_rate': 0.05, 'clean_sheet_rate': 0.46, 'quality': 'high', 'style': 'attacking', 'is_cup': True},
+    'FAC': {'avg_goals': 2.85, 'home_adv': 0.08, 'btts_rate': 0.54, 'over25_rate': 0.55, 'over15_rate': 0.80, 'over35_rate': 0.30, 'over45_rate': 0.14, 'clean_sheet_rate': 0.46, 'quality': 'high', 'style': 'attacking', 'is_cup': True},
 
     # DFB Pokal (Germany) - similar to Bundesliga style
-    'DFB': {'avg_goals': 3.15, 'home_adv': 0.06, 'btts_rate': 0.59, 'over25_rate': 0.62, 'over15_rate': 0.86, 'over35_rate': 0.38, 'over45_rate': 0.20, 'over55_rate': 0.07, 'clean_sheet_rate': 0.41, 'quality': 'high', 'style': 'attacking', 'is_cup': True},
+    'DFB': {'avg_goals': 3.15, 'home_adv': 0.06, 'btts_rate': 0.59, 'over25_rate': 0.62, 'over15_rate': 0.86, 'over35_rate': 0.38, 'over45_rate': 0.20, 'clean_sheet_rate': 0.41, 'quality': 'high', 'style': 'attacking', 'is_cup': True},
 
     # Copa del Rey (Spain) - tactical but with upsets
-    'CDR': {'avg_goals': 2.55, 'home_adv': 0.10, 'btts_rate': 0.48, 'over25_rate': 0.48, 'over15_rate': 0.73, 'over35_rate': 0.23, 'over45_rate': 0.09, 'over55_rate': 0.03, 'clean_sheet_rate': 0.52, 'quality': 'high', 'style': 'balanced', 'is_cup': True},
+    'CDR': {'avg_goals': 2.55, 'home_adv': 0.10, 'btts_rate': 0.48, 'over25_rate': 0.48, 'over15_rate': 0.73, 'over35_rate': 0.23, 'over45_rate': 0.09, 'clean_sheet_rate': 0.52, 'quality': 'high', 'style': 'balanced', 'is_cup': True},
 
     # Coppa Italia (Italy) - conservative approach in cups
-    'CIT': {'avg_goals': 2.58, 'home_adv': 0.09, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'over55_rate': 0.03, 'clean_sheet_rate': 0.50, 'quality': 'high', 'style': 'balanced', 'is_cup': True},
+    'CIT': {'avg_goals': 2.58, 'home_adv': 0.09, 'btts_rate': 0.50, 'over25_rate': 0.49, 'over15_rate': 0.75, 'over35_rate': 0.25, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'high', 'style': 'balanced', 'is_cup': True},
 
     # Coupe de France (France) - amateur teams cause upsets
-    'CDF': {'avg_goals': 2.72, 'home_adv': 0.07, 'btts_rate': 0.51, 'over25_rate': 0.52, 'over15_rate': 0.77, 'over35_rate': 0.27, 'over45_rate': 0.11, 'over55_rate': 0.04, 'clean_sheet_rate': 0.49, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+    'CDF': {'avg_goals': 2.72, 'home_adv': 0.07, 'btts_rate': 0.51, 'over25_rate': 0.52, 'over15_rate': 0.77, 'over35_rate': 0.27, 'over45_rate': 0.11, 'clean_sheet_rate': 0.49, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
 
     # KNVB Beker (Netherlands) - Dutch attacking style
-    'KNVB': {'avg_goals': 3.05, 'home_adv': 0.06, 'btts_rate': 0.61, 'over25_rate': 0.61, 'over15_rate': 0.85, 'over35_rate': 0.36, 'over45_rate': 0.18, 'over55_rate': 0.06, 'clean_sheet_rate': 0.39, 'quality': 'medium', 'style': 'attacking', 'is_cup': True},
+    'KNVB': {'avg_goals': 3.05, 'home_adv': 0.06, 'btts_rate': 0.61, 'over25_rate': 0.61, 'over15_rate': 0.85, 'over35_rate': 0.36, 'over45_rate': 0.18, 'clean_sheet_rate': 0.39, 'quality': 'medium', 'style': 'attacking', 'is_cup': True},
 
     # Belgian Cup
-    'BEC': {'avg_goals': 2.88, 'home_adv': 0.08, 'btts_rate': 0.55, 'over25_rate': 0.56, 'over15_rate': 0.81, 'over35_rate': 0.31, 'over45_rate': 0.14, 'over55_rate': 0.05, 'clean_sheet_rate': 0.45, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+    'BEC': {'avg_goals': 2.88, 'home_adv': 0.08, 'btts_rate': 0.55, 'over25_rate': 0.56, 'over15_rate': 0.81, 'over35_rate': 0.31, 'over45_rate': 0.14, 'clean_sheet_rate': 0.45, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
 
     # Taça de Portugal
-    'TCP': {'avg_goals': 2.68, 'home_adv': 0.12, 'btts_rate': 0.49, 'over25_rate': 0.50, 'over15_rate': 0.75, 'over35_rate': 0.26, 'over45_rate': 0.11, 'over55_rate': 0.04, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+    'TCP': {'avg_goals': 2.68, 'home_adv': 0.12, 'btts_rate': 0.49, 'over25_rate': 0.50, 'over15_rate': 0.75, 'over35_rate': 0.26, 'over45_rate': 0.11, 'clean_sheet_rate': 0.51, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
 
     # Scottish FA Cup
-    'SFC': {'avg_goals': 2.78, 'home_adv': 0.08, 'btts_rate': 0.52, 'over25_rate': 0.53, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'over55_rate': 0.04, 'clean_sheet_rate': 0.48, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
+    'SFC': {'avg_goals': 2.78, 'home_adv': 0.08, 'btts_rate': 0.52, 'over25_rate': 0.53, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.48, 'quality': 'medium', 'style': 'balanced', 'is_cup': True},
 
     # Turkish Cup
-    'TFC': {'avg_goals': 3.18, 'home_adv': 0.10, 'btts_rate': 0.60, 'over25_rate': 0.63, 'over15_rate': 0.87, 'over35_rate': 0.38, 'over45_rate': 0.21, 'over55_rate': 0.07, 'clean_sheet_rate': 0.40, 'quality': 'medium', 'style': 'attacking', 'is_cup': True},
+    'TFC': {'avg_goals': 3.18, 'home_adv': 0.10, 'btts_rate': 0.60, 'over25_rate': 0.63, 'over15_rate': 0.87, 'over35_rate': 0.38, 'over45_rate': 0.21, 'clean_sheet_rate': 0.40, 'quality': 'medium', 'style': 'attacking', 'is_cup': True},
 
     # ========== ADDITIONAL EUROPEAN LEAGUES ==========
     # Denmark Superliga
-    'DEN': {'avg_goals': 2.82, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.55, 'over15_rate': 0.80, 'over35_rate': 0.30, 'over45_rate': 0.13, 'over55_rate': 0.04, 'clean_sheet_rate': 0.46, 'quality': 'medium', 'style': 'attacking'},
+    'DEN': {'avg_goals': 2.82, 'home_adv': 0.10, 'btts_rate': 0.54, 'over25_rate': 0.55, 'over15_rate': 0.80, 'over35_rate': 0.30, 'over45_rate': 0.13, 'clean_sheet_rate': 0.46, 'quality': 'medium', 'style': 'attacking'},
 
     # Norway Eliteserien
-    'NOR': {'avg_goals': 2.95, 'home_adv': 0.12, 'btts_rate': 0.57, 'over25_rate': 0.58, 'over15_rate': 0.83, 'over35_rate': 0.33, 'over45_rate': 0.16, 'over55_rate': 0.05, 'clean_sheet_rate': 0.43, 'quality': 'medium', 'style': 'attacking'},
+    'NOR': {'avg_goals': 2.95, 'home_adv': 0.12, 'btts_rate': 0.57, 'over25_rate': 0.58, 'over15_rate': 0.83, 'over35_rate': 0.33, 'over45_rate': 0.16, 'clean_sheet_rate': 0.43, 'quality': 'medium', 'style': 'attacking'},
 
     # Sweden Allsvenskan
-    'SWE': {'avg_goals': 2.78, 'home_adv': 0.11, 'btts_rate': 0.53, 'over25_rate': 0.53, 'over15_rate': 0.79, 'over35_rate': 0.29, 'over45_rate': 0.12, 'over55_rate': 0.04, 'clean_sheet_rate': 0.47, 'quality': 'medium', 'style': 'balanced'},
+    'SWE': {'avg_goals': 2.78, 'home_adv': 0.11, 'btts_rate': 0.53, 'over25_rate': 0.53, 'over15_rate': 0.79, 'over35_rate': 0.29, 'over45_rate': 0.12, 'clean_sheet_rate': 0.47, 'quality': 'medium', 'style': 'balanced'},
 
     # Czech First League
-    'CZE': {'avg_goals': 2.65, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'over55_rate': 0.03, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
+    'CZE': {'avg_goals': 2.65, 'home_adv': 0.13, 'btts_rate': 0.50, 'over25_rate': 0.50, 'over15_rate': 0.76, 'over35_rate': 0.26, 'over45_rate': 0.10, 'clean_sheet_rate': 0.50, 'quality': 'medium', 'style': 'balanced'},
 
     # Croatia HNL
-    'CRO': {'avg_goals': 2.72, 'home_adv': 0.14, 'btts_rate': 0.52, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'over55_rate': 0.04, 'clean_sheet_rate': 0.48, 'quality': 'medium', 'style': 'balanced'},
+    'CRO': {'avg_goals': 2.72, 'home_adv': 0.14, 'btts_rate': 0.52, 'over25_rate': 0.52, 'over15_rate': 0.78, 'over35_rate': 0.28, 'over45_rate': 0.12, 'clean_sheet_rate': 0.48, 'quality': 'medium', 'style': 'balanced'},
 }
 
 def _load_base_features() -> pd.DataFrame:
@@ -140,27 +140,22 @@ def _load_base_features() -> pd.DataFrame:
     df = pd.read_parquet(FEATURES_PARQUET)
     if not np.issubdtype(df["Date"].dtype, np.datetime64):
         df["Date"] = pd.to_datetime(df["Date"])
-    return df.sort_values(["Date","League"])
+    return df.sort_values(["League","Date"])
 
 def calculate_league_profiles(df: pd.DataFrame) -> Dict:
-    """Calculate actual league profiles from historical data.
-    Merges with static LEAGUE_PROFILES so expert-set fields (style, quality,
-    clean_sheet_rate) are preserved while data-driven rates are updated."""
-    # Start from static profiles as base
-    profiles = {k: dict(v) for k, v in LEAGUE_PROFILES.items()}
-
+    """Calculate actual league profiles from historical data"""
+    profiles = {}
+    
     for league in df['League'].unique():
         league_data = df[df['League'] == league]
         if len(league_data) < 50:
             continue
-
+            
         total_goals = league_data['FTHG'].fillna(0) + league_data['FTAG'].fillna(0)
         home_wins = (league_data['FTR'] == 'H').mean()
         away_wins = (league_data['FTR'] == 'A').mean()
-        clean_sheets = ((league_data['FTHG'] == 0) | (league_data['FTAG'] == 0)).mean()
-
-        # Update data-driven fields, preserve static fields (style, quality)
-        dynamic = {
+        
+        profiles[league] = {
             'avg_goals': total_goals.mean(),
             'home_adv': home_wins - away_wins,
             'btts_rate': ((league_data['FTHG'] > 0) & (league_data['FTAG'] > 0)).mean(),
@@ -168,24 +163,14 @@ def calculate_league_profiles(df: pd.DataFrame) -> Dict:
             'over15_rate': (total_goals > 1.5).mean(),
             'over35_rate': (total_goals > 3.5).mean(),
             'over45_rate': (total_goals > 4.5).mean(),
-            'over55_rate': (total_goals > 5.5).mean(),
-            'clean_sheet_rate': clean_sheets,
         }
-
-        if league in profiles:
-            profiles[league].update(dynamic)
-        else:
-            # New league not in static profiles — set defaults
-            dynamic['style'] = 'balanced'
-            dynamic['quality'] = 'medium'
-            profiles[league] = dynamic
-
+    
     return profiles
 
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
     """Calibrate probability based on league-specific patterns and style."""
     if league not in league_profiles:
-        return max(0.01, min(0.99, prob))
+        return prob
 
     profile = league_profiles[league]
     style = profile.get('style', 'balanced')
@@ -214,7 +199,7 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
         return max(0.01, min(0.99, calibrated - goal_style_adj * 0.5))
 
     elif 'OU_0_5_O' in market:
-        return max(0.01, min(prob * 1.05, 0.99))  # Boost slightly (0.5 goals is very likely)
+        return min(prob * 1.05, 0.99)  # Boost slightly (0.5 goals is very likely)
 
     elif 'OU_1_5_O' in market:
         league_avg = profile.get('over15_rate', 0.7)
@@ -236,58 +221,102 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
         calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
         return max(0.01, min(0.99, calibrated + goal_style_adj * 0.6))
 
-    elif 'OU_5_5_O' in market:
-        league_avg = profile.get('over55_rate', 0.04)
-        calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
-        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.4))
-
     elif '_U' in market and 'OU_' in market:
         # Under markets - inverse of style adjustment
         return max(0.01, min(0.99, prob - goal_style_adj))
 
-    # ========== RESULT & DIRECTIONAL MARKETS ==========
-    # NOTE: Do NOT apply home advantage adjustments here.
-    # The ML models already learn home advantage from features, and the
-    # Dixon-Coles model has explicit home advantage parameters.
-    # Adding a third layer of home bias caused systematic over-prediction
-    # of home wins and collapsed accuracy from 75% to near 0%.
+    # ========== HOME/AWAY ADVANTAGE CALIBRATION ==========
 
-    # 1X2 - just bound, no home bias
-    elif '1X2_H' in market or '1X2_A' in market or '1X2_D' in market:
-        return max(0.01, min(0.99, prob))
+    # Match result markets
+    elif '1X2_H' in market:
+        return min(prob * (1 + home_adv * 0.3), 0.95)
 
-    # Double Chance - just bound
-    elif 'DC_1X' in market or 'DC1X' in market or 'DC_X2' in market or 'DCX2' in market or 'DC_12' in market or 'DC12' in market:
-        return max(0.01, min(0.99, prob))
+    elif '1X2_A' in market:
+        return max(prob * (1 - home_adv * 0.3), 0.05)
 
-    # Draw No Bet - just bound
-    elif 'DNB_H' in market or 'DNB_A' in market:
-        return max(0.01, min(0.99, prob))
+    elif '1X2_D' in market:
+        # Draw less likely in leagues with high home advantage
+        return max(0.05, min(0.45, prob * (1 - home_adv * 0.15)))
 
-    # Home/Away team goals - just bound
-    elif 'HomeTG_' in market or 'HomeExact' in market or 'AwayTG_' in market or 'AwayExact' in market:
-        return max(0.01, min(0.99, prob))
+    # Double Chance markets
+    elif 'DC_1X' in market or 'DC1X' in market:
+        # Home or Draw - boosted by home advantage
+        return min(prob * (1 + home_adv * 0.15), 0.95)
 
-    # Team to score - just bound
-    elif 'HomeToScore' in market or 'AwayToScore' in market:
-        return max(0.01, min(0.99, prob))
+    elif 'DC_X2' in market or 'DCX2' in market:
+        # Away or Draw - reduced by home advantage
+        return max(prob * (1 - home_adv * 0.15), 0.15)
 
-    # Win to Nil / Clean Sheet - use league clean_sheet_rate but no home bias
-    elif 'WTN' in market or 'HomeCS' in market or 'AwayCS' in market:
+    elif 'DC_12' in market or 'DC12' in market:
+        # Home or Away (no draw) - slight boost in high home adv leagues
+        return min(prob * (1 + home_adv * 0.08), 0.95)
+
+    # Draw No Bet
+    elif 'DNB_H' in market:
+        return min(prob * (1 + home_adv * 0.25), 0.90)
+
+    elif 'DNB_A' in market:
+        return max(prob * (1 - home_adv * 0.25), 0.10)
+
+    # Home/Away team goals
+    elif 'HomeTG_' in market or 'HomeExact' in market:
+        # Home team goals - boosted by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob + line_boost))
+
+    elif 'AwayTG_' in market or 'AwayExact' in market:
+        # Away team goals - reduced by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob - line_boost))
+
+    # Team to score
+    elif 'HomeToScore' in market:
+        return min(prob * (1 + home_adv * 0.10), 0.95)
+
+    elif 'AwayToScore' in market:
+        return max(prob * (1 - home_adv * 0.10), 0.20)
+
+    # Win to Nil / Clean Sheet - with home/away distinction
+    elif 'HomeWTN' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.5) * calibration_weight
+        # Home WTN boosted by home advantage
+        return max(0.01, min(0.60, base * (1 + home_adv * 0.20) - goal_style_adj * 0.3))
+
+    elif 'AwayWTN' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.35) * calibration_weight
+        # Away WTN reduced by home advantage
+        return max(0.01, min(0.40, base * (1 - home_adv * 0.20) - goal_style_adj * 0.3))
+
+    elif 'HomeCS' in market:
         base = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
-        return max(0.01, min(0.99, base - goal_style_adj * 0.3))
+        return max(0.01, min(0.65, base * (1 + home_adv * 0.15) - goal_style_adj * 0.4))
+
+    elif 'AwayCS' in market:
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.8) * calibration_weight
+        return max(0.01, min(0.55, base * (1 - home_adv * 0.15) - goal_style_adj * 0.4))
 
     elif 'NoGoal' in market:
+        # 0-0 draw - defensive leagues boost, high home adv reduces
         base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.15) * calibration_weight
         return max(0.01, min(0.15, base - goal_style_adj * 0.5))
 
-    # Win by margin - just bound
-    elif 'HomeWin' in market or 'AwayWin' in market:
-        return max(0.01, min(0.99, prob))
+    # Win by margin - home/away
+    elif 'HomeWin' in market:
+        boost = home_adv * 0.15
+        return max(0.01, min(0.85, prob + boost))
 
-    # Asian Handicap - just bound
+    elif 'AwayWin' in market:
+        boost = home_adv * 0.15
+        return max(0.01, min(0.60, prob - boost))
+
+    # Asian Handicap - home advantage affects line perception
     elif 'AH_' in market:
-        return max(0.01, min(0.99, prob))
+        if '_H' in market or market.endswith('_H'):
+            # Home covers handicap
+            return max(0.01, min(0.85, prob + home_adv * 0.08))
+        elif '_A' in market or market.endswith('_A'):
+            # Away covers handicap
+            return max(0.01, min(0.85, prob - home_adv * 0.08))
 
     return prob
 
@@ -305,37 +334,33 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
             
             if pd.notna(row[curr_col]) and pd.notna(row[next_col]):
                 if row[curr_col] < row[next_col]:
-                    # Preserve original values as much as possible:
-                    # keep higher line's value, nudge lower line just above it
-                    row[curr_col] = min(row[next_col] + 0.01, 0.99)
-                    # Only adjust next_col if curr_col hit the ceiling
-                    if row[curr_col] <= row[next_col]:
-                        row[next_col] = max(row[curr_col] - 0.01, 0.01)
+                    avg = (row[curr_col] + row[next_col]) / 2
+                    row[curr_col] = min(avg + 0.05, 0.99)
+                    row[next_col] = max(avg - 0.05, 0.01)
                 
                 # Update Under probabilities
                 row[f'P_OU_{curr_line}_U'] = 1 - row[curr_col]
                 row[f'P_OU_{next_line}_U'] = 1 - row[next_col]
     
     # 2. BTTS and O/U 0.5 logical consistency
-    if 'P_BTTS_Y' in row and 'P_OU_0_5_U' in row and 'P_OU_0_5_O' in row:
-        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_U']) and pd.notna(row['P_OU_0_5_O']):
+    if 'P_BTTS_Y' in row and 'P_OU_0_5_U' in row:
+        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_U']):
             # BTTS=Yes implies Over 0.5 must be very high
             if row['P_BTTS_Y'] > 0.7:
                 row['P_OU_0_5_U'] = min(row['P_OU_0_5_U'], 0.02)
                 row['P_OU_0_5_O'] = max(row['P_OU_0_5_O'], 0.98)
             
-            # Under 0.5 high means BTTS=Yes should be very low (capped at complement)
+            # Under 0.5 high means BTTS=Yes must be zero
             if row['P_OU_0_5_U'] > 0.5:
-                max_btts_y = 1.0 - row['P_OU_0_5_U']  # e.g. if U=0.7, cap at 0.3
-                row['P_BTTS_Y'] = min(row['P_BTTS_Y'], max_btts_y)
-                row['P_BTTS_N'] = 1.0 - row['P_BTTS_Y']
+                row['P_BTTS_Y'] = 0.0
+                row['P_BTTS_N'] = 1.0
     
     # 3. BTTS and O/U 1.5 consistency
-    if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row and 'P_OU_1_5_U' in row:
+    if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row:
         if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_1_5_O']):
             # BTTS=Yes requires at least 2 goals (Over 1.5)
             if row['P_BTTS_Y'] > 0.6:
-                row['P_OU_1_5_O'] = max(row['P_OU_1_5_O'], min(row['P_BTTS_Y'] * 0.9, 0.99))
+                row['P_OU_1_5_O'] = max(row['P_OU_1_5_O'], row['P_BTTS_Y'] * 0.9)
                 row['P_OU_1_5_U'] = 1 - row['P_OU_1_5_O']
     
     # 4. 1X2 probabilities sum to 1.0
@@ -357,7 +382,7 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
         if all(pd.notna(row[col]) for col in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
             # BTTS requires both teams to score
             min_btts = row['P_HomeTG_0_5_O'] * row['P_AwayTG_0_5_O']
-            row['P_BTTS_Y'] = max(row['P_BTTS_Y'], min(min_btts * 0.85, 0.99))
+            row['P_BTTS_Y'] = max(row['P_BTTS_Y'], min_btts * 0.85)
             row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
     
     return row
@@ -395,10 +420,8 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
             blend_weight = 0.5  # Equal blend
         elif line == '3_5':
             blend_weight = 0.4
-        elif line == '4_5':
+        else:  # 4_5
             blend_weight = 0.3
-        else:  # 5_5
-            blend_weight = 0.25  # Low Poisson weight for extreme line
         
         if f'P_OU_{line}_O' in row and pd.notna(row[f'P_OU_{line}_O']):
             row[f'P_OU_{line}_O'] = row[f'P_OU_{line}_O'] * (1 - blend_weight) + poisson_over * blend_weight
@@ -416,180 +439,151 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
     return row
 
 def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
-    """Enhanced feature building with time weighting"""
+    """Build feature frame for upcoming fixtures.
+
+    Uses the SAME feature values the model was trained on: for each fixture,
+    finds each team's most recent historical row (where that team played at
+    home or away) and takes the rolling features already computed during
+    training.  This eliminates the previous train/serve skew where inference
+    re-computed features with different weighting.
+
+    The key insight: features.parquet already contains Home_GF_ma3 etc.
+    computed with shift(1).rolling().  The most recent row for a team in
+    that parquet already represents "form going into the next match" because
+    shift(1) ensures features use only prior matches.
+    """
     base = _load_base_features()
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
-    
-    # Add time weights for recent form emphasis
-    current_date = datetime.now()
-    base['days_ago'] = (current_date - pd.to_datetime(base['Date'])).dt.days
-    base['time_weight'] = np.exp(-base['days_ago'] / 180)  # 180-day half-life
-    
+
+    # Columns that are valid features (not targets, not result/leakage cols)
+    leakage_cols = {"FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
+                    "HomeGoals", "AwayGoals", "OU25",
+                    "HS", "AS", "HST", "AST", "HC", "AC",
+                    "HY", "AY", "HR", "AR", "HF", "AF"}
+
     rows = []
     for _, r in fx.iterrows():
         lg, dt, ht, at = r["League"], r["Date"], r["HomeTeam"], r["AwayTeam"]
         hist_lg = base[base["League"] == lg]
-        
-        # Get last 10 games for each team with time weighting
-        hrow = hist_lg[(hist_lg["HomeTeam"]==ht) | (hist_lg["AwayTeam"]==ht)]
-        hrow = hrow[hrow["Date"]<dt].sort_values("Date").tail(10)
-        
-        arow = hist_lg[(hist_lg["HomeTeam"]==at) | (hist_lg["AwayTeam"]==at)]
-        arow = arow[arow["Date"]<dt].sort_values("Date").tail(10)
-        
-        if hrow.empty or arow.empty:
+
+        # Find the most recent match for each team BEFORE the fixture date
+        ht_matches = hist_lg[
+            ((hist_lg["HomeTeam"] == ht) | (hist_lg["AwayTeam"] == ht))
+            & (hist_lg["Date"] < dt)
+        ].sort_values("Date")
+
+        at_matches = hist_lg[
+            ((hist_lg["HomeTeam"] == at) | (hist_lg["AwayTeam"] == at))
+            & (hist_lg["Date"] < dt)
+        ].sort_values("Date")
+
+        if ht_matches.empty or at_matches.empty:
             continue
-        
-        feat_cols = [c for c in base.columns if not c.startswith("y_")
-                     and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
 
-        home_prefix_cols = [c for c in feat_cols if c.startswith("Home_")]
-        away_prefix_cols = [c for c in feat_cols if c.startswith("Away_")]
-        neutral_cols = [c for c in feat_cols if not c.startswith("Home_") and not c.startswith("Away_")]
+        # Take the most recent row for each team
+        ht_last = ht_matches.iloc[-1]
+        at_last = at_matches.iloc[-1]
 
-        fused = pd.DataFrame()
+        fused = {}
 
-        def _team_weighted_avg(team_matches, team_name, target_prefix, n=5):
-            """Get weighted average of team's own stats from their matches.
-            When team was home, use Home_* columns. When away, use Away_* columns."""
-            was_home = team_matches[team_matches["HomeTeam"] == team_name].tail(n)
-            was_away = team_matches[team_matches["AwayTeam"] == team_name].tail(n)
+        # --- Home team features ---
+        # If the home team's last match was also at home, take Home_* directly.
+        # If it was away, take Away_* (their perspective) and map to Home_*.
+        ht_was_home = (ht_last["HomeTeam"] == ht)
+        for col in base.columns:
+            if col.startswith("Home_"):
+                suffix = col[5:]  # strip "Home_"
+                if ht_was_home:
+                    fused[col] = ht_last.get(col, np.nan)
+                else:
+                    fused[col] = ht_last.get(f"Away_{suffix}", np.nan)
 
-            results = {}
-            # Get all Home_ prefixed feature names
-            for hcol in home_prefix_cols:
-                suffix = hcol[5:]  # Remove "Home_"
-                acol = f"Away_{suffix}"
+        # --- Away team features ---
+        at_was_away = (at_last["AwayTeam"] == at)
+        for col in base.columns:
+            if col.startswith("Away_"):
+                suffix = col[5:]  # strip "Away_"
+                if at_was_away:
+                    fused[col] = at_last.get(col, np.nan)
+                else:
+                    fused[col] = at_last.get(f"Home_{suffix}", np.nan)
 
-                # Collect values: Home_ when team was home, Away_ when team was away
-                vals, wts = [], []
-                if hcol in was_home.columns:
-                    for _, row_m in was_home.iterrows():
-                        v = row_m.get(hcol)
-                        if v is not None and pd.notna(v):
-                            vals.append(float(v))
-                            wts.append(float(row_m.get('time_weight', 1.0)))
-                if acol in was_away.columns:
-                    for _, row_m in was_away.iterrows():
-                        v = row_m.get(acol)
-                        if v is not None and pd.notna(v):
-                            vals.append(float(v))
-                            wts.append(float(row_m.get('time_weight', 1.0)))
+        # --- Elo features: take from the most recent row for each team ---
+        for elo_col in ["Elo_Home", "Elo_Mom_Home"]:
+            if elo_col in base.columns:
+                if ht_was_home:
+                    fused[elo_col] = ht_last.get(elo_col, np.nan)
+                else:
+                    # Team was away last time, so their Elo was stored as Elo_Away
+                    mapped = elo_col.replace("Home", "Away")
+                    fused[elo_col] = ht_last.get(mapped, np.nan)
 
-                if vals and sum(wts) > 0:
-                    # Sort by recency (most recent last) and take last n
-                    results[f"{target_prefix}_{suffix}"] = np.average(vals[-n:], weights=wts[-n:])
-                elif vals:
-                    results[f"{target_prefix}_{suffix}"] = vals[-1]
+        for elo_col in ["Elo_Away", "Elo_Mom_Away"]:
+            if elo_col in base.columns:
+                if at_was_away:
+                    fused[elo_col] = at_last.get(elo_col, np.nan)
+                else:
+                    mapped = elo_col.replace("Away", "Home")
+                    fused[elo_col] = at_last.get(mapped, np.nan)
 
-            return results
+        # Elo derived
+        if "Elo_Diff" in base.columns:
+            elo_h = fused.get("Elo_Home", 1500)
+            elo_a = fused.get("Elo_Away", 1500)
+            fused["Elo_Diff"] = (elo_h if pd.notna(elo_h) else 1500) - (elo_a if pd.notna(elo_a) else 1500)
+        if "Elo_Mom_Diff" in base.columns:
+            mom_h = fused.get("Elo_Mom_Home", 0)
+            mom_a = fused.get("Elo_Mom_Away", 0)
+            fused["Elo_Mom_Diff"] = (mom_h if pd.notna(mom_h) else 0) - (mom_a if pd.notna(mom_a) else 0)
 
-        # Home team: collect their stats mapped to Home_* columns
-        home_stats = _team_weighted_avg(hrow, ht, "Home")
-        for col, val in home_stats.items():
-            fused.at[0, col] = val
+        # --- Contextual features: compute fresh ---
+        match_date = pd.to_datetime(dt)
+        fused["DayOfWeek"] = match_date.dayofweek
+        fused["IsWeekend"] = 1 if match_date.dayofweek >= 5 else 0
+        fused["Month"] = match_date.month
+        m = match_date.month
+        fused["SeasonProgress"] = max(0, min(1, (m - 8) / 10 if m >= 8 else (m + 4) / 10))
 
-        # Away team: collect their stats mapped to Away_* columns
-        away_stats = _team_weighted_avg(arow, at, "Away")
-        for col, val in away_stats.items():
-            fused.at[0, col] = val
+        # Rest days
+        if not ht_matches.empty:
+            last_date_h = pd.to_datetime(ht_matches.iloc[-1]["Date"])
+            fused["Home_RestDays"] = min((match_date - last_date_h).days, 21)
+        else:
+            fused["Home_RestDays"] = 7
+        if not at_matches.empty:
+            last_date_a = pd.to_datetime(at_matches.iloc[-1]["Date"])
+            fused["Away_RestDays"] = min((match_date - last_date_a).days, 21)
+        else:
+            fused["Away_RestDays"] = 7
+        fused["RestDiff"] = fused["Home_RestDays"] - fused["Away_RestDays"]
 
-        # Neutral columns (League, Date, etc.) - take from most recent match
-        for col in neutral_cols:
-            if col in hrow.columns:
-                fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-        
+        # --- Market/odds features: use most recent home row's odds ---
+        # (We don't have odds for the future match at this point, so carry
+        # forward the last known odds implied probabilities)
+        for col in base.columns:
+            if col not in fused and not col.startswith("y_") and col not in leakage_cols:
+                if col in ["League", "Date", "HomeTeam", "AwayTeam"]:
+                    continue
+                # For odds-implied and other non-rolling features, use last value
+                fused[col] = ht_last.get(col, np.nan)
+
+        # --- Set identity and targets ---
         fused["League"] = lg
         fused["Date"] = dt
         fused["HomeTeam"] = ht
         fused["AwayTeam"] = at
-        
+
         for c in base.columns:
             if c.startswith("y_"):
                 fused[c] = pd.NA
-        
+
         rows.append(fused)
-    
+
     if not rows:
         raise RuntimeError("No fixtures matched with historical features.")
-    
-    return pd.concat(rows, ignore_index=True).sort_values(["Date","League","HomeTeam"])
 
-def _reorder_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Reorder columns: match details first, key markets next, zero/NaN cols last."""
-    all_cols = list(df.columns)
-
-    # 1. Match details first
-    id_order = ["Date", "League", "HomeTeam", "AwayTeam"]
-    first = [c for c in id_order if c in all_cols]
-
-    # 2. Key prediction markets in logical order
-    market_order = [
-        # 1X2
-        "P_1X2_H", "P_1X2_D", "P_1X2_A",
-        "BLEND_1X2_H", "BLEND_1X2_D", "BLEND_1X2_A",
-        "DC_1X2_H", "DC_1X2_D", "DC_1X2_A",
-        # BTTS
-        "P_BTTS_Y", "P_BTTS_N",
-        "BLEND_BTTS_Y", "BLEND_BTTS_N",
-        "DC_BTTS_Y", "DC_BTTS_N",
-        # Key OU lines
-        "P_OU_1_5_O", "P_OU_1_5_U",
-        "P_OU_2_5_O", "P_OU_2_5_U",
-        "P_OU_3_5_O", "P_OU_3_5_U",
-        "BLEND_OU_1_5_O", "BLEND_OU_1_5_U",
-        "BLEND_OU_2_5_O", "BLEND_OU_2_5_U",
-        "BLEND_OU_3_5_O", "BLEND_OU_3_5_U",
-        "DC_OU_1_5_O", "DC_OU_1_5_U",
-        "DC_OU_2_5_O", "DC_OU_2_5_U",
-        "DC_OU_3_5_O", "DC_OU_3_5_U",
-    ]
-    key_markets = [c for c in market_order if c in all_cols]
-
-    # 2b. Odds columns paired with their markets
-    odds_order = [
-        # 1X2 odds
-        "ODDS_1X2_H", "ODDS_1X2_D", "ODDS_1X2_A",
-        # BTTS odds
-        "ODDS_BTTS_Y", "ODDS_BTTS_N",
-        # OU odds (key lines)
-        "ODDS_OU_0_5_O", "ODDS_OU_0_5_U",
-        "ODDS_OU_1_5_O", "ODDS_OU_1_5_U",
-        "ODDS_OU_2_5_O", "ODDS_OU_2_5_U",
-        "ODDS_OU_3_5_O", "ODDS_OU_3_5_U",
-        "ODDS_OU_4_5_O", "ODDS_OU_4_5_U",
-        "ODDS_OU_5_5_O", "ODDS_OU_5_5_U",
-        # Double Chance odds
-        "ODDS_DC_1X", "ODDS_DC_12", "ODDS_DC_X2",
-    ]
-    odds_named = [c for c in odds_order if c in all_cols]
-    # Also grab any remaining ODDS_ columns not explicitly listed (AH, HTFT, etc.)
-    odds_extra = [c for c in all_cols if c.startswith("ODDS_") and c not in odds_named]
-    odds_cols_ordered = odds_named + sorted(odds_extra)
-
-    # 3. Confidence/meta columns
-    meta_cols = [c for c in all_cols if c.startswith("CONF_") or c.startswith("AGREE_")
-                 or c in ("MaxConfidence", "AvgConfidence", "BestProb", "BestMarket")]
-    meta = [c for c in meta_cols if c in all_cols]
-
-    used = set(first + key_markets + odds_cols_ordered + meta)
-
-    # 4. Remaining columns that have real data (at least one non-zero, non-NaN value)
-    remaining = [c for c in all_cols if c not in used]
-    has_data = []
-    all_zero_or_nan = []
-    for c in remaining:
-        if df[c].dtype in ('object', 'string', 'datetime64[ns]', 'category', 'bool'):
-            has_data.append(c)
-        elif df[c].notna().any() and (df[c].fillna(0) != 0).any():
-            has_data.append(c)
-        else:
-            all_zero_or_nan.append(c)
-
-    ordered = first + key_markets + odds_cols_ordered + meta + has_data + all_zero_or_nan
-    return df[ordered]
-
+    return pd.DataFrame(rows).sort_values(["League","Date","HomeTeam"]).reset_index(drop=True)
 
 def _collect_market_columns() -> List[str]:
     """All expected probability column names - COMPREHENSIVE VERSION"""
@@ -737,7 +731,7 @@ def _collect_market_columns() -> List[str]:
 
     return cols
 
-def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None, future_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:
+def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:
     """Enhanced mapping with all improvements"""
     out_cols = _collect_market_columns()
     n_rows = next(iter(preds.values())).shape[0] if preds else 0
@@ -764,9 +758,9 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None,
         # Get fixture info
         league = fixtures_df.iloc[i]['League'] if fixtures_df is not None and 'League' in fixtures_df.columns else None
         
-        # Initialize with NaN so missing markets don't get treated as real predictions
+        # Initialize
         for col in out_cols:
-            row[col] = np.nan
+            row[col] = 0.0
         
         # Map predictions (same as predict2.py)
         if "y_1X2" in preds:
@@ -824,6 +818,133 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None,
                 row[f"P_AwayTG_{l}_O"] = pick(p, ak, "O")
                 row[f"P_AwayTG_{l}_U"] = pick(p, ak, "U")
         
+        # ====================================================================
+        # DERIVE secondary markets from primary model outputs.
+        # These are mathematically determined — no separate model needed.
+        # ====================================================================
+        p_h = row.get("P_1X2_H", 0)
+        p_d = row.get("P_1X2_D", 0)
+        p_a = row.get("P_1X2_A", 0)
+        p_btts_y = row.get("P_BTTS_Y", 0)
+        p_btts_n = row.get("P_BTTS_N", 0)
+        p_ou25_o = row.get("P_OU_2_5_O", 0)
+        p_ou25_u = row.get("P_OU_2_5_U", 0)
+
+        # Double Chance (direct sums from 1X2)
+        if "y_DC_1X" not in preds:
+            row["P_DC_1X_Y"] = min(p_h + p_d, 0.99)
+            row["P_DC_1X_N"] = max(1 - row["P_DC_1X_Y"], 0.01)
+        if "y_DC_X2" not in preds:
+            row["P_DC_X2_Y"] = min(p_d + p_a, 0.99)
+            row["P_DC_X2_N"] = max(1 - row["P_DC_X2_Y"], 0.01)
+        if "y_DC_12" not in preds:
+            row["P_DC_12_Y"] = min(p_h + p_a, 0.99)
+            row["P_DC_12_N"] = max(1 - row["P_DC_12_Y"], 0.01)
+
+        # Draw No Bet (1X2 excluding draw, renormalised)
+        ha_sum = p_h + p_a
+        if "y_DNB_H" not in preds and ha_sum > 0:
+            row["P_DNB_H_Y"] = p_h / ha_sum
+            row["P_DNB_H_N"] = p_a / ha_sum
+        if "y_DNB_A" not in preds and ha_sum > 0:
+            row["P_DNB_A_Y"] = p_a / ha_sum
+            row["P_DNB_A_N"] = p_h / ha_sum
+
+        # Team To Score (from team goal O/U 0.5)
+        if "y_HomeToScore" not in preds:
+            row["P_HomeToScore_Y"] = row.get("P_HomeTG_0_5_O", 0.7)
+            row["P_HomeToScore_N"] = row.get("P_HomeTG_0_5_U", 0.3)
+        if "y_AwayToScore" not in preds:
+            row["P_AwayToScore_Y"] = row.get("P_AwayTG_0_5_O", 0.6)
+            row["P_AwayToScore_N"] = row.get("P_AwayTG_0_5_U", 0.4)
+
+        # Clean Sheets (from opponent team goals O/U 0.5)
+        if "y_HomeCS" not in preds:
+            row["P_HomeCS_Y"] = row.get("P_AwayTG_0_5_U", 0.35)
+            row["P_HomeCS_N"] = row.get("P_AwayTG_0_5_O", 0.65)
+        if "y_AwayCS" not in preds:
+            row["P_AwayCS_Y"] = row.get("P_HomeTG_0_5_U", 0.28)
+            row["P_AwayCS_N"] = row.get("P_HomeTG_0_5_O", 0.72)
+
+        # Win to Nil = win AND opponent scores 0
+        if "y_HomeWTN" not in preds:
+            p_away_nil = row.get("P_AwayTG_0_5_U", 0.35)
+            row["P_HomeWTN_Y"] = p_h * p_away_nil
+            row["P_HomeWTN_N"] = 1 - row["P_HomeWTN_Y"]
+        if "y_AwayWTN" not in preds:
+            p_home_nil = row.get("P_HomeTG_0_5_U", 0.28)
+            row["P_AwayWTN_Y"] = p_a * p_home_nil
+            row["P_AwayWTN_N"] = 1 - row["P_AwayWTN_Y"]
+
+        # Result + BTTS combos (approximate: treat result & BTTS as independent)
+        if "y_HomeWin_BTTS_Y" not in preds:
+            row["P_HomeWin_BTTS_Y_Y"] = p_h * p_btts_y
+            row["P_HomeWin_BTTS_Y_N"] = 1 - row["P_HomeWin_BTTS_Y_Y"]
+        if "y_HomeWin_BTTS_N" not in preds:
+            row["P_HomeWin_BTTS_N_Y"] = p_h * p_btts_n
+            row["P_HomeWin_BTTS_N_N"] = 1 - row["P_HomeWin_BTTS_N_Y"]
+        if "y_AwayWin_BTTS_Y" not in preds:
+            row["P_AwayWin_BTTS_Y_Y"] = p_a * p_btts_y
+            row["P_AwayWin_BTTS_Y_N"] = 1 - row["P_AwayWin_BTTS_Y_Y"]
+        if "y_AwayWin_BTTS_N" not in preds:
+            row["P_AwayWin_BTTS_N_Y"] = p_a * p_btts_n
+            row["P_AwayWin_BTTS_N_N"] = 1 - row["P_AwayWin_BTTS_N_Y"]
+        if "y_Draw_BTTS_Y" not in preds:
+            row["P_Draw_BTTS_Y_Y"] = p_d * p_btts_y
+            row["P_Draw_BTTS_Y_N"] = 1 - row["P_Draw_BTTS_Y_Y"]
+        if "y_Draw_BTTS_N" not in preds:
+            row["P_Draw_BTTS_N_Y"] = p_d * p_btts_n
+            row["P_Draw_BTTS_N_N"] = 1 - row["P_Draw_BTTS_N_Y"]
+
+        # Result + O/U 2.5 combos
+        if "y_HomeWin_O25" not in preds:
+            row["P_HomeWin_O25_Y"] = p_h * p_ou25_o
+            row["P_HomeWin_O25_N"] = 1 - row["P_HomeWin_O25_Y"]
+        if "y_HomeWin_U25" not in preds:
+            row["P_HomeWin_U25_Y"] = p_h * p_ou25_u
+            row["P_HomeWin_U25_N"] = 1 - row["P_HomeWin_U25_Y"]
+        if "y_AwayWin_O25" not in preds:
+            row["P_AwayWin_O25_Y"] = p_a * p_ou25_o
+            row["P_AwayWin_O25_N"] = 1 - row["P_AwayWin_O25_Y"]
+        if "y_AwayWin_U25" not in preds:
+            row["P_AwayWin_U25_Y"] = p_a * p_ou25_u
+            row["P_AwayWin_U25_N"] = 1 - row["P_AwayWin_U25_Y"]
+
+        # DC + O/U combos
+        dc_1x = min(p_h + p_d, 0.99)
+        dc_x2 = min(p_d + p_a, 0.99)
+        if "y_DC1X_O25" not in preds:
+            row["P_DC1X_O25_Y"] = dc_1x * p_ou25_o
+            row["P_DC1X_O25_N"] = 1 - row["P_DC1X_O25_Y"]
+        if "y_DCX2_O25" not in preds:
+            row["P_DCX2_O25_Y"] = dc_x2 * p_ou25_o
+            row["P_DCX2_O25_N"] = 1 - row["P_DCX2_O25_Y"]
+
+        # DC + BTTS combos
+        if "y_DC1X_BTTS_Y" not in preds:
+            row["P_DC1X_BTTS_Y_Y"] = dc_1x * p_btts_y
+            row["P_DC1X_BTTS_Y_N"] = 1 - row["P_DC1X_BTTS_Y_Y"]
+        if "y_DC1X_BTTS_N" not in preds:
+            row["P_DC1X_BTTS_N_Y"] = dc_1x * p_btts_n
+            row["P_DC1X_BTTS_N_N"] = 1 - row["P_DC1X_BTTS_N_Y"]
+        if "y_DCX2_BTTS_Y" not in preds:
+            row["P_DCX2_BTTS_Y_Y"] = dc_x2 * p_btts_y
+            row["P_DCX2_BTTS_Y_N"] = 1 - row["P_DCX2_BTTS_Y_Y"]
+        if "y_DCX2_BTTS_N" not in preds:
+            row["P_DCX2_BTTS_N_Y"] = dc_x2 * p_btts_n
+            row["P_DCX2_BTTS_N_N"] = 1 - row["P_DCX2_BTTS_N_Y"]
+
+        # No-goal (both teams fail to score)
+        if "y_NoGoal" not in preds:
+            p_h_nil = row.get("P_HomeTG_0_5_U", 0.28)
+            p_a_nil = row.get("P_AwayTG_0_5_U", 0.35)
+            row["P_NoGoal_Y"] = p_h_nil * p_a_nil
+            row["P_NoGoal_N"] = 1 - row["P_NoGoal_Y"]
+
+        # ====================================================================
+        # End of derived markets
+        # ====================================================================
+
         if "y_HomeCardsY_BAND" in preds:
             p = preds["y_HomeCardsY_BAND"][i]
             for b in ["0-2","3","4-5","6+"]:
@@ -858,34 +979,14 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None,
                     row[market] = apply_league_calibration(
                         row[market], market, league, league_profiles
                     )
-
+        
         # Convert to series
-        # NOTE: Removed pre-Poisson enforce_calibration_constraints call.
-        # Poisson adjustment immediately overrides OU values, making a pre-Poisson
-        # constraint pass wasteful. The post-Poisson enforce_cross_market_constraints
-        # handles all constraint enforcement on final values.
         row_series = pd.Series(row)
-
-        # Extract team-specific xG from feature frame (prefer ewm, fallback to ma5)
-        home_xg_val = None
-        away_xg_val = None
-        if future_df is not None and i < len(future_df):
-            fr = future_df.iloc[i]
-            for col in ['Home_xG_ewm', 'Home_xG_ma5', 'Home_xG_ma10']:
-                v = fr.get(col)
-                if v is not None and pd.notna(v) and v > 0:
-                    home_xg_val = float(v)
-                    break
-            for col in ['Away_xG_ewm', 'Away_xG_ma5', 'Away_xG_ma10']:
-                v = fr.get(col)
-                if v is not None and pd.notna(v) and v > 0:
-                    away_xg_val = float(v)
-                    break
-
-        # Apply Poisson adjustments with team-specific xG when available
-        row_series = apply_poisson_adjustment(row_series, home_xg=home_xg_val, away_xg=away_xg_val, league=league)
-
-        # Enforce cross-market constraints (final pass)
+        
+        # Apply Poisson adjustments
+        row_series = apply_poisson_adjustment(row_series, league=league)
+        
+        # Enforce cross-market constraints
         row_series = enforce_cross_market_constraints(row_series)
         
         rows.append(row_series.to_dict())
@@ -950,9 +1051,9 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
                 df.at[idx, h_col] = max(0.01, min(0.99, df.at[idx, h_col] + h_adj))
                 df.at[idx, a_col] = max(0.01, min(0.99, df.at[idx, a_col] + a_adj))
 
-                # Normalize to ensure sum = 1
+                # Normalize to ensure sum <= 1
                 total = df.at[idx, h_col] + df.at[idx, d_col] + df.at[idx, a_col]
-                if total > 0 and abs(total - 1.0) > 1e-6:
+                if total > 1:
                     df.at[idx, h_col] /= total
                     df.at[idx, d_col] /= total
                     df.at[idx, a_col] /= total
@@ -962,7 +1063,7 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
         if total_inj > 0:
             goal_reduction = min(total_inj * 0.01, 0.05)  # Max 5% reduction in over probability
 
-            for line in ['0_5', '1_5', '2_5', '3_5', '4_5', '5_5']:
+            for line in ['0_5', '1_5', '2_5', '3_5', '4_5']:
                 for prefix in ['P_', 'BLEND_']:
                     o_col = f'{prefix}OU_{line}_O'
                     u_col = f'{prefix}OU_{line}_U'
@@ -1052,24 +1153,12 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             M = out.loc[idx, ml_cols].values
             D = out.loc[idx, dc_cols].values
             
-            # Blend: alpha * ML + (1-alpha) * DC, NaN-safe
-            M_safe = np.where(np.isnan(M), 0.0, M)
-            D_safe = np.where(np.isnan(D), 0.0, D)
-            # If one source is all NaN, use the other; if both valid, blend
-            m_valid = np.any(~np.isnan(M))
-            d_valid = np.any(~np.isnan(D))
-            if m_valid and d_valid:
-                B = alpha * M_safe + (1.0 - alpha) * D_safe
-            elif m_valid:
-                B = M_safe
-            elif d_valid:
-                B = D_safe
-            else:
-                B = M_safe  # All NaN → zeros
-
+            # Blend: alpha * ML + (1-alpha) * DC
+            B = alpha * M + (1.0 - alpha) * D
+            
             # Renormalize
             s = B.sum()
-            if s > 0 and np.isfinite(s):
+            if s > 0:
                 B = B / s
             
             # Create BLEND columns
@@ -1491,7 +1580,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
             </div>
             <div class='stat-box'>
                 <div class='number'>{elite_count}</div>
-                <div class='label'>Elite (95%+)</div>
+                <div class='label'>Elite (85%+)</div>
             </div>
             <div class='stat-box'>
                 <div class='number'>{very_high}</div>
@@ -1619,7 +1708,7 @@ def predict_week(fixtures_csv: Path) -> Path:
     
     # Map predictions with all enhancements
     log_header("APPLY ENHANCEMENTS")
-    rows, out_cols = _map_preds_to_columns(models, preds, fx, df_future)
+    rows, out_cols = _map_preds_to_columns(models, preds, fx)
     
     # Create output
     df_out = pd.DataFrame(rows, columns=out_cols)
@@ -1654,47 +1743,20 @@ def predict_week(fixtures_csv: Path) -> Path:
     log_header("APPLY INJURY ADJUSTMENTS")
     df_out = apply_injury_adjustments(df_out, fx)
 
-    # Re-enforce cross-market constraints after injury adjustments
-    log_header("RE-ENFORCE CONSTRAINTS POST-INJURY")
-    for idx in df_out.index:
-        row_series = df_out.loc[idx]
-        constrained = enforce_cross_market_constraints(row_series)
-        for col in constrained.index:
-            if col.startswith('P_') or col.startswith('BLEND_'):
-                df_out.at[idx, col] = constrained[col]
-    print(f"[OK] Re-enforced constraints on {len(df_out)} rows")
-
-    # Merge odds from fixtures (if available from API-Football)
-    log_header("MERGE BOOKMAKER ODDS")
-    odds_cols = [c for c in fx.columns if c.startswith('ODDS_')]
-    if odds_cols:
-        for col in odds_cols:
-            df_out[col] = fx[col].values[:len(df_out)]
-        print(f"[OK] Merged {len(odds_cols)} odds columns from API-Football")
-    else:
-        print("[INFO] No odds data available in fixtures")
-
     # Calculate confidence scores
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
 
-    # Calculate max probability across competitive prediction columns for filtering.
-    # Exclude near-certain markets (OU_0_5) that inflate confidence to ~90.5% for
-    # every match regardless of actual prediction quality.
-    near_certain = {'P_OU_0_5_O', 'P_OU_0_5_U', 'BLEND_OU_0_5_O', 'BLEND_OU_0_5_U'}
-    pred_cols = [col for col in df_out.columns
-                 if (col.startswith('P_') or col.startswith('BLEND_')) and col not in near_certain]
-    if pred_cols:
-        df_out['MaxConfidence'] = df_out[pred_cols].max(axis=1)
+    # Calculate max probability across all P_ columns for filtering
+    p_cols = [col for col in df_out.columns if col.startswith('P_')]
+    if p_cols:
+        df_out['MaxConfidence'] = df_out[p_cols].max(axis=1)
 
     # Sort by Date, then League for better readability
     if 'Date' in df_out.columns:
         df_out['Date'] = pd.to_datetime(df_out['Date'], errors='coerce')
         df_out = df_out.sort_values(['Date', 'League'], ascending=[True, True])
         print("[OK] Sorted output by Date and League")
-
-    # Reorder columns: match details first, key markets next, zero/NaN cols last
-    df_out = _reorder_columns(df_out)
 
     # Save full version with all columns (NO FILTER - keep everything)
     output_path_full = OUTPUT_DIR / "weekly_bets_full.csv"
