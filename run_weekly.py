@@ -29,6 +29,8 @@ parser.add_argument('--non-interactive', action='store_true', default=False,
                     help='Run without interactive prompts')
 parser.add_argument('--use-sample-data', action='store_true',
                     help='Generate sample data if API unavailable')
+parser.add_argument('--clean', action='store_true', default=False,
+                    help='Force clean rebuild: delete old data/features/models and retrain from scratch')
 args, _ = parser.parse_known_args()
 
 # ============================================================================
@@ -339,24 +341,41 @@ try:
 
     run_step(0, "CHECK DATA COVERAGE", step0)
 
+    # Handle --clean: wipe old data/features/models to force full rebuild
+    if args.clean:
+        print("\n[CLEAN] Clean rebuild requested — removing old artifacts...")
+        from config import HISTORICAL_PARQUET, FEATURES_PARQUET, MODEL_ARTIFACTS_DIR
+        for artifact in [HISTORICAL_PARQUET, FEATURES_PARQUET]:
+            if artifact.exists():
+                artifact.unlink()
+                print(f"  Deleted {artifact}")
+        if MODEL_ARTIFACTS_DIR.exists():
+            import shutil
+            shutil.rmtree(MODEL_ARTIFACTS_DIR)
+            print(f"  Deleted {MODEL_ARTIFACTS_DIR}")
+        os.environ["FORCE_RETRAIN"] = "1"
+        print("[CLEAN] All artifacts removed — will rebuild from scratch\n")
+
     # Step 1: Build historical database (uses shared API-Football DB)
     def step1():
-        build_historical_results(force=False)  # Don't force rebuild unless needed
+        force = args.clean or os.environ.get("FORCE_RETRAIN") == "1"
+        build_historical_results(force=force)
 
     run_step(1, "BUILD HISTORICAL DATABASE", step1)
 
     # Step 2: Build features
     def step2():
-        build_features(force=False)  # Don't force rebuild unless needed
+        force = args.clean or os.environ.get("FORCE_RETRAIN") == "1"
+        build_features(force=force)
 
     run_step(2, "BUILD FEATURES", step2)
 
-    # Step 3: Train/load models (with intelligent caching)
+    # Step 3: Train/load models (with intelligent caching + compatibility check)
     def step3():
         from incremental_trainer import smart_train_or_load
         print("Checking if models need retraining...")
         print(f"  Speed mode: {args.speed}")
-        print(f"  Set FORCE_RETRAIN=1 to force full retraining")
+        print(f"  Tip: use --clean to force full rebuild of data + features + models")
         return smart_train_or_load()
 
     models, err = run_step(3, "TRAIN/LOAD MODELS", step3)

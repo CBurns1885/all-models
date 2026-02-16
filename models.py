@@ -1316,50 +1316,69 @@ def load_trained_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Tr
 
 def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> Dict[str, np.ndarray]:
     out: Dict[str, np.ndarray] = {}
+    skipped = []
     for t, trg in models.items():
-        # preprocess
-        Xf = trg.preprocessor.transform(df_future)
-        # stacked base predictions
-        stack_blocks = []
-        for name, base in trg.base_models.items():
-            if name == "dc":
-                # fit DC on all history (safe at inference), then price rows
-                hist = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
-                proba = _dc_probs_for_rows(hist, df_future, t)
+        try:
+            # preprocess — may fail if model was trained on different features
+            Xf = trg.preprocessor.transform(df_future)
+        except Exception as e:
+            skipped.append(t)
+            print(f"[WARN] Skipping {t}: preprocessor incompatible ({e})")
+            print(f"       This model was trained on a different feature set.")
+            print(f"       Run with --clean to force full retrain.")
+            continue
+
+        try:
+            # stacked base predictions
+            stack_blocks = []
+            for name, base in trg.base_models.items():
+                if name == "dc":
+                    hist = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
+                    proba = _dc_probs_for_rows(hist, df_future, t)
+                else:
+                    proba = base.predict_proba(Xf)
+                # align width
+                if proba.shape[1] != len(trg.classes_):
+                    P2 = np.zeros((len(df_future), len(trg.classes_)))
+                    P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
+                    s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
+                    proba = P2 / s
+                stack_blocks.append(proba)
+            S = np.hstack(stack_blocks)
+            # meta + calibration
+            if hasattr(trg.meta, "decision_function"):
+                decision_scores = trg.meta.decision_function(S)
+                if decision_scores.ndim == 1:
+                    P_meta = trg.meta.predict_proba(S)
+                else:
+                    P_meta = _softmax_np(decision_scores)
             else:
-                proba = base.predict_proba(Xf)
-            # align width
-            if proba.shape[1] != len(trg.classes_):
-                P2 = np.zeros((len(df_future), len(trg.classes_)))
-                P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-                s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-                proba = P2 / s
-            stack_blocks.append(proba)
-        S = np.hstack(stack_blocks)
-        # meta + calibration
-        if hasattr(trg.meta, "decision_function"):
-            decision_scores = trg.meta.decision_function(S)
-            if decision_scores.ndim == 1:  # Binary classification
                 P_meta = trg.meta.predict_proba(S)
-            else:  # Multi-class
-                P_meta = _softmax_np(decision_scores)
-        else:
-            P_meta = trg.meta.predict_proba(S)
-        if isinstance(trg.calibrator, DirichletCalibrator):
-            P = trg.calibrator.transform(P_meta)
-        elif isinstance(trg.calibrator, IsotonicOrdinalCalibrator):
-            P = trg.calibrator.transform(P_meta)
-        elif isinstance(trg.calibrator, BetaCalibrator):
-            P = trg.calibrator.transform(P_meta)
-        elif isinstance(trg.calibrator, TemperatureScaler):
-            # temperature scaler expects logits; rebuild logits via inverse softmax approx
-            logits = np.log(np.clip(P_meta, 1e-12, 1-1e-12))
-            P = trg.calibrator.transform(logits)
-        else:
-            P = P_meta
-        # ensure valid probs
-        eps = 1e-12
-        P = np.clip(P, eps, 1.0)
-        P = P / P.sum(axis=1, keepdims=True)
-        out[t] = P
+            if isinstance(trg.calibrator, DirichletCalibrator):
+                P = trg.calibrator.transform(P_meta)
+            elif isinstance(trg.calibrator, IsotonicOrdinalCalibrator):
+                P = trg.calibrator.transform(P_meta)
+            elif isinstance(trg.calibrator, BetaCalibrator):
+                P = trg.calibrator.transform(P_meta)
+            elif isinstance(trg.calibrator, TemperatureScaler):
+                logits = np.log(np.clip(P_meta, 1e-12, 1-1e-12))
+                P = trg.calibrator.transform(logits)
+            else:
+                P = P_meta
+            # ensure valid probs
+            eps = 1e-12
+            P = np.clip(P, eps, 1.0)
+            P = P / P.sum(axis=1, keepdims=True)
+            out[t] = P
+        except Exception as e:
+            skipped.append(t)
+            print(f"[WARN] Skipping {t}: prediction failed ({e})")
+            continue
+
+    if skipped:
+        print(f"\n[WARN] {len(skipped)}/{len(models)} models skipped due to errors:")
+        for s in skipped:
+            print(f"       - {s}")
+        print(f"       Run with --clean to force clean rebuild.\n")
+
     return out
