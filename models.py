@@ -115,33 +115,6 @@ def _load_features() -> pd.DataFrame:
         df["Date"] = pd.to_datetime(df["Date"])
     return df.sort_values(["League", "Date"]).reset_index(drop=True)
 
-def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, TrainedTarget]:
-    df = _load_features()
-    
-    # NEW: Handle NaN values
-    print("Handling missing values...")
-    
-    # Fill numeric columns with median
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-    for col in numeric_cols:
-        if not col.startswith('y_'):  # Don't touch target columns
-            if df[col].isna().sum() > 0:
-                median_val = df[col].median()
-                df[col] = df[col].fillna(median_val if pd.notna(median_val) else 0)
-    
-    # Fill categorical columns with mode or 'Unknown'
-    cat_cols = df.select_dtypes(include=['object', 'category']).columns
-    for col in cat_cols:
-        if not col.startswith('y_'):
-            if df[col].isna().sum() > 0:
-                mode_val = df[col].mode()
-                df[col] = df[col].fillna(mode_val[0] if len(mode_val) > 0 else 'Unknown')
-    
-    print(f"[OK] NaN values handled")
-    
-    # Continue with rest of function...
-    models: Dict[str, TrainedTarget] = {}
-
 # --------------------------------------------------------------------------------------
 # Targets definition
 # --------------------------------------------------------------------------------------

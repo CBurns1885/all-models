@@ -330,11 +330,11 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
             if row['P_BTTS_Y'] > 0.7:
                 row['P_OU_0_5_U'] = min(row['P_OU_0_5_U'], 0.02)
                 row['P_OU_0_5_O'] = max(row['P_OU_0_5_O'], 0.98)
-            
-            # Under 0.5 high means BTTS=Yes must be zero
+
+            # Under 0.5 high means BTTS=Yes should be low (but not zeroed out)
             if row['P_OU_0_5_U'] > 0.5:
-                row['P_BTTS_Y'] = 0.0
-                row['P_BTTS_N'] = 1.0
+                row['P_BTTS_Y'] = min(row['P_BTTS_Y'], 1.0 - row['P_OU_0_5_U'])
+                row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
     
     # 3. BTTS and O/U 1.5 consistency
     if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row:
@@ -1766,18 +1766,11 @@ def predict_week(fixtures_csv: Path) -> Path:
     df_out.to_csv(output_path_full, index=False)
     print(f"\n[OK] Saved full predictions: {output_path_full} ({len(df_out)} matches)")
 
-    # Filter for weekly_bets.csv: Keep only predictions with >= 95% confidence
-    if 'MaxConfidence' in df_out.columns:
-        df_filtered = df_out[df_out['MaxConfidence'] >= 0.95].copy()
-        filtered_count = len(df_out) - len(df_filtered)
-        print(f"[FILTER] Removed {filtered_count} matches with confidence < 95%")
-    else:
-        df_filtered = df_out.copy()
-
-    # Save filtered version as weekly_bets.csv for compatibility with other scripts
+    # Save weekly_bets.csv with all predictions (no confidence filter)
+    # Downstream scripts depend on this file having all matches
     output_path = OUTPUT_DIR / "weekly_bets.csv"
-    df_filtered.to_csv(output_path, index=False)
-    print(f"[OK] Saved filtered predictions: {output_path} ({len(df_filtered)} matches >= 95% confidence)")
+    df_out.to_csv(output_path, index=False)
+    print(f"[OK] Saved predictions: {output_path} ({len(df_out)} matches)")
 
     # Create combined high-confidence output for 1X2, OU2.5, and OU1.5 markets
     _write_combined_high_confidence(df_out, OUTPUT_DIR)
