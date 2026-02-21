@@ -1227,8 +1227,8 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
     else:
         df2["AvgConfidence"] = 0.5
 
-    # Filter for ELITE predictions only (>95% probability)
-    elite_threshold = 0.95
+    # Show all predictions with meaningful confidence (>70% on core markets)
+    elite_threshold = 0.70
     elite = df2[df2["BestProb"] >= elite_threshold].copy()
 
     # Sort by Date, then League
@@ -1603,18 +1603,10 @@ def predict_week(fixtures_csv: Path) -> Path:
     df_out.to_csv(output_path_full, index=False)
     print(f"\n[OK] Saved full predictions: {output_path_full} ({len(df_out)} matches)")
 
-    # Filter for weekly_bets.csv: Keep only predictions with >= 95% confidence
-    if 'MaxConfidence' in df_out.columns:
-        df_filtered = df_out[df_out['MaxConfidence'] >= 0.95].copy()
-        filtered_count = len(df_out) - len(df_filtered)
-        print(f"[FILTER] Removed {filtered_count} matches with confidence < 95%")
-    else:
-        df_filtered = df_out.copy()
-
-    # Save filtered version as weekly_bets.csv for compatibility with other scripts
+    # Save weekly_bets.csv with all matches (no confidence filter)
     output_path = OUTPUT_DIR / "weekly_bets.csv"
-    df_filtered.to_csv(output_path, index=False)
-    print(f"[OK] Saved filtered predictions: {output_path} ({len(df_filtered)} matches >= 95% confidence)")
+    df_out.to_csv(output_path, index=False)
+    print(f"[OK] Saved predictions: {output_path} ({len(df_out)} matches)")
 
     # Create combined high-confidence output for 1X2, OU2.5, and OU1.5 markets
     _write_combined_high_confidence(df_out, OUTPUT_DIR)
