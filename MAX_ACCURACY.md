@@ -2,6 +2,14 @@
 
 Practical tuning guide for squeezing the best accuracy out of the existing pipeline. No drastic changes -- just turning the right dials.
 
+## Ground Rules
+
+Every change to this project must follow three principles:
+
+1. **Maximum accuracy** -- every change must demonstrably improve prediction accuracy or maintain it. No change should be merged that makes predictions worse.
+2. **Minimal difficulty / runtime** -- prefer config tweaks and weight adjustments over architectural rewrites. If a change adds significant runtime, it must justify itself with measurable accuracy gains.
+3. **Backtesting is mandatory** -- no parameter change, model tweak, or calibration update goes live without a before/after backtest comparison. Run `python backtest_config.py` (section 12 below) and record the results. If accuracy doesn't improve, the change doesn't ship.
+
 ---
 
 ## 1. Run in FULL Speed Mode
@@ -196,22 +204,51 @@ Requires `home_injuries` and `away_injuries` columns in fixtures -- needs API-Fo
 
 ---
 
-## 12. Backtest Before You Deploy
+## 12. Backtesting (MANDATORY)
 
-Always validate changes with the backtest system:
+**Every change must be backtested.** No exceptions. This is the only way to know whether a tweak actually improves accuracy or just looks good on paper.
+
+### Required workflow
+
+```
+1. Run baseline backtest           -->  record Brier / accuracy / ROI
+2. Make ONE change                 -->  keep it small and isolated
+3. Run the same backtest again     -->  compare numbers
+4. Accuracy improved?  Ship it.
+   Accuracy same/worse?  Revert it.
+```
+
+### How to run
 
 ```bash
+# Interactive -- choose period
 python backtest_config.py
+
+# Non-interactive examples
+python backtest_config.py  # then select option 1 (single period) or 2 (compare multiple)
 ```
 
 Available periods: last 3 months, 6 months, full season, 2 seasons.
 
-**What to look at:**
-- **Brier score** < 0.20 = well-calibrated
-- **ROI** by market -- focus on profitable markets, reduce stake on losing ones
-- **Accuracy by league** -- some leagues are more predictable than others
+### What to look at
 
-Run backtests before and after any parameter change to measure the impact.
+| Metric | Good | Bad | Action |
+|--------|------|-----|--------|
+| Brier score | < 0.20 | > 0.30 | Recalibrate (sections 4, 10) |
+| 1X2 accuracy | > 55% | < 50% | Check blend weights, league profiles |
+| O/U 2.5 accuracy | > 58% | < 52% | Tune Poisson weight (section 4) |
+| BTTS accuracy | > 55% | < 50% | Check calibration weight (section 10) |
+| ROI | > 0% | < -5% | Reduce stake on losing markets |
+
+### When to backtest
+
+- After changing any value in this guide
+- After retraining models
+- After updating league profiles
+- After a new season's data is loaded
+- Before deploying weekly predictions
+
+If you can't backtest a change, don't make the change.
 
 ---
 
@@ -224,6 +261,8 @@ In order of expected impact:
 3. **Update league profiles** with current-season data
 4. **Check Poisson weight on O/U 2.5** (0.50 is the default, tune based on backtest)
 5. **Increase OPTUNA_TRIALS to 50** if using mode 1
-6. **Run backtest** to find which markets are profitable and which aren't
+6. **Run backtest** to confirm each change actually helps
 
 Everything else is fine-tuning. The architecture is sound -- it's about getting the weights and calibration right for the current season.
+
+**Remember: backtest before, backtest after, only ship improvements.**
