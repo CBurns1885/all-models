@@ -29,6 +29,8 @@ parser.add_argument('--non-interactive', action='store_true', default=False,
                     help='Run without interactive prompts')
 parser.add_argument('--use-sample-data', action='store_true',
                     help='Generate sample data if API unavailable')
+parser.add_argument('--clean', action='store_true', default=False,
+                    help='Force clean rebuild: delete old data/features/models and retrain from scratch')
 args, _ = parser.parse_known_args()
 
 # ============================================================================
@@ -75,9 +77,14 @@ os.environ["N_ESTIMATORS"] = estimator_counts.get(args.speed, "150")
 
 os.environ["USE_API_FOOTBALL"] = "1"  # Use API-Football for data
 os.environ["USE_XG_FEATURES"] = "1"   # Use expected goals features
-# API key and email credentials should be set via environment variables or .env file
-# e.g.: export API_FOOTBALL_KEY="your_key_here"
-# e.g.: export EMAIL_SENDER="your@email.com"
+os.environ["API_FOOTBALL_KEY"] = "0f17fdba78d15a625710f7244a1cc770"
+
+# Email configuration (optional)
+os.environ["EMAIL_SMTP_SERVER"] = "smtp-mail.outlook.com"
+os.environ["EMAIL_SMTP_PORT"] = "587"
+os.environ["EMAIL_SENDER"] = "christopher_burns@live.co.uk"
+os.environ["EMAIL_PASSWORD"] = ""
+os.environ["EMAIL_RECIPIENT"] = "christopher_burns@live.co.uk"
 
 TRAINING_START_YEAR = 2023  # More recent data = better accuracy
 NON_INTERACTIVE = args.non_interactive
@@ -130,7 +137,7 @@ fixtures_file = None
 
 # Try API-Football first
 try:
-    from api_client import download_upcoming_fixtures, test_api_connection, fetch_live_data_for_upcoming, fetch_odds_for_upcoming
+    from api_client import download_upcoming_fixtures, test_api_connection, fetch_live_data_for_upcoming
 
     print("Testing API-Football connection...")
     if test_api_connection():
@@ -145,17 +152,10 @@ try:
             print("\n[LIVE] Fetching injuries and lineups...")
             fixtures_df = fetch_live_data_for_upcoming(fixtures_df)
 
-            # Fetch bookmaker odds for upcoming fixtures
-            print("\n[ODDS] Fetching bookmaker odds...")
-            try:
-                fixtures_df = fetch_odds_for_upcoming(fixtures_df)
-            except Exception as e:
-                print(f"[WARN] Odds fetch failed: {e} — continuing without odds")
-
             # Save to outputs
             fixtures_file = OUTPUT_DIR / "upcoming_fixtures.csv"
             fixtures_df.to_csv(fixtures_file, index=False)
-            print(f"[OK] Downloaded {len(fixtures_df)} fixtures via API (with live data + odds)")
+            print(f"[OK] Downloaded {len(fixtures_df)} fixtures via API (with live data)")
         else:
             print("[WARN] No fixtures from API, trying fallback...")
     else:
@@ -289,13 +289,13 @@ print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}
 # RUN PIPELINE WITH ERROR RECOVERY
 # ============================================================================
 
-TOTAL_STEPS = 12  # Steps 0-12 (0a/0b share step 0 for progress)
+TOTAL_STEPS = 12  # Updated to include market splitting step
 errors = []
 
-def run_step(step_num, step_name, func, *args, critical=False, **kwargs):
-    """Run a step with error recovery. If critical=True, abort pipeline on failure."""
+def run_step(step_num, step_name, func, *args, **kwargs):
+    """Run a step with error recovery"""
     log_step(step_num, TOTAL_STEPS, step_name)
-
+    
     try:
         result = func(*args, **kwargs)
         print(f"[OK] Step {step_num} complete")
@@ -303,16 +303,11 @@ def run_step(step_num, step_name, func, *args, critical=False, **kwargs):
     except Exception as e:
         error_msg = f"Step {step_num} ({step_name}): {str(e)}"
         errors.append(error_msg)
+        print(f"[WARN] Step {step_num} failed: {e}")
+        print("   Continuing to next step...")
         import traceback
         traceback.print_exc()
-        if critical:
-            print(f"[ERROR] Step {step_num} FAILED (critical): {e}")
-            print("   Pipeline cannot continue without this step. Aborting.")
-            raise SystemExit(1)
-        else:
-            print(f"[WARN] Step {step_num} failed: {e}")
-            print("   Continuing to next step...")
-            return None, error_msg
+        return None, error_msg
 
 try:
     from data_ingest import build_historical_results
@@ -346,56 +341,44 @@ try:
 
     run_step(0, "CHECK DATA COVERAGE", step0)
 
-    # ===================================================================
-    # ACCURACY & RESULTS UPDATE - Run at START so market weights are fresh
-    # before generating new predictions (Steps 6/7/8 depend on this)
-    # ===================================================================
-
-    # Step 0a: Update accuracy database with latest match results
-    def step0a():
-        try:
-            from update_results import update_accuracy_database as update_results_db
-            update_results_db()
-        except ImportError:
-            print("[WARN] update_results module not available - skipping")
-        except Exception as e:
-            print(f"[WARN] Results update skipped: {e}")
-
-    run_step(0, "UPDATE RESULTS & ACCURACY DB", step0a)
-
-    # Step 0b: Update backtest results for high-confidence predictions
-    def step0b():
-        try:
-            from backtest_results import main as backtest_main
-            backtest_main()
-        except ImportError:
-            print("[WARN] backtest_results module not available - skipping")
-        except Exception as e:
-            print(f"[WARN] Backtest results update skipped: {e}")
-
-    run_step(0, "UPDATE BACKTEST RESULTS", step0b)
+    # Handle --clean: wipe old data/features/models to force full rebuild
+    if args.clean:
+        print("\n[CLEAN] Clean rebuild requested — removing old artifacts...")
+        from config import HISTORICAL_PARQUET, FEATURES_PARQUET, MODEL_ARTIFACTS_DIR
+        for artifact in [HISTORICAL_PARQUET, FEATURES_PARQUET]:
+            if artifact.exists():
+                artifact.unlink()
+                print(f"  Deleted {artifact}")
+        if MODEL_ARTIFACTS_DIR.exists():
+            import shutil
+            shutil.rmtree(MODEL_ARTIFACTS_DIR)
+            print(f"  Deleted {MODEL_ARTIFACTS_DIR}")
+        os.environ["FORCE_RETRAIN"] = "1"
+        print("[CLEAN] All artifacts removed — will rebuild from scratch\n")
 
     # Step 1: Build historical database (uses shared API-Football DB)
     def step1():
-        build_historical_results(force=False)  # Don't force rebuild unless needed
+        force = args.clean or os.environ.get("FORCE_RETRAIN") == "1"
+        build_historical_results(force=force)
 
-    run_step(1, "BUILD HISTORICAL DATABASE", step1, critical=True)
+    run_step(1, "BUILD HISTORICAL DATABASE", step1)
 
     # Step 2: Build features
     def step2():
-        build_features(force=False)  # Don't force rebuild unless needed
+        force = args.clean or os.environ.get("FORCE_RETRAIN") == "1"
+        build_features(force=force)
 
-    run_step(2, "BUILD FEATURES", step2, critical=True)
+    run_step(2, "BUILD FEATURES", step2)
 
-    # Step 3: Train/load models (with intelligent caching)
+    # Step 3: Train/load models (with intelligent caching + compatibility check)
     def step3():
         from incremental_trainer import smart_train_or_load
         print("Checking if models need retraining...")
         print(f"  Speed mode: {args.speed}")
-        print(f"  Set FORCE_RETRAIN=1 to force full retraining")
+        print(f"  Tip: use --clean to force full rebuild of data + features + models")
         return smart_train_or_load()
 
-    models, err = run_step(3, "TRAIN/LOAD MODELS", step3, critical=True)
+    models, err = run_step(3, "TRAIN/LOAD MODELS", step3)
 
     # Step 4: Generate predictions
     def step4():
@@ -410,7 +393,7 @@ try:
         else:
             predict_week(fixtures_file)
 
-    run_step(4, "GENERATE PREDICTIONS", step4, critical=True)
+    run_step(4, "GENERATE PREDICTIONS", step4)
 
     # Step 5: Log predictions
     def step5():
@@ -462,18 +445,29 @@ try:
     # Step 8: Build Accumulators
     def step8():
         try:
-            from acc_builder import SeasonalAccumulatorBuilder
+            from acc_builder import AccumulatorBuilder
             csv_path = OUTPUT_DIR / "weekly_bets.csv"
 
             if csv_path.exists():
-                builder = SeasonalAccumulatorBuilder(
-                    weekly_bets_path=str(csv_path),
-                    accuracy_db_path=str(OUTPUT_DIR / "accuracy_database.db")
-                )
-                report_path = builder.generate_weekly_report(
-                    filename="weekly_accumulators.html"
-                )
-                print(f"[OK] Accumulator report: {report_path}")
+                builder = AccumulatorBuilder(str(csv_path))
+
+                strategies = {
+                    'safe': ('Conservative 4-Fold', 4),
+                    'mixed': ('Balanced 5-Fold', 5),
+                    'aggressive': ('High-Risk 6-Fold', 6)
+                }
+
+                acca_count = 0
+                for strategy_name, (display_name, num_legs) in strategies.items():
+                    acca_html = builder.generate_report(strategy=strategy_name, num_legs=num_legs)
+                    acca_path = OUTPUT_DIR / f"accumulators_{strategy_name}.html"
+
+                    with open(acca_path, 'w', encoding='utf-8') as f:
+                        f.write(acca_html)
+
+                    acca_count += 1
+
+                print(f"[OK] Generated {acca_count} accumulator strategies")
             else:
                 raise FileNotFoundError("weekly_bets.csv not found")
         except ImportError:
@@ -500,23 +494,16 @@ try:
 
     run_step(9, "SPLIT BY MARKET", step9)
 
-    # Step 10: Final accuracy sync (catches any results that arrived during this run)
+    # Step 10: Update accuracy database
     def step10():
         try:
-            from accuracy_tracker import update_accuracy_database, generate_weekly_accuracy_report
+            from accuracy_tracker import update_accuracy_database
             update_accuracy_database()
-            print("[OK] Accuracy database synced (final pass)")
-
-            # Generate accuracy report for last week
-            try:
-                last_week = (dt.datetime.now() - dt.timedelta(days=7)).strftime('%Y-W%W')
-                generate_weekly_accuracy_report(week_id=last_week, output_dir=OUTPUT_DIR)
-            except Exception as e:
-                print(f"[WARN] Accuracy report generation skipped: {e}")
+            print("[OK] Accuracy database updated")
         except Exception as e:
             print(f"[WARN] Accuracy update skipped: {e}")
 
-    run_step(10, "FINAL ACCURACY SYNC & REPORT", step10)
+    run_step(10, "UPDATE ACCURACY DB", step10)
 
     # Step 11: Archive outputs
     def step11():

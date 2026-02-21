@@ -12,11 +12,7 @@ import copy
 
 import numpy as np
 import pandas as pd
-try:
-    import optuna
-    _HAS_OPTUNA = True
-except ImportError:
-    _HAS_OPTUNA = False
+import optuna
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
@@ -47,6 +43,11 @@ except Exception:
 try:
     import lightgbm as lgb
     _HAS_LGB = True
+    # Try to silence warnings (may not work in all versions)
+    try:
+        lgb.set_option('verbosity', -1)
+    except:
+        pass
 except Exception:
     _HAS_LGB = False
 
@@ -335,18 +336,16 @@ try:
     import torch
     import torch.nn as nn
     class SmallBNN(nn.Module):
-        def __init__(self, input_dim, output_dim, dropout=0.2):
+        def __init__(self, input_dim, output_dim):
             super().__init__()
             self.fc1 = nn.Linear(input_dim, 64)
-            self.drop1 = nn.Dropout(p=dropout)
             self.fc2 = nn.Linear(64, 32)
-            self.drop2 = nn.Dropout(p=dropout)
             self.fc3 = nn.Linear(32, output_dim)
         def forward(self, x):
-            x = self.drop1(torch.relu(self.fc1(x)))
-            x = self.drop2(torch.relu(self.fc2(x)))
+            x = torch.relu(self.fc1(x))
+            x = torch.relu(self.fc2(x))
             return self.fc3(x)
-except Exception:
+except:
     SmallBNN = None
 
 class BNNWrapper(BaseEstimator, ClassifierMixin):
@@ -365,7 +364,7 @@ class BNNWrapper(BaseEstimator, ClassifierMixin):
             raise RuntimeError("Torch not available")
         torch.manual_seed(self.seed)
         self.in_dim = X.shape[1]
-        self.model = SmallBNN(self.in_dim, self.n_classes, dropout=self.dropout)
+        self.model = SmallBNN(self.in_dim, self.n_classes)
         opt = torch.optim.Adam(self.model.parameters(), lr=self.lr)
         crit = nn.CrossEntropyLoss()
         X_t = torch.tensor(X, dtype=torch.float32)
@@ -387,7 +386,7 @@ class BNNWrapper(BaseEstimator, ClassifierMixin):
         outs = []
         for _ in range(self.mc):
             with torch.no_grad():
-                logits = self.model(X_t).cpu().numpy()
+                logits = self.model(X_t).numpy()
                 probs = _softmax_np(logits)
                 outs.append(probs)
         return np.mean(np.stack(outs, axis=0), axis=0)
@@ -515,45 +514,11 @@ def _build_base_model(name: str, n_classes: int, feature_names: List[str], marke
 # --------------------------------------------------------------------------------------
 
 # Market-specific trial counts for optimal speed/accuracy balance
-# Base counts - will be scaled adaptively by _adaptive_trials()
 TRIALS_BY_MARKET_TYPE = {
     'binary': {'rf': 15, 'et': 15, 'xgb': 20, 'lgb': 20, 'cat': 20, 'lr': 5},
     'multiclass': {'rf': 20, 'et': 20, 'xgb': 30, 'lgb': 30, 'cat': 30, 'lr': 10},
     'ordinal': {'coral': 10, 'rf': 15, 'et': 15, 'xgb': 20, 'lgb': 20, 'lr': 5}
 }
-
-def _adaptive_trials(base_trials: int, n_samples: int, n_classes: int) -> int:
-    """
-    Scale Optuna trial count adaptively based on dataset characteristics.
-
-    - Small datasets (<500 rows): fewer trials (risk of overfitting the tuning)
-    - Large datasets (>5000 rows): more trials (can afford richer search)
-    - Many classes: more trials (harder optimisation landscape)
-    - Returns at least 5 and at most 3x the base count.
-    """
-    if base_trials == 0:
-        return 0
-    scale = 1.0
-    # Scale down for small data, up for large
-    if n_samples < 300:
-        scale *= 0.4
-    elif n_samples < 500:
-        scale *= 0.6
-    elif n_samples < 1000:
-        scale *= 0.8
-    elif n_samples > 5000:
-        scale *= 1.3
-    elif n_samples > 10000:
-        scale *= 1.5
-    # More classes = harder problem = more trials
-    if n_classes > 10:
-        scale *= 1.3
-    elif n_classes > 5:
-        scale *= 1.1
-    elif n_classes == 2:
-        scale *= 0.9
-    result = int(base_trials * scale)
-    return max(5, min(result, base_trials * 3))
 
 def _get_market_type(target_col: str) -> str:
     """Determine market type for trial optimization using market configuration."""
@@ -587,12 +552,10 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
         # Return pre-tuned model directly - no Optuna
         return _build_base_model(alg, len(classes_), [], market_type)
 
-    # Determine trials: adaptive scaling based on data size and class count
+    # Determine trials: use market-specific if target_col provided, else use env var
     if target_col and os.environ.get("USE_MARKET_SPECIFIC_TRIALS", "1") == "1":
-        base_trials = TRIALS_BY_MARKET_TYPE.get(market_type, {}).get(alg, 25)
-        n_trials = _adaptive_trials(base_trials, len(X), len(classes_))
-        print(f"  [TUNE] {target_col} ({market_type}): {alg} {n_trials} trials "
-              f"(base={base_trials}, n={len(X)}, K={len(classes_)})")
+        n_trials = TRIALS_BY_MARKET_TYPE.get(market_type, {}).get(alg, 25)
+        print(f"  [CHART] {target_col} ({market_type}): {alg} using {n_trials} trials")
     else:
         n_trials = int(os.environ.get("OPTUNA_TRIALS", "5"))
 
@@ -678,7 +641,7 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
                 colsample_bytree=best_params.get("colsample_bytree", 0.9),
                 min_child_samples=best_params.get("min_child_samples", 25),
                 objective="multiclass" if len(classes_)>2 else "binary",
-                random_state=RANDOM_SEED, n_jobs=-1, verbose=-1
+                random_state=RANDOM_SEED, n_jobs=-1
             )
             model = lgb.LGBMClassifier(**params)
         elif alg == "cat" and _HAS_CAT:
@@ -699,37 +662,15 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
             raise RuntimeError(f"Tuning not supported for {alg}")
 
         try:
-            # Use early stopping for gradient boosting models
-            if alg in ("xgb", "lgb", "cat") and len(X) > 500:
-                from sklearn.model_selection import train_test_split
-                X_tr, X_es, y_tr, y_es = train_test_split(
-                    X, y_consistent, test_size=0.15, random_state=RANDOM_SEED, stratify=y_consistent
-                )
-                if alg == "xgb" and _HAS_XGB:
-                    model.set_params(early_stopping_rounds=30)
-                    model.fit(X_tr, y_tr, eval_set=[(X_es, y_es)], verbose=False)
-                elif alg == "lgb" and _HAS_LGB:
-                    model.fit(
-                        X_tr, y_tr,
-                        eval_set=[(X_es, y_es)],
-                        callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(0)]
-                    )
-                elif alg == "cat" and _HAS_CAT:
-                    model.fit(X_tr, y_tr, eval_set=(X_es, y_es), early_stopping_rounds=30)
-            else:
-                model.fit(X, y_consistent)
+            model.fit(X, y_consistent)
             return model
         except Exception as e:
-            # If gradient boosting fit fails with early stopping, retry without
-            if alg in ("xgb", "lgb", "cat"):
-                try:
-                    model.fit(X, y_consistent)
-                    return model
-                except Exception as e2:
-                    print(f"[WARN]  {alg} fit failed: {e2}. Skipping for this target.")
-                    return None
+            # If XGBoost fit fails, log and return None so training continues without it
+            if alg == "xgb":
+                print(f"[WARN]  XGBoost fit failed: {e}. Skipping XGBoost for this target.")
+                return None
             else:
-                # Re-raise for non-boosting failures
+                # Re-raise for non-XGBoost failures
                 raise
         
     except Exception as e:
@@ -753,9 +694,7 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
     global _DC_PARAMS_CACHE
 
     # Use cached params if available and caching enabled
-    # Cache key uses data size + date range hash for collision resistance
-    date_hash = hash((len(train_df), str(train_df['Date'].min()), str(train_df['Date'].max())))
-    cache_key = date_hash
+    cache_key = len(train_df)  # Simple cache key based on training data size
     if use_cache and cache_key in _DC_PARAMS_CACHE:
         params = _DC_PARAMS_CACHE[cache_key]
     else:
@@ -788,7 +727,7 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
 
         # Over/Under total goals
         elif target.startswith("y_OU_"):
-            l = target.split("_", 2)[2]
+            l = target.split("_")[-1]
             vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
 
         # Asian Handicap
@@ -798,7 +737,7 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
 
         # Team Goals Over/Under - derive from score grid
         elif target.startswith("y_HomeTG_"):
-            line = float(target.split("_", 2)[2].replace("_", "."))
+            line = float(target.split("_")[-1].replace("_", "."))
             # Calculate P(HomeGoals > line) from score grid
             p_over = 0.0
             for h in range(max_goals + 1):
@@ -808,7 +747,7 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
             vec = [1.0 - p_over, p_over]  # [Under, Over]
 
         elif target.startswith("y_AwayTG_"):
-            line = float(target.split("_", 2)[2].replace("_", "."))
+            line = float(target.split("_")[-1].replace("_", "."))
             p_over = 0.0
             for a in range(max_goals + 1):
                 if a > line:
@@ -967,57 +906,6 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
     return arr / s
 
 
-def _select_meta_learner(oof_pred: np.ndarray, y_int: np.ndarray,
-                         n_classes: int, n_folds: int = 5):
-    """
-    Select the best meta-learner for stacking by comparing OOF log loss
-    across candidates: LogisticRegression, Ridge, ElasticNet.
-    Falls back to LogisticRegression if alternatives fail.
-    """
-    from sklearn.linear_model import LogisticRegression, RidgeClassifier
-    from sklearn.model_selection import cross_val_score
-
-    candidates = {
-        'lr': LogisticRegression(max_iter=2000, C=1.0, n_jobs=-1),
-        'lr_l1': LogisticRegression(max_iter=2000, C=1.0, penalty='l1',
-                                     solver='saga', n_jobs=-1),
-        'ridge': RidgeClassifier(alpha=1.0),
-    }
-
-    best_name = 'lr'
-    best_score = float('inf')
-    best_model = candidates['lr']
-
-    ps_meta = make_time_split(len(y_int), n_folds=min(n_folds, 3))
-
-    for name, model in candidates.items():
-        try:
-            # Use negative log loss for scoring (higher = better, so we negate)
-            if name == 'ridge':
-                # RidgeClassifier doesn't support predict_proba natively;
-                # wrap in CalibratedClassifierCV for probability output
-                from sklearn.calibration import CalibratedClassifierCV
-                model = CalibratedClassifierCV(model, cv=3, method='sigmoid')
-
-            scores = cross_val_score(
-                model, oof_pred, y_int, cv=ps_meta,
-                scoring='neg_log_loss', error_score=-10.0
-            )
-            mean_ll = -scores.mean()  # Convert back to positive log loss
-
-            if mean_ll < best_score:
-                best_score = mean_ll
-                best_name = name
-                best_model = model
-        except Exception:
-            continue
-
-    # Refit best on all data
-    best_model.fit(oof_pred, y_int)
-    print(f"  [META] Selected {best_name} meta-learner (OOF logloss={best_score:.4f})")
-    return best_model
-
-
 # --------------------------------------------------------------------------------------
 # Single target training (OOF, stacking, calibration)
 # --------------------------------------------------------------------------------------
@@ -1025,7 +913,12 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     sub = df.dropna(subset=[target_col]).copy()
     if sub.empty:
         raise RuntimeError(f"No data for target {target_col}")
-
+    if df[target_col].isna().all():
+        print(f"[WARN] Skipping {target_col} - no data available")
+        return None
+    
+    error_count = 0
+    
     y = sub[target_col].astype("category")
     classes = list(y.cat.categories)
     y_int = y.cat.codes.values
@@ -1155,30 +1048,11 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
             specialist.fit(X_all, y_int)
             base_models["multiclass_specialist"] = specialist
 
-    # Add CORAL for ordinal targets (tune C via Optuna if available)
-    _coral_C = 1.0  # default; updated if tuned
+    # Add CORAL for ordinal targets (as additional component)
     if target_col in ORDINAL_TARGETS:
         print(f"  [PLUS] Adding CORAL ordinal to ensemble")
         K = len(ORDINAL_TARGETS[target_col])
-        # Tune CORAL C parameter if Optuna is available and tuning enabled
-        if _HAS_OPTUNA and (not _HAS_SPEED_CONFIG or use_tuning()):
-            try:
-                from sklearn.preprocessing import LabelEncoder
-                le_coral = LabelEncoder()
-                y_coral = np.clip(y_int, 0, len(classes) - 1)
-                ps_coral = make_time_split(len(y_coral), n_folds=3)
-                cvd_coral = CVData(X=X_all, y=y_coral, ps=ps_coral,
-                                   classes_=np.array(classes), label_encoder=le_coral)
-                obj_coral = objective_factory("coral", cvd_coral)
-                study_coral = optuna.create_study(direction="minimize")
-                coral_trials = _adaptive_trials(10, len(X_all), len(classes))
-                study_coral.optimize(obj_coral, n_trials=coral_trials, show_progress_bar=False)
-                _coral_C = study_coral.best_params.get("C", 1.0)
-                print(f"  [TUNE] CORAL C tuned to {_coral_C:.4f} ({coral_trials} trials)")
-            except Exception as e:
-                print(f"  [INFO] CORAL C tuning failed ({e}), using C=1.0")
-                _coral_C = 1.0
-        coral = CORALOrdinal(C=_coral_C, max_iter=2000)
+        coral = CORALOrdinal(C=1.0, max_iter=2000)
         base_models["coral"] = coral
 
     # Optuna tune standard models with market-specific trials
@@ -1229,24 +1103,24 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                     elif (_HAS_XGB and isinstance(model, xgb.XGBClassifier)) or (_HAS_LGB and isinstance(model, lgb.LGBMClassifier)) or (_HAS_CAT and isinstance(model, CatBoostClassifier)):
                         m = model.__class__(**model.get_params())
                     elif name == "coral":
-                        m = CORALOrdinal(C=model.C, max_iter=model.max_iter)
+                        m = CORALOrdinal(C=1.0, max_iter=2000)
                     elif name == "bnn" and _HAS_TORCH:
                         m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
                     if name != "dc":
                         m.fit(Xt, yt)
                         proba = m.predict_proba(Xv)
             except Exception as e:
-                # Model failed in this fold - insert uniform proba to maintain OOF shape
-                print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Using uniform proba.")
-                proba = np.full((len(Xv), len(classes)), 1.0 / len(classes))
-            # align width — map sklearn columns to correct class indices
+                # If XGBoost (or any model) fails during CV, skip it and continue
+                if name == "xgb":
+                    print(f"[WARN]  XGBoost failed in fold {fold}: {e}. Continuing without XGBoost.")
+                    continue
+                else:
+                    print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Continuing without this model.")
+                    continue
+            # align width
             if proba.shape[1] != len(classes):
                 P2 = np.zeros((len(Xv), len(classes)))
-                model_classes = m.classes_ if hasattr(m, 'classes_') else np.arange(proba.shape[1])
-                for ci, cls_idx in enumerate(model_classes):
-                    cls_int = int(cls_idx)
-                    if 0 <= cls_int < len(classes):
-                        P2[:, cls_int] = proba[:, ci]
+                P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
                 s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
                 proba = P2 / s
             fold_stack.append(proba)
@@ -1259,8 +1133,9 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     for va_idx, block in oof_blocks:
         oof_pred[va_idx] = block
 
-    # meta-learner selection: try multiple candidates and pick best OOF log loss
-    meta = _select_meta_learner(oof_pred, y_int, len(classes), n_folds)
+    # meta-learner on OOF
+    meta = LogisticRegression(max_iter=2000, n_jobs=-1)
+    meta.fit(oof_pred, y_int)
 
     # Calibration on OOF meta outputs
     if hasattr(meta, "decision_function"):
@@ -1309,30 +1184,27 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 elif (_HAS_XGB and isinstance(model, xgb.XGBClassifier)) or (_HAS_LGB and isinstance(model, lgb.LGBMClassifier)) or (_HAS_CAT and isinstance(model, CatBoostClassifier)):
                     m = model.__class__(**model.get_params())
                 elif name == "coral":
-                    m = CORALOrdinal(C=model.C, max_iter=model.max_iter)
+                    m = CORALOrdinal(C=1.0, max_iter=2000)
                 elif name == "bnn" and _HAS_TORCH:
                     m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
                 m.fit(X_all, y_int)
                 proba = m.predict_proba(X_all)
                 fitted_bases[name] = m
         except Exception as e:
-            # Model failed during final fit — use uniform proba to maintain
-            # consistent width with OOF (which also uses uniform on failure)
-            print(f"[WARN]  Model {name} failed during final fit: {e}. Using uniform proba.")
-            proba = np.full((len(X_all), len(classes)), 1.0 / len(classes))
-        # align width — map sklearn columns to correct class indices
+            # If XGBoost (or any model) fails during final fit, skip it and continue
+            if name == "xgb":
+                print(f"[WARN]  XGBoost failed during final fit: {e}. Continuing without XGBoost.")
+                continue
+            else:
+                print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
+                continue
+        # align width
         if proba.shape[1] != len(classes):
             P2 = np.zeros((len(X_all), len(classes)))
-            model_classes = m.classes_ if hasattr(m, 'classes_') else np.arange(proba.shape[1])
-            for ci, cls_idx in enumerate(model_classes):
-                cls_int = int(cls_idx)
-                if 0 <= cls_int < len(classes):
-                    P2[:, cls_int] = proba[:, ci]
+            P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
             s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
             proba = P2 / s
         full_stack.append(proba)
-    if not full_stack:
-        raise RuntimeError(f"All base models failed for {target_col} — cannot build meta-learner")
     full_stack = np.hstack(full_stack)
     meta.fit(full_stack, y_int)  # refit meta on full stacked features
 
@@ -1410,132 +1282,76 @@ def load_trained_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Tr
     for p in models_dir.glob("y_*.joblib"):
         try:
             models[p.stem] = joblib.load(p)
-        except Exception as e:
-            print(f"[WARN] Failed to load model {p.stem}: {e}")
+        except Exception:
             continue
     return models
 
 
 def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> Dict[str, np.ndarray]:
     out: Dict[str, np.ndarray] = {}
+    skipped = []
     for t, trg in models.items():
-        # preprocess
-        Xf = trg.preprocessor.transform(df_future)
-        # stacked base predictions
-        stack_blocks = []
-        for name, base in trg.base_models.items():
-            if name == "dc":
-                # fit DC on all history (safe at inference), then price rows
-                hist = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
-                proba = _dc_probs_for_rows(hist, df_future, t)
+        try:
+            # preprocess — may fail if model was trained on different features
+            Xf = trg.preprocessor.transform(df_future)
+        except Exception as e:
+            skipped.append(t)
+            print(f"[WARN] Skipping {t}: preprocessor incompatible ({e})")
+            print(f"       This model was trained on a different feature set.")
+            print(f"       Run with --clean to force full retrain.")
+            continue
+
+        try:
+            # stacked base predictions
+            stack_blocks = []
+            for name, base in trg.base_models.items():
+                if name == "dc":
+                    hist = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
+                    proba = _dc_probs_for_rows(hist, df_future, t)
+                else:
+                    proba = base.predict_proba(Xf)
+                # align width
+                if proba.shape[1] != len(trg.classes_):
+                    P2 = np.zeros((len(df_future), len(trg.classes_)))
+                    P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
+                    s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
+                    proba = P2 / s
+                stack_blocks.append(proba)
+            S = np.hstack(stack_blocks)
+            # meta + calibration
+            if hasattr(trg.meta, "decision_function"):
+                decision_scores = trg.meta.decision_function(S)
+                if decision_scores.ndim == 1:
+                    P_meta = trg.meta.predict_proba(S)
+                else:
+                    P_meta = _softmax_np(decision_scores)
             else:
-                proba = base.predict_proba(Xf)
-            # align width
-            if proba.shape[1] != len(trg.classes_):
-                P2 = np.zeros((len(df_future), len(trg.classes_)))
-                P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-                s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-                proba = P2 / s
-            stack_blocks.append(proba)
-        S = np.hstack(stack_blocks)
-        # meta + calibration
-        if hasattr(trg.meta, "decision_function"):
-            decision_scores = trg.meta.decision_function(S)
-            if decision_scores.ndim == 1:  # Binary classification
                 P_meta = trg.meta.predict_proba(S)
-            else:  # Multi-class
-                P_meta = _softmax_np(decision_scores)
-        else:
-            P_meta = trg.meta.predict_proba(S)
-        if isinstance(trg.calibrator, DirichletCalibrator):
-            P = trg.calibrator.transform(P_meta)
-        elif isinstance(trg.calibrator, IsotonicOrdinalCalibrator):
-            P = trg.calibrator.transform(P_meta)
-        elif isinstance(trg.calibrator, BetaCalibrator):
-            P = trg.calibrator.transform(P_meta)
-        elif isinstance(trg.calibrator, TemperatureScaler):
-            # temperature scaler expects logits; rebuild logits via inverse softmax approx
-            logits = np.log(np.clip(P_meta, 1e-12, 1-1e-12))
-            P = trg.calibrator.transform(logits)
-        else:
-            P = P_meta
-        # ensure valid probs
-        eps = 1e-12
-        P = np.clip(P, eps, 1.0)
-        P = P / P.sum(axis=1, keepdims=True)
-        out[t] = P
+            if isinstance(trg.calibrator, DirichletCalibrator):
+                P = trg.calibrator.transform(P_meta)
+            elif isinstance(trg.calibrator, IsotonicOrdinalCalibrator):
+                P = trg.calibrator.transform(P_meta)
+            elif isinstance(trg.calibrator, BetaCalibrator):
+                P = trg.calibrator.transform(P_meta)
+            elif isinstance(trg.calibrator, TemperatureScaler):
+                logits = np.log(np.clip(P_meta, 1e-12, 1-1e-12))
+                P = trg.calibrator.transform(logits)
+            else:
+                P = P_meta
+            # ensure valid probs
+            eps = 1e-12
+            P = np.clip(P, eps, 1.0)
+            P = P / P.sum(axis=1, keepdims=True)
+            out[t] = P
+        except Exception as e:
+            skipped.append(t)
+            print(f"[WARN] Skipping {t}: prediction failed ({e})")
+            continue
+
+    if skipped:
+        print(f"\n[WARN] {len(skipped)}/{len(models)} models skipped due to errors:")
+        for s in skipped:
+            print(f"       - {s}")
+        print(f"       Run with --clean to force clean rebuild.\n")
+
     return out
-
-
-def analyse_feature_importance(models_dir: Path = MODEL_ARTIFACTS_DIR, top_n: int = 50) -> Dict[str, List]:
-    """
-    Analyse feature importance across all trained models.
-    Returns per-target importance rankings and identifies consistently unimportant features.
-
-    Args:
-        models_dir: Directory with trained model artifacts
-        top_n: Number of top features to show per model
-
-    Returns:
-        Dict with 'per_target' importances and 'drop_candidates' (features with zero
-        importance across all tree-based models)
-    """
-    models = load_trained_targets(models_dir)
-    if not models:
-        print("[WARN] No trained models found")
-        return {}
-
-    all_importances: Dict[str, List[float]] = {}
-    per_target = {}
-
-    for target, trg in models.items():
-        for name, base in trg.base_models.items():
-            if name == "dc" or name == "__DC__":
-                continue
-            if hasattr(base, 'feature_importances_'):
-                importances = base.feature_importances_
-                # Get feature names from preprocessor
-                try:
-                    num_names = list(trg.preprocessor.transformers_[0][2] or [])
-                    cat_names = list(trg.preprocessor.transformers_[1][2] or [])
-                    feat_names = num_names + cat_names
-                    # OHE may expand cat features
-                    if len(feat_names) < len(importances):
-                        feat_names = [f"f_{i}" for i in range(len(importances))]
-                except Exception:
-                    feat_names = [f"f_{i}" for i in range(len(importances))]
-
-                ranked = sorted(zip(feat_names, importances), key=lambda x: x[1], reverse=True)
-                per_target[f"{target}_{name}"] = ranked[:top_n]
-
-                for fname, imp in zip(feat_names, importances):
-                    if fname not in all_importances:
-                        all_importances[fname] = []
-                    all_importances[fname].append(imp)
-
-    # Features with zero importance across ALL models
-    drop_candidates = [
-        fname for fname, imps in all_importances.items()
-        if all(imp == 0.0 for imp in imps) and len(imps) >= 3
-    ]
-
-    # Save analysis
-    analysis = {
-        'drop_candidates': sorted(drop_candidates),
-        'drop_count': len(drop_candidates),
-        'total_features': len(all_importances),
-        'models_analysed': len(per_target),
-    }
-
-    analysis_path = models_dir / "feature_importance_analysis.json"
-    with open(analysis_path, "w") as f:
-        json.dump(analysis, f, indent=2)
-
-    print(f"\n[FEATURE IMPORTANCE ANALYSIS]")
-    print(f"  Total features: {len(all_importances)}")
-    print(f"  Zero-importance candidates for pruning: {len(drop_candidates)}")
-    if drop_candidates:
-        print(f"  Top drop candidates: {drop_candidates[:20]}")
-    print(f"  Saved to {analysis_path}")
-
-    return {'per_target': per_target, 'drop_candidates': drop_candidates, 'all_importances': all_importances}

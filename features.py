@@ -411,6 +411,11 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     """Add all target variables - COMPREHENSIVE VERSION with all betting markets"""
     out = df.copy()
 
+    # Drop rows without a valid result — these are abandoned/postponed matches
+    # that would create "nan" string classes and pollute the model
+    out = out.dropna(subset=["FTR"]).copy()
+    out = out[out["FTR"].isin(["H", "D", "A"])].copy()
+
     # Ensure numeric columns
     out["FTHG"] = pd.to_numeric(out["FTHG"], errors='coerce').fillna(0).astype(int)
     out["FTAG"] = pd.to_numeric(out["FTAG"], errors='coerce').fillna(0).astype(int)
@@ -421,7 +426,7 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     # CORE MARKETS
     # ===========================================================================
 
-    # 1X2 Match Result
+    # 1X2 Match Result (guaranteed to be H, D, or A after filter above)
     out["y_1X2"] = out["FTR"].astype(str)
 
     # BTTS (Both Teams To Score)
