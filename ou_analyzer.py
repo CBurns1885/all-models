@@ -73,41 +73,39 @@ def extract_ou_predictions(df: pd.DataFrame, min_confidence: float = DEFAULT_CON
         # Check each O/U line
         for line in OU_LINES:
             line_display = line.replace('_', '.')
-            
-            # Over predictions
-            dc_over_col = f'DC_OU_{line}_O'
-            blend_over_col = f'BLEND_OU_{line}_O'
-            
-            if dc_over_col in df.columns:
-                dc_prob = row.get(dc_over_col, 0)
-                blend_prob = row.get(blend_over_col, 0) if blend_over_col in df.columns else 0
-                
-                if pd.notna(dc_prob) and dc_prob >= min_confidence:
+
+            for direction, suffix in [('Over', 'O'), ('Under', 'U')]:
+                dc_col = f'DC_OU_{line}_{suffix}'
+                blend_col = f'BLEND_OU_{line}_{suffix}'
+                p_col = f'P_OU_{line}_{suffix}'
+
+                dc_prob = row.get(dc_col, 0) if dc_col in df.columns else 0
+                blend_prob = row.get(blend_col, 0) if blend_col in df.columns else 0
+                p_prob = row.get(p_col, 0) if p_col in df.columns else 0
+
+                # Clean NaN values
+                dc_prob = dc_prob if pd.notna(dc_prob) else 0
+                blend_prob = blend_prob if pd.notna(blend_prob) else 0
+                p_prob = p_prob if pd.notna(p_prob) else 0
+
+                best_prob = max(dc_prob, blend_prob, p_prob)
+
+                if best_prob >= min_confidence:
+                    # Determine source
+                    if blend_prob >= dc_prob and blend_prob >= p_prob:
+                        source = 'Blend'
+                    elif dc_prob >= p_prob:
+                        source = 'DC'
+                    else:
+                        source = 'ML'
+
                     pred = match_info.copy()
                     pred['Line'] = line_display
-                    pred['Selection'] = 'Over'
-                    pred['DC_Prob'] = dc_prob
-                    pred['Blend_Prob'] = blend_prob if pd.notna(blend_prob) else dc_prob
-                    pred['Best_Prob'] = max(dc_prob, blend_prob if pd.notna(blend_prob) else 0)
-                    pred['Source'] = 'DC' if dc_prob > blend_prob else 'Blend'
-                    ou_predictions.append(pred)
-            
-            # Under predictions
-            dc_under_col = f'DC_OU_{line}_U'
-            blend_under_col = f'BLEND_OU_{line}_U'
-            
-            if dc_under_col in df.columns:
-                dc_prob = row.get(dc_under_col, 0)
-                blend_prob = row.get(blend_under_col, 0) if blend_under_col in df.columns else 0
-                
-                if pd.notna(dc_prob) and dc_prob >= min_confidence:
-                    pred = match_info.copy()
-                    pred['Line'] = line_display
-                    pred['Selection'] = 'Under'
-                    pred['DC_Prob'] = dc_prob
-                    pred['Blend_Prob'] = blend_prob if pd.notna(blend_prob) else dc_prob
-                    pred['Best_Prob'] = max(dc_prob, blend_prob if pd.notna(blend_prob) else 0)
-                    pred['Source'] = 'DC' if dc_prob > blend_prob else 'Blend'
+                    pred['Selection'] = direction
+                    pred['DC_Prob'] = dc_prob if dc_prob > 0 else best_prob
+                    pred['Blend_Prob'] = blend_prob if blend_prob > 0 else best_prob
+                    pred['Best_Prob'] = best_prob
+                    pred['Source'] = source
                     ou_predictions.append(pred)
     
     if ou_predictions:

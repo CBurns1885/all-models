@@ -1008,17 +1008,17 @@ def calculate_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     """
-    Create combined output for 1X2, OU2.5, and OU1.5 markets above 90% confidence.
-    Shows all three markets side-by-side for each match where any qualifies.
+    Create combined output for 1X2, OU2.5, OU1.5, and BTTS markets above 90% confidence.
+    Shows all four markets side-by-side for each match where any qualifies.
     """
-    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 >= 90%)...")
+    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 + BTTS >= 90%)...")
 
     # Define the target markets and their probability columns
-    # Priority: DC_ (Dixon-Coles) first, then BLEND_, then P_
     markets = {
         '1X2': ['DC_1X2_H', 'DC_1X2_D', 'DC_1X2_A', 'BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A', 'P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
         'OU_2_5': ['DC_OU_2_5_O', 'DC_OU_2_5_U', 'BLEND_OU_2_5_O', 'BLEND_OU_2_5_U', 'P_OU_2_5_O', 'P_OU_2_5_U'],
-        'OU_1_5': ['DC_OU_1_5_O', 'DC_OU_1_5_U', 'BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U']
+        'OU_1_5': ['DC_OU_1_5_O', 'DC_OU_1_5_U', 'BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U'],
+        'BTTS': ['DC_BTTS_Y', 'DC_BTTS_N', 'BLEND_BTTS_Y', 'BLEND_BTTS_N', 'P_BTTS_Y', 'P_BTTS_N'],
     }
 
     rows = []
@@ -1091,12 +1091,29 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
             match_info['OU15_Pick'] = '-'
             match_info['OU15_Prob'] = '-'
 
+        # BTTS Market
+        btts_cols = [c for c in markets['BTTS'] if c in df.columns]
+        if btts_cols:
+            btts_probs = row[btts_cols]
+            best_btts = btts_probs.max()
+            best_btts_col = btts_probs.idxmax() if best_btts > 0 else ''
+            if best_btts >= threshold:
+                has_high_conf = True
+                match_info['BTTS_Pick'] = 'Yes' if '_Y' in best_btts_col else 'No'
+                match_info['BTTS_Prob'] = f"{best_btts:.1%}"
+            else:
+                match_info['BTTS_Pick'] = '-'
+                match_info['BTTS_Prob'] = f"{best_btts:.1%}" if best_btts > 0 else '-'
+        else:
+            match_info['BTTS_Pick'] = '-'
+            match_info['BTTS_Prob'] = '-'
+
         # Only include matches with at least one high-confidence market
         if has_high_conf:
             rows.append(match_info)
 
     if not rows:
-        print("[COMBINED] No matches with 90%+ confidence in 1X2, OU2.5, or OU1.5")
+        print("[COMBINED] No matches with 90%+ confidence in 1X2, OU2.5, OU1.5, or BTTS")
         return
 
     # Create DataFrame and save
@@ -1112,7 +1129,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>High Confidence Picks (90%+) - 1X2, OU2.5, OU1.5</title>
+    <title>High Confidence Picks (90%+) - 1X2, OU2.5, OU1.5, BTTS</title>
     <style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }}
         h1 {{ color: #00d4ff; text-align: center; }}
@@ -1138,6 +1155,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
             <th>1X2</th>
             <th>O/U 2.5</th>
             <th>O/U 1.5</th>
+            <th>BTTS</th>
         </tr>
 """
 
@@ -1146,6 +1164,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
         x1x2_class = 'pick high-prob' if row['1X2_Pick'] != '-' else 'no-pick'
         ou25_class = 'pick high-prob' if row['OU25_Pick'] != '-' else 'no-pick'
         ou15_class = 'pick high-prob' if row['OU15_Pick'] != '-' else 'no-pick'
+        btts_class = 'pick high-prob' if row['BTTS_Pick'] != '-' else 'no-pick'
 
         html_content += f"""        <tr>
             <td>{row['Date']}</td>
@@ -1154,6 +1173,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
             <td class='{x1x2_class}'>{row['1X2_Pick']} <span class='prob'>({row['1X2_Prob']})</span></td>
             <td class='{ou25_class}'>{row['OU25_Pick']} <span class='prob'>({row['OU25_Prob']})</span></td>
             <td class='{ou15_class}'>{row['OU15_Pick']} <span class='prob'>({row['OU15_Prob']})</span></td>
+            <td class='{btts_class}'>{row['BTTS_Pick']} <span class='prob'>({row['BTTS_Prob']})</span></td>
         </tr>
 """
 
@@ -1168,10 +1188,32 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
 
 
 def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = None):
-    """Enhanced HTML report - Elite picks (>95% probability) sorted by date and league"""
-    prob_cols = [c for c in df.columns if c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_")]
+    """Enhanced HTML report - Elite picks sorted by date and league.
+
+    Only considers core betting markets (1X2, O/U 1.5-4.5, BTTS) to avoid
+    trivial markets like O/U 0.5 or niche exact scores dominating the output.
+    """
+    # Core market suffixes we actually care about
+    _CORE_SUFFIXES = {
+        '1X2_H', '1X2_D', '1X2_A',
+        'BTTS_Y', 'BTTS_N',
+        'OU_1_5_O', 'OU_1_5_U',
+        'OU_2_5_O', 'OU_2_5_U',
+        'OU_3_5_O', 'OU_3_5_U',
+        'OU_4_5_O', 'OU_4_5_U',
+    }
+
+    def _is_core_col(col):
+        for suffix in _CORE_SUFFIXES:
+            if col.endswith(suffix):
+                return True
+        return False
+
+    prob_cols = [c for c in df.columns
+                 if (c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_"))
+                 and _is_core_col(c)]
     if not prob_cols:
-        print("Warning: No probability columns found")
+        print("Warning: No core probability columns found")
         return
 
     df2 = df.copy()
