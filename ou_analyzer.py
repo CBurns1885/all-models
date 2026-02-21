@@ -30,7 +30,7 @@ HIGH_CONFIDENCE = 0.92     # 92%+ = high confidence
 ELITE_CONFIDENCE = 0.95    # 95%+ = elite
 
 # O/U Lines to analyze
-OU_LINES = [ '0_5','1_5', '2_5', '3_5', '4_5', '5_5']
+OU_LINES = [ '0_5','1_5', '2_5', '3_5', '4_5']
 
 # ============================================================================
 # DATA EXTRACTION
@@ -73,43 +73,39 @@ def extract_ou_predictions(df: pd.DataFrame, min_confidence: float = DEFAULT_CON
         # Check each O/U line
         for line in OU_LINES:
             line_display = line.replace('_', '.')
-            
-            # Over predictions
-            dc_over_col = f'DC_OU_{line}_O'
-            blend_over_col = f'BLEND_OU_{line}_O'
-            
-            if dc_over_col in df.columns:
-                dc_prob = row.get(dc_over_col, 0)
-                blend_prob = row.get(blend_over_col, 0) if blend_over_col in df.columns else 0
-                
-                if pd.notna(dc_prob) and dc_prob >= min_confidence:
+
+            for direction, suffix in [('Over', 'O'), ('Under', 'U')]:
+                dc_col = f'DC_OU_{line}_{suffix}'
+                blend_col = f'BLEND_OU_{line}_{suffix}'
+                p_col = f'P_OU_{line}_{suffix}'
+
+                dc_prob = row.get(dc_col, 0) if dc_col in df.columns else 0
+                blend_prob = row.get(blend_col, 0) if blend_col in df.columns else 0
+                p_prob = row.get(p_col, 0) if p_col in df.columns else 0
+
+                # Clean NaN values
+                dc_prob = dc_prob if pd.notna(dc_prob) else 0
+                blend_prob = blend_prob if pd.notna(blend_prob) else 0
+                p_prob = p_prob if pd.notna(p_prob) else 0
+
+                best_prob = max(dc_prob, blend_prob, p_prob)
+
+                if best_prob >= min_confidence:
+                    # Determine source
+                    if blend_prob >= dc_prob and blend_prob >= p_prob:
+                        source = 'Blend'
+                    elif dc_prob >= p_prob:
+                        source = 'DC'
+                    else:
+                        source = 'ML'
+
                     pred = match_info.copy()
                     pred['Line'] = line_display
-                    pred['Selection'] = 'Over'
-                    pred['DC_Prob'] = dc_prob
-                    blend_valid = pd.notna(blend_prob) and blend_prob > 0
-                    pred['Blend_Prob'] = blend_prob if blend_valid else dc_prob
-                    pred['Best_Prob'] = max(dc_prob, blend_prob) if blend_valid else dc_prob
-                    pred['Source'] = 'Blend' if blend_valid and blend_prob >= dc_prob else 'DC'
-                    ou_predictions.append(pred)
-
-            # Under predictions
-            dc_under_col = f'DC_OU_{line}_U'
-            blend_under_col = f'BLEND_OU_{line}_U'
-
-            if dc_under_col in df.columns:
-                dc_prob = row.get(dc_under_col, 0)
-                blend_prob = row.get(blend_under_col, 0) if blend_under_col in df.columns else 0
-                
-                if pd.notna(dc_prob) and dc_prob >= min_confidence:
-                    pred = match_info.copy()
-                    pred['Line'] = line_display
-                    pred['Selection'] = 'Under'
-                    pred['DC_Prob'] = dc_prob
-                    blend_valid = pd.notna(blend_prob) and blend_prob > 0
-                    pred['Blend_Prob'] = blend_prob if blend_valid else dc_prob
-                    pred['Best_Prob'] = max(dc_prob, blend_prob) if blend_valid else dc_prob
-                    pred['Source'] = 'Blend' if blend_valid and blend_prob >= dc_prob else 'DC'
+                    pred['Selection'] = direction
+                    pred['DC_Prob'] = dc_prob if dc_prob > 0 else best_prob
+                    pred['Blend_Prob'] = blend_prob if blend_prob > 0 else best_prob
+                    pred['Best_Prob'] = best_prob
+                    pred['Source'] = source
                     ou_predictions.append(pred)
     
     if ou_predictions:
@@ -183,11 +179,8 @@ def generate_ou_report(df_ou: pd.DataFrame, min_confidence: float = DEFAULT_CONF
         _generate_empty_report(min_confidence)
         return
     
-    # Sort by date, league, then confidence (highest first)
-    if 'Date' in df_ou.columns and 'League' in df_ou.columns:
-        df_ou = df_ou.sort_values(['Date', 'League', 'Best_Prob'], ascending=[True, True, False]).reset_index(drop=True)
-    else:
-        df_ou = df_ou.sort_values('Best_Prob', ascending=False).reset_index(drop=True)
+    # Sort by confidence
+    df_ou = df_ou.sort_values('Best_Prob', ascending=False).reset_index(drop=True)
     
     # Get historical performance
     historical = get_ou_historical_performance()
@@ -343,11 +336,11 @@ def _generate_html_report(df: pd.DataFrame, historical: dict, min_conf: float):
             <div class='stat-value'>{total}</div>
         </div>
         <div class='stat-card'>
-            <div class='stat-label'>Elite Confidence (95%+)</div>
+            <div class='stat-label'>Elite Confidence (85%+)</div>
             <div class='stat-value'>{elite_conf}</div>
         </div>
         <div class='stat-card'>
-            <div class='stat-label'>High Confidence (92%+)</div>
+            <div class='stat-label'>High Confidence (75%+)</div>
             <div class='stat-value'>{high_conf}</div>
         </div>
         <div class='stat-card'>
@@ -447,8 +440,8 @@ def _generate_html_report(df: pd.DataFrame, historical: dict, min_conf: float):
         <p><span class='badge blend-badge'>BLEND</span> Blended ML + DC probability</p>
         <p><span class='badge over-badge'>Over</span> Over line prediction</p>
         <p><span class='badge under-badge'>Under</span> Under line prediction</p>
-        <p><strong>Green rows:</strong> Elite confidence (95%+)</p>
-        <p><strong>Yellow rows:</strong> High confidence (92-94%)</p>
+        <p><strong>Green rows:</strong> Elite confidence (85%+)</p>
+        <p><strong>Yellow rows:</strong> High confidence (75-84%)</p>
     </div>
 </body>
 </html>
@@ -482,6 +475,8 @@ def _generate_csv_report(df: pd.DataFrame):
     df_export = df_export.sort_values(['Date', 'League', 'Best_Prob_%'], ascending=[True, True, False])
     
     df_export.to_csv(OU_REPORT_CSV, index=False)
+    print(f"CSV report: {OU_REPORT_CSV}")
+
     print(f"CSV report: {OU_REPORT_CSV}")
 
 
@@ -527,7 +522,7 @@ def _generate_excel_report(df: pd.DataFrame, historical: dict):
             for line in ['0.5', '1.5', '2.5', '3.5', '4.5']:
                 line_df = df_formatted[df_formatted['Line'] == line].copy()
                 if not line_df.empty:
-                    line_df = line_df.sort_values(['Date', 'League'] if 'League' in line_df.columns else ['Date'])
+                    line_df = line_df.sort_values('Date')
                     sheet_name = f'O_U {line}'.replace('.', '_')
                     line_df.to_excel(writer, sheet_name=sheet_name, index=False)
             

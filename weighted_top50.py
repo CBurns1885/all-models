@@ -31,22 +31,22 @@ def calculate_market_weights() -> Dict[str, float]:
                SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as correct,
                AVG(CAST(predicted_prob AS FLOAT)) as avg_confidence
         FROM predictions
-        WHERE actual_outcome IS NOT NULL
+        WHERE actual_result IS NOT NULL
         GROUP BY market
         HAVING total >= 10
         """
-
+        
         # If predicted_prob doesn't exist, use simpler query
         try:
             df = pd.read_sql_query(query, conn)
-        except Exception:
+        except:
             # Fallback query without avg_confidence
             query = """
-            SELECT market,
+            SELECT market, 
                    COUNT(*) as total,
                    SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) as correct
             FROM predictions
-            WHERE actual_outcome IS NOT NULL
+            WHERE actual_result IS NOT NULL
             GROUP BY market
             HAVING total >= 10
             """
@@ -61,7 +61,7 @@ def calculate_market_weights() -> Dict[str, float]:
         
         # Calculate weights based on accuracy
         df['accuracy'] = df['correct'] / df['total']
-        df['weight'] = df['accuracy'] * df['avg_confidence']
+        df['weight'] = df['accuracy'] * df.get('avg_confidence', 0.7)
         
         # Normalize weights
         total_weight = df['weight'].sum()
@@ -84,137 +84,206 @@ def calculate_market_weights() -> Dict[str, float]:
 def _default_weights() -> Dict[str, float]:
     """Default weights when no historical data available"""
     return {
+        # 1X2 markets
         '1X2_H': 1.0,
         '1X2_D': 0.8,
         '1X2_A': 1.0,
+        # BTTS markets
         'BTTS_Y': 1.2,
         'BTTS_N': 1.0,
-        'O_0_5_O': 0.2,
-        'O_0_5_U': 0.2,
-        'O_1_5_O': 2.0,
-        'O_1_5_U': 2.0,
+        # O/U markets (consistent OU_ prefix)
+        'OU_0_5_O': 0.2,
+        'OU_0_5_U': 0.2,
+        'OU_1_5_O': 1.1,
+        'OU_1_5_U': 1.1,
         'OU_2_5_O': 1.1,
         'OU_2_5_U': 1.1,
         'OU_3_5_O': 1.1,
         'OU_3_5_U': 1.1,
-        'CS_1_0': 0.6,
-        'CS_2_0': 0.6,
-        'CS_2_1': 0.7,
-        'CS_0_0': 0.5,
-        'CS_1_1': 0.6,
+        'OU_4_5_O': 1.0,
+        'OU_4_5_U': 1.0,
     }
 
 
+# Core markets we actually care about for betting output
+CORE_MARKETS = {
+    # 1X2
+    '1X2_H', '1X2_D', '1X2_A',
+    # BTTS
+    'BTTS_Y', 'BTTS_N',
+    # O/U goals (excluding 0.5 which is near-certain)
+    'OU_1_5_O', 'OU_1_5_U',
+    'OU_2_5_O', 'OU_2_5_U',
+    'OU_3_5_O', 'OU_3_5_U',
+    'OU_4_5_O', 'OU_4_5_U',
+}
+
+
+def _classify_market(market: str) -> str:
+    """Classify a market name into a category for split display."""
+    if market.startswith('1X2_'):
+        return '1x2'
+    elif market.startswith('BTTS_'):
+        return 'btts'
+    elif market.startswith('OU_'):
+        return 'ou'
+    return 'other'
+
+
+def _selection_label(market: str) -> str:
+    """Human-readable selection label for a market key."""
+    if market == '1X2_H':
+        return 'Home Win'
+    elif market == '1X2_D':
+        return 'Draw'
+    elif market == '1X2_A':
+        return 'Away Win'
+    elif market == 'BTTS_Y':
+        return 'BTTS Yes'
+    elif market == 'BTTS_N':
+        return 'BTTS No'
+    elif market.startswith('OU_'):
+        parts = market.split('_')  # e.g. OU_2_5_O
+        line = f"{parts[1]}.{parts[2]}"
+        direction = 'Over' if parts[3] == 'O' else 'Under'
+        return f"O/U {line} {direction}"
+    return market
+
+
 def extract_predictions_from_csv(csv_path: Path) -> List[Dict]:
-    """Extract all predictions from weekly_bets.csv"""
-    
+    """Extract core market predictions (1X2, O/U, BTTS) from weekly_bets.csv.
+
+    Uses the best available source per market: BLEND > DC > P_ (ML).
+    Only extracts markets in CORE_MARKETS to avoid flooding with niche picks.
+    """
+
     df = pd.read_csv(csv_path)
-    
+
     predictions = []
-    
+
     for idx, row in df.iterrows():
         match_id = f"{row['HomeTeam']}_vs_{row['AwayTeam']}"
-        
-        # Extract all probability columns
-        for col in df.columns:
-            if col.startswith('BLEND_') or col.startswith('P_'):
-                prob = row[col]
-                
-                if pd.notna(prob) and prob > 0:
-                    # Parse market name
-                    market = col.replace('BLEND_', '').replace('P_', '')
-                    
-                    predictions.append({
-                        'match_id': match_id,
-                        'league': row.get('League', ''),
-                        'date': row.get('Date', ''),
-                        'home_team': row['HomeTeam'],
-                        'away_team': row['AwayTeam'],
-                        'market': market,
-                        'probability': prob,
-                        'odds': 1 / prob if prob > 0 else 999,
-                    })
-    
+
+        for market in CORE_MARKETS:
+            # Pick the best source: BLEND > DC > P_
+            blend_col = f'BLEND_{market}'
+            dc_col = f'DC_{market}'
+            p_col = f'P_{market}'
+
+            prob = None
+            source = None
+            for col, src in [(blend_col, 'BLEND'), (dc_col, 'DC'), (p_col, 'ML')]:
+                if col in df.columns:
+                    val = row[col]
+                    if pd.notna(val) and val > 0:
+                        if prob is None or val > prob:
+                            prob = val
+                            source = src
+
+            if prob is not None and prob > 0.01:
+                predictions.append({
+                    'match_id': match_id,
+                    'league': row.get('League', ''),
+                    'date': row.get('Date', ''),
+                    'home_team': row['HomeTeam'],
+                    'away_team': row['AwayTeam'],
+                    'market': market,
+                    'category': _classify_market(market),
+                    'selection': _selection_label(market),
+                    'probability': prob,
+                    'source': source,
+                    'odds': 1 / prob if prob > 0 else 999,
+                })
+
     return predictions
 
 
 def resolve_conflicts(predictions: List[Dict]) -> List[Dict]:
     """
-    Resolve conflicts where same match appears multiple times
-    Keep only the highest weighted prediction per match
+    Resolve conflicts: keep the best prediction per match per market category.
+
+    For example, if a match has both OU_2_5_O and OU_3_5_U, keep the one with
+    the higher weighted score for the 'ou' category. But a match can still
+    appear in 1x2, ou AND btts categories simultaneously.
     """
-    
-    # Group by match
-    matches = {}
+
+    # Group by (match, category)
+    groups = {}
     for pred in predictions:
-        match_id = pred['match_id']
-        if match_id not in matches:
-            matches[match_id] = []
-        matches[match_id].append(pred)
-    
-    # Keep best prediction per match
+        key = (pred['match_id'], pred['category'])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(pred)
+
+    # Keep highest weighted score per (match, category)
     resolved = []
-    for match_id, preds in matches.items():
-        if len(preds) == 1:
-            resolved.append(preds[0])
-        else:
-            # Keep highest weighted score
-            best = max(preds, key=lambda x: x['weighted_score'])
-            resolved.append(best)
-    
+    for key, preds in groups.items():
+        best = max(preds, key=lambda x: x['weighted_score'])
+        resolved.append(best)
+
     return resolved
 
 
 def generate_weighted_top50(csv_path: Path, output_html: Path = None, output_csv: Path = None):
     """
-    Generate weighted Top 50 predictions with conflict resolution
+    Generate weighted Top 50 predictions split by 1X2, O/U and BTTS.
     """
-    
-    print("\nðŸ† GENERATING WEIGHTED TOP 50")
-    print("="*45)
-    
+
+    print("\nGENERATING WEIGHTED TOP 50")
+    print("=" * 45)
+
     if output_html is None:
         output_html = OUTPUT_DIR / "top50_weighted_lite.html"
     if output_csv is None:
         output_csv = OUTPUT_DIR / "top50_weighted_lite.csv"
-    
+
     # Calculate market weights
     weights = calculate_market_weights()
-    
-    # Extract predictions
+
+    # Extract core-market predictions only
     predictions = extract_predictions_from_csv(csv_path)
-    print(f"ðŸ“Š Extracted {len(predictions)} predictions")
-    
+    print(f"Extracted {len(predictions)} core-market predictions")
+
     # Add weighted scores
     for pred in predictions:
         market = pred['market']
-        weight = weights.get(market, 0.5)  # Default weight if market not found
+        weight = weights.get(market, 0.5)
         pred['weight'] = weight
         pred['weighted_score'] = pred['probability'] * weight
-    
-    # Resolve conflicts (keep best prediction per match)
+
+    # Resolve conflicts (best per match per category)
     predictions = resolve_conflicts(predictions)
-    print(f"âœ… Resolved conflicts, {len(predictions)} unique matches")
-    
-    # Sort by date, league, then weighted score (descending)
-    predictions.sort(key=lambda x: (x.get('date', ''), x.get('league', ''), -x['weighted_score']))
+    print(f"Resolved conflicts, {len(predictions)} unique match-market picks")
 
-    # Take top 50
-    top50 = predictions[:50]
+    # Split by category and take top 50 per category
+    ou_preds = sorted(
+        [p for p in predictions if p['category'] == 'ou'],
+        key=lambda x: x['weighted_score'], reverse=True
+    )[:50]
+    btts_preds = sorted(
+        [p for p in predictions if p['category'] == 'btts'],
+        key=lambda x: x['weighted_score'], reverse=True
+    )[:50]
+    x1x2_preds = sorted(
+        [p for p in predictions if p['category'] == '1x2'],
+        key=lambda x: x['weighted_score'], reverse=True
+    )[:50]
 
-    # Generate HTML
-    _generate_html(top50, output_html, weights)
+    print(f"  1X2: {len(x1x2_preds)} | O/U: {len(ou_preds)} | BTTS: {len(btts_preds)}")
 
-    # Generate CSV
-    df = pd.DataFrame(top50)
-    if 'date' in df.columns and 'league' in df.columns:
-        df = df.sort_values(['date', 'league'], ascending=[True, True])
+    # Generate split HTML (tabbed: O/U, BTTS, 1X2)
+    _generate_split_html(ou_preds, btts_preds, x1x2_preds, output_html, weights)
+
+    # Generate CSV with all categories combined
+    all_top = ou_preds + btts_preds + x1x2_preds
+    all_top.sort(key=lambda x: x['weighted_score'], reverse=True)
+    df = pd.DataFrame(all_top)
     df.to_csv(output_csv, index=False)
-    
-    print(f"âœ… Generated top50_weighted.html")
-    print(f"âœ… Generated top50_weighted.csv")
-    
-    return top50
+
+    print(f"Saved {output_html.name}")
+    print(f"Saved {output_csv.name}")
+
+    return all_top
 
 
 def _generate_split_html(top50_ou: List[Dict], top50_btts: List[Dict], 

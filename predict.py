@@ -168,13 +168,7 @@ def calculate_league_profiles(df: pd.DataFrame) -> Dict:
     return profiles
 
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
-    """Light calibration nudge based on league-specific patterns.
-
-    IMPORTANT: Keep adjustments small (max ~3-5%) so we don't override the
-    model's learned predictions.  The model already sees league-level features
-    (Elo, rolling form, implied odds) so heavy post-hoc calibration is
-    counterproductive and *reduces* accuracy.
-    """
+    """Calibrate probability based on league-specific patterns and style."""
     if league not in league_profiles:
         return prob
 
@@ -183,121 +177,146 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
     home_adv = profile.get('home_adv', 0.1)
     clean_sheet_rate = profile.get('clean_sheet_rate', 0.47)
 
-    # Very light calibration — only nudge uncertain predictions
+    # Stronger calibration for lower confidence predictions
     confidence = abs(prob - 0.5) * 2  # 0 to 1 scale
-    calibration_weight = 0.08 * (1 - confidence)  # Was 0.3, now 0.08
+    calibration_weight = 0.3 * (1 - confidence)  # More calibration when less confident
 
-    # Style-based adjustments — kept very small
-    style_boost = {'attacking': 0.02, 'balanced': 0.0, 'defensive': -0.02}  # Was 0.08
+    # Style-based adjustments
+    style_boost = {'attacking': 0.08, 'balanced': 0.0, 'defensive': -0.08}
     goal_style_adj = style_boost.get(style, 0.0)
 
-    # ========== GOALS MARKETS (light nudge only) ==========
+    # ========== GOALS MARKETS ==========
     if 'BTTS_Y' in market:
         league_avg = profile.get('btts_rate', 0.5)
         calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
-        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.3))
+        # Attacking leagues boost BTTS, defensive leagues reduce it
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.5))
 
     elif 'BTTS_N' in market:
         league_avg = 1 - profile.get('btts_rate', 0.5)
         calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
-        return max(0.01, min(0.99, calibrated - goal_style_adj * 0.3))
+        # Defensive leagues boost BTTS_N
+        return max(0.01, min(0.99, calibrated - goal_style_adj * 0.5))
 
     elif 'OU_0_5_O' in market:
-        return prob  # Trust the model
+        return min(prob * 1.05, 0.99)  # Boost slightly (0.5 goals is very likely)
 
     elif 'OU_1_5_O' in market:
         league_avg = profile.get('over15_rate', 0.7)
-        calibrated = prob * (1 - calibration_weight * 0.3) + league_avg * (calibration_weight * 0.3)
-        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.5))
+        calibrated = prob * (1 - calibration_weight * 0.5) + league_avg * (calibration_weight * 0.5)
+        return max(0.01, min(0.99, calibrated + goal_style_adj))
 
     elif 'OU_2_5_O' in market:
         league_avg = profile.get('over25_rate', 0.5)
         calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
-        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.5))
+        return max(0.01, min(0.99, calibrated + goal_style_adj))
 
     elif 'OU_3_5_O' in market:
         league_avg = profile.get('over35_rate', 0.25)
         calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
-        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.3))
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.8))
 
     elif 'OU_4_5_O' in market:
         league_avg = profile.get('over45_rate', 0.15)
         calibrated = prob * (1 - calibration_weight) + league_avg * calibration_weight
-        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.2))
+        return max(0.01, min(0.99, calibrated + goal_style_adj * 0.6))
 
     elif '_U' in market and 'OU_' in market:
-        return max(0.01, min(0.99, prob - goal_style_adj * 0.3))
+        # Under markets - inverse of style adjustment
+        return max(0.01, min(0.99, prob - goal_style_adj))
 
-    # ========== HOME/AWAY ADVANTAGE (very light) ==========
+    # ========== HOME/AWAY ADVANTAGE CALIBRATION ==========
+
+    # Match result markets
     elif '1X2_H' in market:
-        return min(prob * (1 + home_adv * 0.08), 0.95)  # Was 0.3
+        return min(prob * (1 + home_adv * 0.3), 0.95)
 
     elif '1X2_A' in market:
-        return max(prob * (1 - home_adv * 0.08), 0.05)  # Was 0.3
+        return max(prob * (1 - home_adv * 0.3), 0.05)
 
     elif '1X2_D' in market:
-        return max(0.05, min(0.45, prob * (1 - home_adv * 0.04)))  # Was 0.15
+        # Draw less likely in leagues with high home advantage
+        return max(0.05, min(0.45, prob * (1 - home_adv * 0.15)))
 
-    # Double Chance
+    # Double Chance markets
     elif 'DC_1X' in market or 'DC1X' in market:
-        return min(prob * (1 + home_adv * 0.04), 0.95)
+        # Home or Draw - boosted by home advantage
+        return min(prob * (1 + home_adv * 0.15), 0.95)
 
     elif 'DC_X2' in market or 'DCX2' in market:
-        return max(prob * (1 - home_adv * 0.04), 0.15)
+        # Away or Draw - reduced by home advantage
+        return max(prob * (1 - home_adv * 0.15), 0.15)
 
     elif 'DC_12' in market or 'DC12' in market:
-        return min(prob * (1 + home_adv * 0.02), 0.95)
+        # Home or Away (no draw) - slight boost in high home adv leagues
+        return min(prob * (1 + home_adv * 0.08), 0.95)
 
     # Draw No Bet
     elif 'DNB_H' in market:
-        return min(prob * (1 + home_adv * 0.06), 0.90)
+        return min(prob * (1 + home_adv * 0.25), 0.90)
 
     elif 'DNB_A' in market:
-        return max(prob * (1 - home_adv * 0.06), 0.10)
+        return max(prob * (1 - home_adv * 0.25), 0.10)
 
     # Home/Away team goals
     elif 'HomeTG_' in market or 'HomeExact' in market:
-        return max(0.01, min(0.99, prob + home_adv * 0.03))
+        # Home team goals - boosted by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob + line_boost))
 
     elif 'AwayTG_' in market or 'AwayExact' in market:
-        return max(0.01, min(0.99, prob - home_adv * 0.03))
+        # Away team goals - reduced by home advantage
+        line_boost = home_adv * 0.12
+        return max(0.01, min(0.99, prob - line_boost))
 
     # Team to score
     elif 'HomeToScore' in market:
-        return min(prob * (1 + home_adv * 0.03), 0.95)
+        return min(prob * (1 + home_adv * 0.10), 0.95)
 
     elif 'AwayToScore' in market:
-        return max(prob * (1 - home_adv * 0.03), 0.20)
+        return max(prob * (1 - home_adv * 0.10), 0.20)
 
-    # Win to Nil / Clean Sheet
+    # Win to Nil / Clean Sheet - with home/away distinction
     elif 'HomeWTN' in market:
-        return max(0.01, min(0.60, prob + home_adv * 0.02 - goal_style_adj * 0.1))
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.5) * calibration_weight
+        # Home WTN boosted by home advantage
+        return max(0.01, min(0.60, base * (1 + home_adv * 0.20) - goal_style_adj * 0.3))
 
     elif 'AwayWTN' in market:
-        return max(0.01, min(0.40, prob - home_adv * 0.02 - goal_style_adj * 0.1))
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.35) * calibration_weight
+        # Away WTN reduced by home advantage
+        return max(0.01, min(0.40, base * (1 - home_adv * 0.20) - goal_style_adj * 0.3))
 
     elif 'HomeCS' in market:
-        return max(0.01, min(0.65, prob + home_adv * 0.02 - goal_style_adj * 0.1))
+        base = prob * (1 - calibration_weight) + clean_sheet_rate * calibration_weight
+        return max(0.01, min(0.65, base * (1 + home_adv * 0.15) - goal_style_adj * 0.4))
 
     elif 'AwayCS' in market:
-        return max(0.01, min(0.55, prob - home_adv * 0.02 - goal_style_adj * 0.1))
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.8) * calibration_weight
+        return max(0.01, min(0.55, base * (1 - home_adv * 0.15) - goal_style_adj * 0.4))
 
     elif 'NoGoal' in market:
-        return max(0.01, min(0.15, prob - goal_style_adj * 0.1))
+        # 0-0 draw - defensive leagues boost, high home adv reduces
+        base = prob * (1 - calibration_weight) + (clean_sheet_rate * 0.15) * calibration_weight
+        return max(0.01, min(0.15, base - goal_style_adj * 0.5))
 
-    # Win by margin
+    # Win by margin - home/away
     elif 'HomeWin' in market:
-        return max(0.01, min(0.85, prob + home_adv * 0.03))
+        boost = home_adv * 0.15
+        return max(0.01, min(0.85, prob + boost))
 
     elif 'AwayWin' in market:
-        return max(0.01, min(0.60, prob - home_adv * 0.03))
+        boost = home_adv * 0.15
+        return max(0.01, min(0.60, prob - boost))
 
-    # Asian Handicap
+    # Asian Handicap - home advantage affects line perception
     elif 'AH_' in market:
         if '_H' in market or market.endswith('_H'):
-            return max(0.01, min(0.85, prob + home_adv * 0.02))
+            # Home covers handicap
+            return max(0.01, min(0.85, prob + home_adv * 0.08))
         elif '_A' in market or market.endswith('_A'):
-            return max(0.01, min(0.85, prob - home_adv * 0.02))
+            # Away covers handicap
+            return max(0.01, min(0.85, prob - home_adv * 0.08))
 
     return prob
 
@@ -330,11 +349,11 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
             if row['P_BTTS_Y'] > 0.7:
                 row['P_OU_0_5_U'] = min(row['P_OU_0_5_U'], 0.02)
                 row['P_OU_0_5_O'] = max(row['P_OU_0_5_O'], 0.98)
-
-            # Under 0.5 high means BTTS=Yes should be low (but not zeroed out)
+            
+            # Under 0.5 high means BTTS=Yes must be zero
             if row['P_OU_0_5_U'] > 0.5:
-                row['P_BTTS_Y'] = min(row['P_BTTS_Y'], 1.0 - row['P_OU_0_5_U'])
-                row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
+                row['P_BTTS_Y'] = 0.0
+                row['P_BTTS_N'] = 1.0
     
     # 3. BTTS and O/U 1.5 consistency
     if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row:
@@ -369,205 +388,127 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
     return row
 
 def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: float = None, league: str = None) -> pd.Series:
-    """Light Poisson sanity check for goal-based markets.
-
-    We use Poisson only as a *sanity check* — if the model's prediction is
-    wildly inconsistent with the league's goal expectancy, we nudge it a
-    little.  Heavy blending (old: 30-50%) overrides the model's match-
-    specific features and *reduces* accuracy.
-    """
+    """Apply Poisson distribution for goal-based markets"""
     row = row.copy()
-
+    
+    # Use league-specific or default xG
     if league and league in LEAGUE_PROFILES:
         profile = LEAGUE_PROFILES[league]
         total_expected = profile['avg_goals']
-        home_share = 0.54
+        home_share = 0.54  # Home advantage ~54% of goals
         home_xg = home_xg or (total_expected * home_share)
         away_xg = away_xg or (total_expected * (1 - home_share))
     else:
         home_xg = home_xg or 1.4
         away_xg = away_xg or 1.1
-
+    
     total_xg = home_xg + away_xg
-
-    # Light Poisson nudge (max 10% blend) — trust the ML model
+    
+    # Calculate Poisson probabilities for O/U lines
     for line in OU_LINES:
         line_value = float(line.replace('_', '.'))
+        
+        # Poisson probability of over this line
         poisson_over = 1 - poisson.cdf(line_value, total_xg)
-
-        # Very small blend weight — Poisson is a prior, not a replacement
-        blend_weight = 0.10  # Was 0.3-0.5
-
+        
+        # Adaptive blending based on line
+        if line == '0_5':
+            blend_weight = 0.3  # Less Poisson influence (nearly always over)
+        elif line == '1_5':
+            blend_weight = 0.4
+        elif line == '2_5':
+            blend_weight = 0.5  # Equal blend
+        elif line == '3_5':
+            blend_weight = 0.4
+        else:  # 4_5
+            blend_weight = 0.3
+        
         if f'P_OU_{line}_O' in row and pd.notna(row[f'P_OU_{line}_O']):
             row[f'P_OU_{line}_O'] = row[f'P_OU_{line}_O'] * (1 - blend_weight) + poisson_over * blend_weight
             row[f'P_OU_{line}_U'] = 1 - row[f'P_OU_{line}_O']
-
-    # BTTS — light nudge
+    
+    # BTTS using Poisson
     prob_home_scores = 1 - poisson.pmf(0, home_xg)
     prob_away_scores = 1 - poisson.pmf(0, away_xg)
     poisson_btts = prob_home_scores * prob_away_scores
-
+    
     if 'P_BTTS_Y' in row and pd.notna(row['P_BTTS_Y']):
-        row['P_BTTS_Y'] = row['P_BTTS_Y'] * 0.90 + poisson_btts * 0.10  # Was 0.65/0.35
+        row['P_BTTS_Y'] = row['P_BTTS_Y'] * 0.65 + poisson_btts * 0.35
         row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
-
+    
     return row
 
 def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
-    """Build feature frame for upcoming fixtures.
-
-    Uses the SAME feature values the model was trained on: for each fixture,
-    finds each team's most recent historical row (where that team played at
-    home or away) and takes the rolling features already computed during
-    training.  This eliminates the previous train/serve skew where inference
-    re-computed features with different weighting.
-
-    The key insight: features.parquet already contains Home_GF_ma3 etc.
-    computed with shift(1).rolling().  The most recent row for a team in
-    that parquet already represents "form going into the next match" because
-    shift(1) ensures features use only prior matches.
-    """
+    """Enhanced feature building with time weighting"""
     base = _load_base_features()
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
-
-    # Columns that are valid features (not targets, not result/leakage cols)
-    leakage_cols = {"FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
-                    "HomeGoals", "AwayGoals", "OU25",
-                    "HS", "AS", "HST", "AST", "HC", "AC",
-                    "HY", "AY", "HR", "AR", "HF", "AF"}
-
+    
+    # Add time weights for recent form emphasis
+    current_date = datetime.now()
+    base['days_ago'] = (current_date - pd.to_datetime(base['Date'])).dt.days
+    base['time_weight'] = np.exp(-base['days_ago'] / 180)  # 180-day half-life
+    
     rows = []
     for _, r in fx.iterrows():
         lg, dt, ht, at = r["League"], r["Date"], r["HomeTeam"], r["AwayTeam"]
         hist_lg = base[base["League"] == lg]
-
-        # Find the most recent match for each team BEFORE the fixture date
-        ht_matches = hist_lg[
-            ((hist_lg["HomeTeam"] == ht) | (hist_lg["AwayTeam"] == ht))
-            & (hist_lg["Date"] < dt)
-        ].sort_values("Date")
-
-        at_matches = hist_lg[
-            ((hist_lg["HomeTeam"] == at) | (hist_lg["AwayTeam"] == at))
-            & (hist_lg["Date"] < dt)
-        ].sort_values("Date")
-
-        if ht_matches.empty or at_matches.empty:
+        
+        # Get last 10 games for each team with time weighting
+        hrow = hist_lg[(hist_lg["HomeTeam"]==ht) | (hist_lg["AwayTeam"]==ht)]
+        hrow = hrow[hrow["Date"]<dt].sort_values("Date").tail(10)
+        
+        arow = hist_lg[(hist_lg["HomeTeam"]==at) | (hist_lg["AwayTeam"]==at)]
+        arow = arow[arow["Date"]<dt].sort_values("Date").tail(10)
+        
+        if hrow.empty or arow.empty:
             continue
-
-        # Take the most recent row for each team
-        ht_last = ht_matches.iloc[-1]
-        at_last = at_matches.iloc[-1]
-
-        fused = {}
-
-        # --- Home team features ---
-        # If the home team's last match was also at home, take Home_* directly.
-        # If it was away, take Away_* (their perspective) and map to Home_*.
-        ht_was_home = (ht_last["HomeTeam"] == ht)
-        for col in base.columns:
-            if col.startswith("Home_"):
-                suffix = col[5:]  # strip "Home_"
-                if ht_was_home:
-                    fused[col] = ht_last.get(col, np.nan)
+        
+        feat_cols = [c for c in base.columns if not c.startswith("y_") 
+                     and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
+        
+        fused = pd.DataFrame()
+        
+        # Calculate weighted features for home team
+        for col in feat_cols:
+            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
+                weights = hrow['time_weight'].values[-5:]
+                values = hrow[col].fillna(0).values[-5:]
+                if weights.sum() > 0:
+                    weighted_avg = np.average(values, weights=weights)
+                    fused.at[0, col] = weighted_avg
                 else:
-                    fused[col] = ht_last.get(f"Away_{suffix}", np.nan)
-
-        # --- Away team features ---
-        at_was_away = (at_last["AwayTeam"] == at)
-        for col in base.columns:
-            if col.startswith("Away_"):
-                suffix = col[5:]  # strip "Away_"
-                if at_was_away:
-                    fused[col] = at_last.get(col, np.nan)
+                    fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
+            else:
+                fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
+        
+        # Update away team features
+        for c in fused.columns:
+            if c.startswith("Away_") and c in arow.columns:
+                if arow[c].dtype in ['float64', 'int64']:
+                    weights = arow['time_weight'].values[-5:]
+                    values = arow[c].fillna(0).values[-5:]
+                    if weights.sum() > 0:
+                        weighted_avg = np.average(values, weights=weights)
+                        fused.at[0, c] = weighted_avg
                 else:
-                    fused[col] = at_last.get(f"Home_{suffix}", np.nan)
-
-        # --- Elo features: take from the most recent row for each team ---
-        for elo_col in ["Elo_Home", "Elo_Mom_Home"]:
-            if elo_col in base.columns:
-                if ht_was_home:
-                    fused[elo_col] = ht_last.get(elo_col, np.nan)
-                else:
-                    # Team was away last time, so their Elo was stored as Elo_Away
-                    mapped = elo_col.replace("Home", "Away")
-                    fused[elo_col] = ht_last.get(mapped, np.nan)
-
-        for elo_col in ["Elo_Away", "Elo_Mom_Away"]:
-            if elo_col in base.columns:
-                if at_was_away:
-                    fused[elo_col] = at_last.get(elo_col, np.nan)
-                else:
-                    mapped = elo_col.replace("Away", "Home")
-                    fused[elo_col] = at_last.get(mapped, np.nan)
-
-        # Elo derived
-        if "Elo_Diff" in base.columns:
-            elo_h = fused.get("Elo_Home", 1500)
-            elo_a = fused.get("Elo_Away", 1500)
-            fused["Elo_Diff"] = (elo_h if pd.notna(elo_h) else 1500) - (elo_a if pd.notna(elo_a) else 1500)
-        if "Elo_Mom_Diff" in base.columns:
-            mom_h = fused.get("Elo_Mom_Home", 0)
-            mom_a = fused.get("Elo_Mom_Away", 0)
-            fused["Elo_Mom_Diff"] = (mom_h if pd.notna(mom_h) else 0) - (mom_a if pd.notna(mom_a) else 0)
-
-        # --- Contextual features: compute fresh ---
-        match_date = pd.to_datetime(dt)
-        fused["DayOfWeek"] = match_date.dayofweek
-        fused["IsWeekend"] = 1 if match_date.dayofweek >= 5 else 0
-        fused["Month"] = match_date.month
-        m = match_date.month
-        fused["SeasonProgress"] = max(0, min(1, (m - 8) / 10 if m >= 8 else (m + 4) / 10))
-
-        # Rest days
-        if not ht_matches.empty:
-            last_date_h = pd.to_datetime(ht_matches.iloc[-1]["Date"])
-            fused["Home_RestDays"] = min((match_date - last_date_h).days, 21)
-        else:
-            fused["Home_RestDays"] = 7
-        if not at_matches.empty:
-            last_date_a = pd.to_datetime(at_matches.iloc[-1]["Date"])
-            fused["Away_RestDays"] = min((match_date - last_date_a).days, 21)
-        else:
-            fused["Away_RestDays"] = 7
-        fused["RestDiff"] = fused["Home_RestDays"] - fused["Away_RestDays"]
-
-        # --- Market/odds features: use most recent home row's odds ---
-        # (We don't have odds for the future match at this point, so carry
-        # forward the last known odds implied probabilities)
-        for col in base.columns:
-            if col not in fused and not col.startswith("y_") and col not in leakage_cols:
-                if col in ["League", "Date", "HomeTeam", "AwayTeam"]:
-                    continue
-                # For odds-implied and other non-rolling features, use last value
-                fused[col] = ht_last.get(col, np.nan)
-
-        # --- Set identity columns ---
+                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
+        
         fused["League"] = lg
         fused["Date"] = dt
         fused["HomeTeam"] = ht
         fused["AwayTeam"] = at
-
-        # Season: derive from fixture date (Aug-Dec = first year, Jan-Jul = second)
-        # match_date already computed above for contextual features
-        if match_date.month >= 8:
-            season_start = match_date.year
-        else:
-            season_start = match_date.year - 1
-        season_str = f"{season_start % 100:02d}{(season_start + 1) % 100:02d}"
-        fused["Season"] = season_str
-
+        
         for c in base.columns:
             if c.startswith("y_"):
                 fused[c] = pd.NA
-
+        
         rows.append(fused)
-
+    
     if not rows:
         raise RuntimeError("No fixtures matched with historical features.")
-
-    return pd.DataFrame(rows).sort_values(["League","Date","HomeTeam"]).reset_index(drop=True)
+    
+    return pd.concat(rows, ignore_index=True).sort_values(["League","Date","HomeTeam"])
 
 def _collect_market_columns() -> List[str]:
     """All expected probability column names - COMPREHENSIVE VERSION"""
@@ -802,152 +743,6 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
                 row[f"P_AwayTG_{l}_O"] = pick(p, ak, "O")
                 row[f"P_AwayTG_{l}_U"] = pick(p, ak, "U")
         
-        # ====================================================================
-        # DERIVE secondary markets from primary model outputs.
-        # These are mathematically determined — no separate model needed.
-        # ====================================================================
-        p_h = row.get("P_1X2_H", 0)
-        p_d = row.get("P_1X2_D", 0)
-        p_a = row.get("P_1X2_A", 0)
-        p_btts_y = row.get("P_BTTS_Y", 0)
-        p_btts_n = row.get("P_BTTS_N", 0)
-        p_ou25_o = row.get("P_OU_2_5_O", 0)
-        p_ou25_u = row.get("P_OU_2_5_U", 0)
-
-        # Double Chance (direct sums from 1X2)
-        if "y_DC_1X" not in preds:
-            row["P_DC_1X_Y"] = min(p_h + p_d, 0.99)
-            row["P_DC_1X_N"] = max(1 - row["P_DC_1X_Y"], 0.01)
-        if "y_DC_X2" not in preds:
-            row["P_DC_X2_Y"] = min(p_d + p_a, 0.99)
-            row["P_DC_X2_N"] = max(1 - row["P_DC_X2_Y"], 0.01)
-        if "y_DC_12" not in preds:
-            row["P_DC_12_Y"] = min(p_h + p_a, 0.99)
-            row["P_DC_12_N"] = max(1 - row["P_DC_12_Y"], 0.01)
-
-        # Draw No Bet (1X2 excluding draw, renormalised)
-        ha_sum = p_h + p_a
-        if "y_DNB_H" not in preds and ha_sum > 0:
-            row["P_DNB_H_Y"] = p_h / ha_sum
-            row["P_DNB_H_N"] = p_a / ha_sum
-        if "y_DNB_A" not in preds and ha_sum > 0:
-            row["P_DNB_A_Y"] = p_a / ha_sum
-            row["P_DNB_A_N"] = p_h / ha_sum
-
-        # Team To Score (from team goal O/U 0.5)
-        if "y_HomeToScore" not in preds:
-            row["P_HomeToScore_Y"] = row.get("P_HomeTG_0_5_O", 0.7)
-            row["P_HomeToScore_N"] = row.get("P_HomeTG_0_5_U", 0.3)
-        if "y_AwayToScore" not in preds:
-            row["P_AwayToScore_Y"] = row.get("P_AwayTG_0_5_O", 0.6)
-            row["P_AwayToScore_N"] = row.get("P_AwayTG_0_5_U", 0.4)
-
-        # Clean Sheets (from opponent team goals O/U 0.5)
-        if "y_HomeCS" not in preds:
-            row["P_HomeCS_Y"] = row.get("P_AwayTG_0_5_U", 0.35)
-            row["P_HomeCS_N"] = row.get("P_AwayTG_0_5_O", 0.65)
-        if "y_AwayCS" not in preds:
-            row["P_AwayCS_Y"] = row.get("P_HomeTG_0_5_U", 0.28)
-            row["P_AwayCS_N"] = row.get("P_HomeTG_0_5_O", 0.72)
-
-        # Win to Nil = win AND opponent scores 0
-        if "y_HomeWTN" not in preds:
-            p_away_nil = row.get("P_AwayTG_0_5_U", 0.35)
-            row["P_HomeWTN_Y"] = p_h * p_away_nil
-            row["P_HomeWTN_N"] = 1 - row["P_HomeWTN_Y"]
-        if "y_AwayWTN" not in preds:
-            p_home_nil = row.get("P_HomeTG_0_5_U", 0.28)
-            row["P_AwayWTN_Y"] = p_a * p_home_nil
-            row["P_AwayWTN_N"] = 1 - row["P_AwayWTN_Y"]
-
-        # Result + BTTS combos (approximate: treat result & BTTS as independent)
-        if "y_HomeWin_BTTS_Y" not in preds:
-            row["P_HomeWin_BTTS_Y_Y"] = p_h * p_btts_y
-            row["P_HomeWin_BTTS_Y_N"] = 1 - row["P_HomeWin_BTTS_Y_Y"]
-        if "y_HomeWin_BTTS_N" not in preds:
-            row["P_HomeWin_BTTS_N_Y"] = p_h * p_btts_n
-            row["P_HomeWin_BTTS_N_N"] = 1 - row["P_HomeWin_BTTS_N_Y"]
-        if "y_AwayWin_BTTS_Y" not in preds:
-            row["P_AwayWin_BTTS_Y_Y"] = p_a * p_btts_y
-            row["P_AwayWin_BTTS_Y_N"] = 1 - row["P_AwayWin_BTTS_Y_Y"]
-        if "y_AwayWin_BTTS_N" not in preds:
-            row["P_AwayWin_BTTS_N_Y"] = p_a * p_btts_n
-            row["P_AwayWin_BTTS_N_N"] = 1 - row["P_AwayWin_BTTS_N_Y"]
-        if "y_Draw_BTTS_Y" not in preds:
-            row["P_Draw_BTTS_Y_Y"] = p_d * p_btts_y
-            row["P_Draw_BTTS_Y_N"] = 1 - row["P_Draw_BTTS_Y_Y"]
-        if "y_Draw_BTTS_N" not in preds:
-            row["P_Draw_BTTS_N_Y"] = p_d * p_btts_n
-            row["P_Draw_BTTS_N_N"] = 1 - row["P_Draw_BTTS_N_Y"]
-
-        # Result + O/U 2.5 combos
-        if "y_HomeWin_O25" not in preds:
-            row["P_HomeWin_O25_Y"] = p_h * p_ou25_o
-            row["P_HomeWin_O25_N"] = 1 - row["P_HomeWin_O25_Y"]
-        if "y_HomeWin_U25" not in preds:
-            row["P_HomeWin_U25_Y"] = p_h * p_ou25_u
-            row["P_HomeWin_U25_N"] = 1 - row["P_HomeWin_U25_Y"]
-        if "y_AwayWin_O25" not in preds:
-            row["P_AwayWin_O25_Y"] = p_a * p_ou25_o
-            row["P_AwayWin_O25_N"] = 1 - row["P_AwayWin_O25_Y"]
-        if "y_AwayWin_U25" not in preds:
-            row["P_AwayWin_U25_Y"] = p_a * p_ou25_u
-            row["P_AwayWin_U25_N"] = 1 - row["P_AwayWin_U25_Y"]
-        if "y_Draw_O25" not in preds:
-            row["P_Draw_O25_Y"] = p_d * p_ou25_o
-            row["P_Draw_O25_N"] = 1 - row["P_Draw_O25_Y"]
-        if "y_Draw_U25" not in preds:
-            row["P_Draw_U25_Y"] = p_d * p_ou25_u
-            row["P_Draw_U25_N"] = 1 - row["P_Draw_U25_Y"]
-
-        # DC + O/U combos
-        dc_1x = min(p_h + p_d, 0.99)
-        dc_x2 = min(p_d + p_a, 0.99)
-        dc_12 = min(p_h + p_a, 0.99)
-        if "y_DC1X_O25" not in preds:
-            row["P_DC1X_O25_Y"] = dc_1x * p_ou25_o
-            row["P_DC1X_O25_N"] = 1 - row["P_DC1X_O25_Y"]
-        if "y_DC1X_U25" not in preds:
-            row["P_DC1X_U25_Y"] = dc_1x * p_ou25_u
-            row["P_DC1X_U25_N"] = 1 - row["P_DC1X_U25_Y"]
-        if "y_DCX2_O25" not in preds:
-            row["P_DCX2_O25_Y"] = dc_x2 * p_ou25_o
-            row["P_DCX2_O25_N"] = 1 - row["P_DCX2_O25_Y"]
-        if "y_DCX2_U25" not in preds:
-            row["P_DCX2_U25_Y"] = dc_x2 * p_ou25_u
-            row["P_DCX2_U25_N"] = 1 - row["P_DCX2_U25_Y"]
-        if "y_DC12_O25" not in preds:
-            row["P_DC12_O25_Y"] = dc_12 * p_ou25_o
-            row["P_DC12_O25_N"] = 1 - row["P_DC12_O25_Y"]
-        if "y_DC12_U25" not in preds:
-            row["P_DC12_U25_Y"] = dc_12 * p_ou25_u
-            row["P_DC12_U25_N"] = 1 - row["P_DC12_U25_Y"]
-
-        # DC + BTTS combos
-        if "y_DC1X_BTTS_Y" not in preds:
-            row["P_DC1X_BTTS_Y_Y"] = dc_1x * p_btts_y
-            row["P_DC1X_BTTS_Y_N"] = 1 - row["P_DC1X_BTTS_Y_Y"]
-        if "y_DC1X_BTTS_N" not in preds:
-            row["P_DC1X_BTTS_N_Y"] = dc_1x * p_btts_n
-            row["P_DC1X_BTTS_N_N"] = 1 - row["P_DC1X_BTTS_N_Y"]
-        if "y_DCX2_BTTS_Y" not in preds:
-            row["P_DCX2_BTTS_Y_Y"] = dc_x2 * p_btts_y
-            row["P_DCX2_BTTS_Y_N"] = 1 - row["P_DCX2_BTTS_Y_Y"]
-        if "y_DCX2_BTTS_N" not in preds:
-            row["P_DCX2_BTTS_N_Y"] = dc_x2 * p_btts_n
-            row["P_DCX2_BTTS_N_N"] = 1 - row["P_DCX2_BTTS_N_Y"]
-
-        # No-goal (both teams fail to score)
-        if "y_NoGoal" not in preds:
-            p_h_nil = row.get("P_HomeTG_0_5_U", 0.28)
-            p_a_nil = row.get("P_AwayTG_0_5_U", 0.35)
-            row["P_NoGoal_Y"] = p_h_nil * p_a_nil
-            row["P_NoGoal_N"] = 1 - row["P_NoGoal_Y"]
-
-        # ====================================================================
-        # End of derived markets
-        # ====================================================================
-
         if "y_HomeCardsY_BAND" in preds:
             p = preds["y_HomeCardsY_BAND"][i]
             for b in ["0-2","3","4-5","6+"]:
@@ -1213,17 +1008,17 @@ def calculate_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     """
-    Create combined output for 1X2, OU2.5, and OU1.5 markets above 90% confidence.
-    Shows all three markets side-by-side for each match where any qualifies.
+    Create combined output for 1X2, OU2.5, OU1.5, and BTTS markets above 90% confidence.
+    Shows all four markets side-by-side for each match where any qualifies.
     """
-    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 >= 90%)...")
+    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 + BTTS >= 90%)...")
 
     # Define the target markets and their probability columns
-    # Priority: DC_ (Dixon-Coles) first, then BLEND_, then P_
     markets = {
         '1X2': ['DC_1X2_H', 'DC_1X2_D', 'DC_1X2_A', 'BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A', 'P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
         'OU_2_5': ['DC_OU_2_5_O', 'DC_OU_2_5_U', 'BLEND_OU_2_5_O', 'BLEND_OU_2_5_U', 'P_OU_2_5_O', 'P_OU_2_5_U'],
-        'OU_1_5': ['DC_OU_1_5_O', 'DC_OU_1_5_U', 'BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U']
+        'OU_1_5': ['DC_OU_1_5_O', 'DC_OU_1_5_U', 'BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U'],
+        'BTTS': ['DC_BTTS_Y', 'DC_BTTS_N', 'BLEND_BTTS_Y', 'BLEND_BTTS_N', 'P_BTTS_Y', 'P_BTTS_N'],
     }
 
     rows = []
@@ -1296,12 +1091,29 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
             match_info['OU15_Pick'] = '-'
             match_info['OU15_Prob'] = '-'
 
+        # BTTS Market
+        btts_cols = [c for c in markets['BTTS'] if c in df.columns]
+        if btts_cols:
+            btts_probs = row[btts_cols]
+            best_btts = btts_probs.max()
+            best_btts_col = btts_probs.idxmax() if best_btts > 0 else ''
+            if best_btts >= threshold:
+                has_high_conf = True
+                match_info['BTTS_Pick'] = 'Yes' if '_Y' in best_btts_col else 'No'
+                match_info['BTTS_Prob'] = f"{best_btts:.1%}"
+            else:
+                match_info['BTTS_Pick'] = '-'
+                match_info['BTTS_Prob'] = f"{best_btts:.1%}" if best_btts > 0 else '-'
+        else:
+            match_info['BTTS_Pick'] = '-'
+            match_info['BTTS_Prob'] = '-'
+
         # Only include matches with at least one high-confidence market
         if has_high_conf:
             rows.append(match_info)
 
     if not rows:
-        print("[COMBINED] No matches with 90%+ confidence in 1X2, OU2.5, or OU1.5")
+        print("[COMBINED] No matches with 90%+ confidence in 1X2, OU2.5, OU1.5, or BTTS")
         return
 
     # Create DataFrame and save
@@ -1317,7 +1129,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>High Confidence Picks (90%+) - 1X2, OU2.5, OU1.5</title>
+    <title>High Confidence Picks (90%+) - 1X2, OU2.5, OU1.5, BTTS</title>
     <style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }}
         h1 {{ color: #00d4ff; text-align: center; }}
@@ -1343,6 +1155,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
             <th>1X2</th>
             <th>O/U 2.5</th>
             <th>O/U 1.5</th>
+            <th>BTTS</th>
         </tr>
 """
 
@@ -1351,6 +1164,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
         x1x2_class = 'pick high-prob' if row['1X2_Pick'] != '-' else 'no-pick'
         ou25_class = 'pick high-prob' if row['OU25_Pick'] != '-' else 'no-pick'
         ou15_class = 'pick high-prob' if row['OU15_Pick'] != '-' else 'no-pick'
+        btts_class = 'pick high-prob' if row['BTTS_Pick'] != '-' else 'no-pick'
 
         html_content += f"""        <tr>
             <td>{row['Date']}</td>
@@ -1359,6 +1173,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
             <td class='{x1x2_class}'>{row['1X2_Pick']} <span class='prob'>({row['1X2_Prob']})</span></td>
             <td class='{ou25_class}'>{row['OU25_Pick']} <span class='prob'>({row['OU25_Prob']})</span></td>
             <td class='{ou15_class}'>{row['OU15_Pick']} <span class='prob'>({row['OU15_Prob']})</span></td>
+            <td class='{btts_class}'>{row['BTTS_Pick']} <span class='prob'>({row['BTTS_Prob']})</span></td>
         </tr>
 """
 
@@ -1373,10 +1188,32 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
 
 
 def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = None):
-    """Enhanced HTML report - Elite picks (>95% probability) sorted by date and league"""
-    prob_cols = [c for c in df.columns if c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_")]
+    """Enhanced HTML report - Elite picks sorted by date and league.
+
+    Only considers core betting markets (1X2, O/U 1.5-4.5, BTTS) to avoid
+    trivial markets like O/U 0.5 or niche exact scores dominating the output.
+    """
+    # Core market suffixes we actually care about
+    _CORE_SUFFIXES = {
+        '1X2_H', '1X2_D', '1X2_A',
+        'BTTS_Y', 'BTTS_N',
+        'OU_1_5_O', 'OU_1_5_U',
+        'OU_2_5_O', 'OU_2_5_U',
+        'OU_3_5_O', 'OU_3_5_U',
+        'OU_4_5_O', 'OU_4_5_U',
+    }
+
+    def _is_core_col(col):
+        for suffix in _CORE_SUFFIXES:
+            if col.endswith(suffix):
+                return True
+        return False
+
+    prob_cols = [c for c in df.columns
+                 if (c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_"))
+                 and _is_core_col(c)]
     if not prob_cols:
-        print("Warning: No probability columns found")
+        print("Warning: No core probability columns found")
         return
 
     df2 = df.copy()
@@ -1390,8 +1227,8 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
     else:
         df2["AvgConfidence"] = 0.5
 
-    # Filter for ELITE predictions only (>95% probability)
-    elite_threshold = 0.95
+    # Show all predictions with meaningful confidence (>70% on core markets)
+    elite_threshold = 0.70
     elite = df2[df2["BestProb"] >= elite_threshold].copy()
 
     # Sort by Date, then League
@@ -1766,8 +1603,7 @@ def predict_week(fixtures_csv: Path) -> Path:
     df_out.to_csv(output_path_full, index=False)
     print(f"\n[OK] Saved full predictions: {output_path_full} ({len(df_out)} matches)")
 
-    # Save weekly_bets.csv with all predictions (no confidence filter)
-    # Downstream scripts depend on this file having all matches
+    # Save weekly_bets.csv with all matches (no confidence filter)
     output_path = OUTPUT_DIR / "weekly_bets.csv"
     df_out.to_csv(output_path, index=False)
     print(f"[OK] Saved predictions: {output_path} ({len(df_out)} matches)")
