@@ -29,6 +29,18 @@ ID_COLS = ["League","Date","HomeTeam","AwayTeam"]
 OU_LINES = ["0_5","1_5","2_5","3_5","4_5"]
 AH_LINES = ["-1_0","-0_5","0_0","+0_5","+1_0"]
 
+# ---------------------------------------------------------------------------
+# TUNING_OVERRIDES -- auto_tune.py writes into this dict at runtime.
+# When empty, every parameter falls back to its hardcoded default.
+# ---------------------------------------------------------------------------
+TUNING_OVERRIDES: dict = {}
+
+# Auto-load tuned params if file exists (written by auto_tune.py)
+_tuned_params_path = Path(__file__).resolve().parent / "outputs" / "tuning_best_params.json"
+if _tuned_params_path.exists():
+    with open(_tuned_params_path) as _f:
+        TUNING_OVERRIDES.update(json.load(_f))
+
 # League scoring profiles (learned from historical data)
 # style: 'attacking' (>2.8 avg), 'balanced' (2.5-2.8), 'defensive' (<2.5)
 # clean_sheet_rate: Probability of at least one team keeping a clean sheet
@@ -179,10 +191,11 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
 
     # Stronger calibration for lower confidence predictions
     confidence = abs(prob - 0.5) * 2  # 0 to 1 scale
-    calibration_weight = 0.3 * (1 - confidence)  # More calibration when less confident
+    calibration_weight = TUNING_OVERRIDES.get('calibration_scalar', 0.3) * (1 - confidence)
 
     # Style-based adjustments
-    style_boost = {'attacking': 0.08, 'balanced': 0.0, 'defensive': -0.08}
+    _sb = TUNING_OVERRIDES.get('style_boost_magnitude', 0.08)
+    style_boost = {'attacking': _sb, 'balanced': 0.0, 'defensive': -_sb}
     goal_style_adj = style_boost.get(style, 0.0)
 
     # ========== GOALS MARKETS ==========
@@ -229,14 +242,14 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
 
     # Match result markets
     elif '1X2_H' in market:
-        return min(prob * (1 + home_adv * 0.3), 0.95)
+        return min(prob * (1 + home_adv * TUNING_OVERRIDES.get('home_adv_1x2_h', 0.3)), 0.95)
 
     elif '1X2_A' in market:
-        return max(prob * (1 - home_adv * 0.3), 0.05)
+        return max(prob * (1 - home_adv * TUNING_OVERRIDES.get('home_adv_1x2_a', 0.3)), 0.05)
 
     elif '1X2_D' in market:
         # Draw less likely in leagues with high home advantage
-        return max(0.05, min(0.45, prob * (1 - home_adv * 0.15)))
+        return max(0.05, min(0.45, prob * (1 - home_adv * TUNING_OVERRIDES.get('home_adv_1x2_d', 0.15))))
 
     # Double Chance markets
     elif 'DC_1X' in market or 'DC1X' in market:
@@ -412,16 +425,9 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
         poisson_over = 1 - poisson.cdf(line_value, total_xg)
         
         # Adaptive blending based on line
-        if line == '0_5':
-            blend_weight = 0.3  # Less Poisson influence (nearly always over)
-        elif line == '1_5':
-            blend_weight = 0.4
-        elif line == '2_5':
-            blend_weight = 0.5  # Equal blend
-        elif line == '3_5':
-            blend_weight = 0.4
-        else:  # 4_5
-            blend_weight = 0.3
+        _poisson_weights = TUNING_OVERRIDES.get('poisson_blend_weights',
+            {'0_5': 0.3, '1_5': 0.4, '2_5': 0.5, '3_5': 0.4, '4_5': 0.3})
+        blend_weight = _poisson_weights.get(line, 0.4)
         
         if f'P_OU_{line}_O' in row and pd.notna(row[f'P_OU_{line}_O']):
             row[f'P_OU_{line}_O'] = row[f'P_OU_{line}_O'] * (1 - blend_weight) + poisson_over * blend_weight
@@ -433,7 +439,8 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
     poisson_btts = prob_home_scores * prob_away_scores
     
     if 'P_BTTS_Y' in row and pd.notna(row['P_BTTS_Y']):
-        row['P_BTTS_Y'] = row['P_BTTS_Y'] * 0.65 + poisson_btts * 0.35
+        _btts_pw = TUNING_OVERRIDES.get('btts_poisson_weight', 0.35)
+        row['P_BTTS_Y'] = row['P_BTTS_Y'] * (1 - _btts_pw) + poisson_btts * _btts_pw
         row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
     
     return row
@@ -447,7 +454,7 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     # Add time weights for recent form emphasis
     current_date = datetime.now()
     base['days_ago'] = (current_date - pd.to_datetime(base['Date'])).dt.days
-    base['time_weight'] = np.exp(-base['days_ago'] / 180)  # 180-day half-life
+    base['time_weight'] = np.exp(-base['days_ago'] / TUNING_OVERRIDES.get('time_half_life', 180))
     
     rows = []
     for _, r in fx.iterrows():
@@ -945,7 +952,7 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
                 continue
             
             # Adjust alpha based on league quality
-            alpha = min(float(base_alpha) + ml_weight_boost, 0.85)
+            alpha = min(float(base_alpha) + ml_weight_boost, TUNING_OVERRIDES.get('ml_weight_cap', 0.85))
             
             # Get probabilities
             M = out.loc[idx, ml_cols].values

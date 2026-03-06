@@ -435,8 +435,6 @@ class BacktestEngine:
         summary_df = pd.DataFrame.from_dict(market_summary, orient='index')
         if 'Accuracy_%' in summary_df.columns:
             summary_df = summary_df.sort_values('Accuracy_%', ascending=False)
-        elif len(summary_df) > 0:
-            summary_df = summary_df.sort_values('Accuracy_%', ascending=False)
         
         print("\n📊 OVERALL MARKET PERFORMANCE:")
         print(summary_df.to_string())
