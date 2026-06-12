@@ -77,60 +77,58 @@ class BacktestEngine:
         
         return train_df, test_df
     
-    def train_models_on_period(self, train_df: pd.DataFrame) -> bool:
+    def train_models_on_period(self, train_df: pd.DataFrame, test_start: pd.Timestamp = None) -> bool:
         """
-        Train models using only training data
-        Returns True if successful
+        Train models using only training data, then re-learn blend weights
+        on a temporal validation slice to avoid leakage.
+        Returns True if successful.
         """
-        # NEW: Fill NaN BEFORE saving to file
-        print("   🔧 Handling missing values...")
+        print("   Handling missing values...")
         numeric_cols = train_df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
             if train_df[col].isna().sum() > 0:
                 train_df[col] = train_df[col].fillna(train_df[col].median())
 
-        # Fill any remaining NaN with 0
         train_df = train_df.fillna(0)
 
-        # Create temporary features file with ONLY training data
         temp_features = DATA_DIR / "temp_backtest_features.parquet"
         train_df.to_parquet(temp_features)
 
-        # Backup original features
         backup_features = DATA_DIR / "original_features_backup.parquet"
         if FEATURES_PARQUET.exists():
             shutil.copy(FEATURES_PARQUET, backup_features)
 
-        # Replace features with training data only
         shutil.copy(temp_features, FEATURES_PARQUET)
 
         try:
-            # Train using your actual system
             from models import train_all_targets
-            
             models = train_all_targets(MODEL_ARTIFACTS_DIR)
-        
-
-            
             success = len(models) > 0
-            
-            # Restore original features
+
+            # Re-learn blend weights on temporal validation slice
+            if success and test_start is not None:
+                try:
+                    from blending import learn_blend_weights_temporal
+                    val_end = test_start.strftime('%Y-%m-%d')
+                    print(f"   Re-learning blend weights (val_end={val_end})...")
+                    learn_blend_weights_temporal(val_end)
+                except Exception as e:
+                    print(f"   [WARN] Blend weight re-learning failed: {e}")
+
             if backup_features.exists():
                 shutil.copy(backup_features, FEATURES_PARQUET)
-            
-            # Cleanup
+
             temp_features.unlink(missing_ok=True)
             backup_features.unlink(missing_ok=True)
-            
+
             return success
-            
+
         except Exception as e:
             print(f"   [WARN] Training failed: {e}")
-            
-            # Restore original features
+
             if backup_features.exists():
                 shutil.copy(backup_features, FEATURES_PARQUET)
-            
+
             return False
     
     def generate_predictions(self, test_df: pd.DataFrame) -> pd.DataFrame:
@@ -177,93 +175,91 @@ class BacktestEngine:
     
     def evaluate_predictions(self, df: pd.DataFrame) -> Dict:
         """
-        Evaluate prediction accuracy across all markets
+        Evaluate prediction accuracy across all markets.
+        Uses real bookmaker odds for ROI when available.
         """
         results = {
             'total_matches': len(df),
             'markets': {},
-            'league_markets': {}  # NEW: Track league+market combos
+            'league_markets': {}
         }
-        
+
+        # Odds columns available per market for real ROI
+        ODDS_MAP = {
+            '1X2': {'H': 'B365H', 'D': 'B365D', 'A': 'B365A'},
+            'BTTS': {'Y': 'Odds_BTTS_Y', 'N': 'Odds_BTTS_N'},
+            'OU_2_5': {'O': 'Odds_O25', 'U': 'Odds_U25'},
+        }
+
         # Define all markets to evaluate
         markets = {
-            # 1X2
             '1X2': {
                 'actual': 'y_1X2',
                 'pred_cols': ['BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A'],
-                'outcomes': ['H', 'D', 'A']
+                'outcomes': ['H', 'D', 'A'],
+                'weight': 3.0,
             },
-            # BTTS
             'BTTS': {
                 'actual': 'y_BTTS',
                 'pred_cols': ['BLEND_BTTS_Y', 'BLEND_BTTS_N'],
-                'outcomes': ['Y', 'N']
-            },
-            # Over/Under
-            'OU_0_5': {
-                'actual': 'y_OU_0_5',
-                'pred_cols': ['BLEND_OU_0_5_O', 'BLEND_OU_0_5_U'],
-                'outcomes': ['O', 'U']
+                'outcomes': ['Y', 'N'],
+                'weight': 2.0,
             },
             'OU_1_5': {
                 'actual': 'y_OU_1_5',
                 'pred_cols': ['BLEND_OU_1_5_O', 'BLEND_OU_1_5_U'],
-                'outcomes': ['O', 'U']
+                'outcomes': ['O', 'U'],
+                'weight': 1.5,
             },
             'OU_2_5': {
                 'actual': 'y_OU_2_5',
                 'pred_cols': ['BLEND_OU_2_5_O', 'BLEND_OU_2_5_U'],
-                'outcomes': ['O', 'U']
+                'outcomes': ['O', 'U'],
+                'weight': 3.0,
             },
             'OU_3_5': {
                 'actual': 'y_OU_3_5',
                 'pred_cols': ['BLEND_OU_3_5_O', 'BLEND_OU_3_5_U'],
-                'outcomes': ['O', 'U']
+                'outcomes': ['O', 'U'],
+                'weight': 1.5,
             },
             'OU_4_5': {
                 'actual': 'y_OU_4_5',
                 'pred_cols': ['BLEND_OU_4_5_O', 'BLEND_OU_4_5_U'],
-                'outcomes': ['O', 'U']
+                'outcomes': ['O', 'U'],
+                'weight': 1.0,
             },
-
         }
-        
+
         for market_name, market_info in markets.items():
             actual_col = market_info['actual']
             pred_cols = market_info['pred_cols']
             outcomes = market_info['outcomes']
-            
-            # Skip if columns don't exist
+
             if actual_col not in df.columns:
                 continue
-            
+
             available_pred_cols = [c for c in pred_cols if c in df.columns]
             if not available_pred_cols:
                 continue
-            
-            # Get matches with actual outcomes
+
             valid = df[actual_col].notna()
             actual = df.loc[valid, actual_col]
-            
+
             if len(actual) == 0:
                 continue
-            
-            # Get predictions
+
             predictions = df.loc[valid, available_pred_cols]
-            
-            # Find predicted outcome (highest probability)
+
             pred_outcome_idx = predictions.idxmax(axis=1)
-            
-            # Map column names to outcomes
             outcome_map = {col: outcome for col, outcome in zip(pred_cols, outcomes)}
             predicted = pred_outcome_idx.map(outcome_map)
-            
-            # Calculate metrics
+
             correct = (predicted == actual).sum()
             total = len(actual)
             accuracy = correct / total if total > 0 else 0
-            
-            # Brier score (calibration)
+
+            # Brier score
             brier_scores = []
             for idx in actual.index:
                 true_outcome = actual[idx]
@@ -271,27 +267,62 @@ class BacktestEngine:
                     if col in df.columns:
                         pred_prob = df.loc[idx, col]
                         if pd.notna(pred_prob):
-                            # Convert percentage string if needed
                             if isinstance(pred_prob, str):
                                 pred_prob = float(pred_prob.strip('%')) / 100
                             true_prob = 1.0 if outcome == true_outcome else 0.0
                             brier_scores.append((pred_prob - true_prob) ** 2)
-            
+
             brier = np.mean(brier_scores) if brier_scores else 0
-            
-            # ROI calculation (simplified - assumes even odds)
-            roi = ((correct / total) - 0.5) * 100 if total > 0 else 0
-            
+
+            # Real ROI using bookmaker odds where available
+            odds_cols = ODDS_MAP.get(market_name, {})
+            has_real_odds = odds_cols and all(
+                c in df.columns for c in odds_cols.values()
+            )
+
+            if has_real_odds:
+                # Bet on the predicted outcome; profit = odds - 1 if correct, -1 if wrong
+                total_staked = 0
+                total_return = 0.0
+                for idx in actual.index:
+                    pred_out = predicted.loc[idx]
+                    true_out = actual.loc[idx]
+                    odds_col = odds_cols.get(pred_out)
+                    if odds_col and odds_col in df.columns:
+                        match_odds = df.loc[idx, odds_col]
+                        if pd.notna(match_odds) and match_odds > 1.0:
+                            total_staked += 1
+                            if pred_out == true_out:
+                                total_return += float(match_odds)
+                roi = ((total_return - total_staked) / total_staked * 100) if total_staked > 0 else 0.0
+                roi_type = 'real'
+            else:
+                # Fallback: approximate using market-specific average odds
+                APPROX_ODDS = {
+                    '1X2': 3.0, 'BTTS': 1.9, 'OU_1_5': 1.5,
+                    'OU_2_5': 1.9, 'OU_3_5': 2.3, 'OU_4_5': 3.5,
+                }
+                avg_odds = APPROX_ODDS.get(market_name, 2.0)
+                breakeven = 1.0 / avg_odds
+                roi = (accuracy - breakeven) / breakeven * 100
+                roi_type = 'approx'
+
             results['markets'][market_name] = {
                 'total': int(total),
                 'correct': int(correct),
                 'accuracy': float(accuracy),
                 'brier_score': float(brier),
-                'roi_pct': float(roi)
+                'roi_pct': float(roi),
+                'roi_type': roi_type,
+                'weight': market_info['weight'],
             }
-        
+
         return results
     
+    def run(self) -> pd.DataFrame:
+        """Alias for run_backtest (used by auto_tune.py)."""
+        return self.run_backtest()
+
     def run_backtest(self) -> pd.DataFrame:
         """Run complete walk-forward backtest"""
         print("\n🔬 BACKTESTING ENGINE")
@@ -332,8 +363,8 @@ class BacktestEngine:
             print(f"   📊 Train: {len(train_df)} matches | Test: {len(test_df)} matches")
             
             # Train models on training data only
-            print(f"   🎯 Training models...")
-            success = self.train_models_on_period(train_df)
+            print(f"   Training models...")
+            success = self.train_models_on_period(train_df, test_start=test_start)
             
             if not success:
                 print(f"   [ERROR] Training failed")
@@ -378,24 +409,32 @@ class BacktestEngine:
             total_matches = 0
             total_correct = 0
             brier_scores = []
-            
+            roi_values = []
+            weight = 1.0
+            roi_type = 'approx'
+
             for result in self.results:
                 if market in result.get('markets', {}):
                     stats = result['markets'][market]
                     total_matches += stats['total']
                     total_correct += stats['correct']
                     brier_scores.append(stats['brier_score'])
-            
+                    roi_values.append(stats.get('roi_pct', 0.0))
+                    weight = stats.get('weight', 1.0)
+                    roi_type = stats.get('roi_type', 'approx')
+
             if total_matches > 0:
                 accuracy = total_correct / total_matches
-                roi = ((accuracy - 0.5) * 100)
-                
+                roi = np.mean(roi_values) if roi_values else 0.0
+
                 market_summary[market] = {
                     'Total_Matches': total_matches,
                     'Correct': total_correct,
                     'Accuracy_%': round(accuracy * 100, 1),
                     'Brier_Score': round(np.mean(brier_scores), 3),
-                    'ROI_%': round(roi, 1)
+                    'ROI_%': round(roi, 1),
+                    'ROI_Type': roi_type,
+                    'Weight': weight,
                 }
         
         summary_df = pd.DataFrame.from_dict(market_summary, orient='index')
@@ -403,7 +442,24 @@ class BacktestEngine:
         
         print("\n📊 OVERALL MARKET PERFORMANCE:")
         print(summary_df.to_string())
-        
+
+        # Weighted Brier (the primary tuning objective)
+        if 'Brier_Score' in summary_df.columns and 'Weight' in summary_df.columns:
+            weights = summary_df['Weight'].values
+            briers = summary_df['Brier_Score'].values
+            weighted_brier = np.average(briers, weights=weights)
+            print(f"\n📈 WEIGHTED BRIER (primary metric): {weighted_brier:.4f}")
+            print(f"   (lower = better calibrated; <0.20 is good, <0.15 is excellent)")
+
+            # Check ROI types
+            roi_types = summary_df['ROI_Type'].unique() if 'ROI_Type' in summary_df.columns else []
+            if 'real' in roi_types:
+                real_roi = summary_df[summary_df['ROI_Type'] == 'real']
+                avg_real_roi = np.average(real_roi['ROI_%'], weights=real_roi['Weight'])
+                print(f"   REAL ROI (odds-based): {avg_real_roi:+.1f}%")
+            if 'approx' in roi_types:
+                print(f"   (some markets use approximate odds — get more odds data for precision)")
+
         # 2. League-specific analysis
         self.analyze_by_league()
         
