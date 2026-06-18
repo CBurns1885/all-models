@@ -152,9 +152,12 @@ class BacktestEngine:
             
             if predictions_file.exists():
                 predictions = pd.read_csv(predictions_file)
+                predictions['Date'] = pd.to_datetime(predictions['Date'])
+                test_df_merge = test_df.copy()
+                test_df_merge['Date'] = pd.to_datetime(test_df_merge['Date'])
                 
                 # Merge predictions with test data
-                test_with_preds = test_df.merge(
+                test_with_preds = test_df_merge.merge(
                     predictions,
                     on=['Date', 'League', 'HomeTeam', 'AwayTeam'],
                     how='left'
@@ -332,24 +335,21 @@ class BacktestEngine:
         print("Method: Walk-forward (no data leakage)")
         print("="*60)
         
-        # Load full dataset
+        # Load full dataset (ALL historical data — needed for training)
         full_df = self.load_features_data()
-        
-        # Filter to backtest period
-        full_df = full_df[
-            (full_df['Date'] >= self.start_date) & 
-            (full_df['Date'] <= self.end_date)
-        ]
-        
-        # Get test periods
+
+        # Keep unfiltered copy for training (walk-forward needs all history)
+        all_history_df = full_df
+
+        # Test periods are restricted to the backtest window
         periods = self.get_test_periods()
         print(f"\n📅 Testing {len(periods)} periods\n")
         
         for i, (test_start, test_end) in enumerate(periods, 1):
             print(f"Period {i}/{len(periods)}: {test_start.date()} to {test_end.date()}")
             
-            # Split data
-            train_df, test_df = self.split_data(full_df, test_start, test_end)
+            # Split data — train on ALL history before test_start
+            train_df, test_df = self.split_data(all_history_df, test_start, test_end)
             
             # Check sufficient data
             if len(train_df) < self.min_training_matches:
