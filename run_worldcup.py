@@ -130,8 +130,9 @@ COMPETITIVE_TOURNAMENTS = {
     'AFF Championship', 'CONCACAF Nations League',
 }
 
-# Minimum year for training data — couple of years keeps it relevant
-MIN_YEAR = 2024
+# Minimum year for training data — 2022 captures the last World Cup cycle
+# Use --min-year 2020 if you want even more (adds noise but more data)
+MIN_YEAR = 2022
 
 
 # ============================================================================
@@ -344,7 +345,7 @@ def step_backtest(backtest_months: int = 18):
         start_date=start_date.strftime('%Y-%m-%d'),
         end_date=end_date.strftime('%Y-%m-%d'),
         test_window_days=14,
-        min_training_matches=50,
+        min_training_matches=30,
     )
 
     # Patch engine's config references
@@ -483,8 +484,8 @@ Examples:
         help='Skip training/backtest, just predict fixtures'
     )
     parser.add_argument(
-        '--backtest-months', type=int, default=18,
-        help='Months of history to backtest (default: 18)'
+        '--backtest-months', type=int, default=12,
+        help='Months of history to backtest (default: 12)'
     )
     parser.add_argument(
         '--min-year', type=int, default=MIN_YEAR,
