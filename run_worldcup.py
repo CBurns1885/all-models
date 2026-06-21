@@ -16,6 +16,8 @@ Usage:
 import argparse
 import sys
 import shutil
+import time
+import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -358,36 +360,164 @@ def step_backtest(backtest_months: int = 18):
     return summary_df
 
 
-def step_predict(fixtures_path: str):
+def fetch_worldcup_fixtures() -> pd.DataFrame:
+    """
+    Auto-fetch upcoming World Cup fixtures from API-Football.
+    Returns DataFrame with Date, League, HomeTeam, AwayTeam columns.
+    """
+    print("\n" + "="*60)
+    print("AUTO-FETCHING World Cup fixtures from API-Football")
+    print("="*60)
+
+    api_key = config.API_FOOTBALL_KEY
+    base_url = "https://v3.football.api-sports.io"
+    headers = {
+        "x-rapidapi-host": "v3.football.api-sports.io",
+        "x-rapidapi-key": api_key,
+    }
+
+    # API-Football World Cup league ID = 1, season = 2026
+    WC_LEAGUE_ID = 1
+    SEASON = 2026
+
+    # Team name mapping: API-Football names → Kaggle dataset names
+    TEAM_MAP = {
+        'USA': 'United States',
+        'Korea Republic': 'South Korea',
+        'China PR': 'China',
+        'IR Iran': 'Iran',
+        'Ivory Coast': "Côte d'Ivoire",
+        'Cape Verde Islands': 'Cape Verde',
+        'Congo DR': 'DR Congo',
+        'Kyrgyz Republic': 'Kyrgyzstan',
+        'Brunei Darussalam': 'Brunei',
+        'Chinese Taipei': 'Taiwan',
+        'FYR Macedonia': 'North Macedonia',
+        'Czech Republic': 'Czechia',
+    }
+
+    all_fixtures = []
+
+    # Try the main World Cup league ID first, then common alternates
+    for league_id in [WC_LEAGUE_ID, 28, 29]:
+        print(f"   Trying league ID {league_id} for World Cup 2026...")
+        url = f"{base_url}/fixtures"
+        params = {
+            'league': league_id,
+            'season': SEASON,
+        }
+
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=30)
+
+            if resp.status_code == 429:
+                print("   [WARN] Rate limited, waiting 5s...")
+                time.sleep(5)
+                resp = requests.get(url, headers=headers, params=params, timeout=30)
+
+            if resp.status_code != 200:
+                print(f"   [WARN] API returned {resp.status_code}")
+                continue
+
+            data = resp.json()
+            fixtures = data.get('response', [])
+
+            if not fixtures:
+                print(f"   No fixtures found for league {league_id}")
+                time.sleep(0.5)
+                continue
+
+            print(f"   Found {len(fixtures)} total fixtures for league {league_id}")
+
+            for fix in fixtures:
+                fixture_info = fix.get('fixture', {})
+                teams = fix.get('teams', {})
+                league_info = fix.get('league', {})
+                status = fixture_info.get('status', {}).get('short', '')
+
+                # Only grab unplayed matches
+                if status in ('FT', 'AET', 'PEN'):
+                    continue
+
+                date_str = fixture_info.get('date', '')[:10]
+                home = teams.get('home', {}).get('name', '')
+                away = teams.get('away', {}).get('name', '')
+                round_name = league_info.get('round', '')
+
+                # Normalise team names to match Kaggle data
+                home = TEAM_MAP.get(home, home)
+                away = TEAM_MAP.get(away, away)
+
+                if home and away and date_str:
+                    all_fixtures.append({
+                        'Date': date_str,
+                        'League': 'FIFA World Cup',
+                        'HomeTeam': home,
+                        'AwayTeam': away,
+                        'Round': round_name,
+                    })
+
+            if all_fixtures:
+                break
+
+            time.sleep(0.5)
+
+        except requests.exceptions.RequestException as e:
+            print(f"   [WARN] API request failed: {e}")
+            continue
+
+    if not all_fixtures:
+        print("   [WARN] Could not fetch fixtures from API")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_fixtures)
+    df['Date'] = pd.to_datetime(df['Date'])
+    df = df.sort_values('Date').reset_index(drop=True)
+
+    # Save for reference
+    fixtures_csv = WC_OUTPUT_DIR / "worldcup_fixtures_fetched.csv"
+    df.to_csv(fixtures_csv, index=False)
+
+    print(f"\n   Fetched {len(df)} upcoming fixtures:")
+    for round_name in df['Round'].unique():
+        round_df = df[df['Round'] == round_name]
+        print(f"      {round_name}: {len(round_df)} matches")
+
+    print(f"\n   Saved to {fixtures_csv}")
+    return df
+
+
+def step_predict(fixtures_path: str = None, fixtures_df: pd.DataFrame = None):
     """Generate predictions for upcoming World Cup fixtures."""
     print("\n" + "="*60)
     print("STEP 6: Generating World Cup predictions")
     print("="*60)
 
-    fixtures = Path(fixtures_path)
-    if not fixtures.exists():
-        print(f"   [ERROR] Fixtures file not found: {fixtures}")
-        print("   Create a CSV with columns: Date, League, HomeTeam, AwayTeam")
-        print("   Example:")
-        print("   Date,League,HomeTeam,AwayTeam")
-        print("   2026-06-22,FIFA World Cup,Brazil,Germany")
+    if fixtures_df is not None and not fixtures_df.empty:
+        print(f"   Using {len(fixtures_df)} auto-fetched fixtures")
+    elif fixtures_path:
+        fixtures = Path(fixtures_path)
+        if not fixtures.exists():
+            print(f"   [ERROR] Fixtures file not found: {fixtures}")
+            return
+        print(f"   Loading fixtures from {fixtures}")
+        fixtures_df = pd.read_csv(fixtures)
+        print(f"   {len(fixtures_df)} matches to predict")
+    else:
+        print("   [ERROR] No fixtures provided")
         return
 
-    print(f"   Loading fixtures from {fixtures}")
-    fixtures_df = pd.read_csv(fixtures)
-    print(f"   {len(fixtures_df)} matches to predict")
-
-    # Set League to World Cup if not specified
     if 'League' not in fixtures_df.columns:
         fixtures_df['League'] = 'FIFA World Cup'
 
-    # Save temp fixtures for predict_week
+    # Drop the Round column before prediction (not expected by predict_week)
+    pred_df = fixtures_df.drop(columns=['Round'], errors='ignore')
+
     temp_fixtures = WC_OUTPUT_DIR / "worldcup_fixtures.csv"
-    fixtures_df.to_csv(temp_fixtures, index=False)
+    pred_df.to_csv(temp_fixtures, index=False)
 
     predict_mod.predict_week(temp_fixtures)
 
-    # Copy results
     predictions_file = WC_OUTPUT_DIR / "weekly_bets.csv"
     if predictions_file.exists():
         print(f"\n   Predictions saved to {predictions_file}")
@@ -440,6 +570,58 @@ def _print_predictions_summary(df: pd.DataFrame):
     print()
 
 
+def _get_fixtures(fixtures_path: str = None, no_fetch: bool = False) -> pd.DataFrame:
+    """
+    Get fixtures from file and/or API. Merges both sources, deduplicates.
+    Auto-fetches from API-Football unless --no-fetch is set.
+    """
+    parts = []
+
+    # Load from file if provided
+    if fixtures_path:
+        fp = Path(fixtures_path)
+        if fp.exists():
+            file_df = pd.read_csv(fp)
+            file_df['Date'] = pd.to_datetime(file_df['Date'])
+            parts.append(file_df)
+            print(f"   Loaded {len(file_df)} fixtures from {fp}")
+
+    # Auto-fetch from API
+    if not no_fetch:
+        try:
+            api_df = fetch_worldcup_fixtures()
+            if not api_df.empty:
+                parts.append(api_df)
+        except Exception as e:
+            print(f"   [WARN] Auto-fetch failed: {e}")
+
+    if not parts:
+        return pd.DataFrame()
+
+    combined = pd.concat(parts, ignore_index=True)
+    combined['Date'] = pd.to_datetime(combined['Date'])
+
+    # Deduplicate by Date + HomeTeam + AwayTeam
+    before = len(combined)
+    combined = combined.drop_duplicates(
+        subset=['Date', 'HomeTeam', 'AwayTeam'], keep='first'
+    )
+    if before > len(combined):
+        print(f"   Deduplicated: {before} -> {len(combined)} fixtures")
+
+    # Only keep future matches
+    today = pd.Timestamp.now().normalize()
+    future = combined[combined['Date'] >= today].copy()
+    if len(future) < len(combined):
+        print(f"   Filtered to upcoming: {len(future)} fixtures (dropped {len(combined) - len(future)} past)")
+
+    if future.empty and not combined.empty:
+        print("   [WARN] All fixtures are in the past. Using all fetched fixtures.")
+        future = combined
+
+    return future.sort_values('Date').reset_index(drop=True)
+
+
 # ============================================================================
 # Main orchestrator
 # ============================================================================
@@ -450,20 +632,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  Full overnight run (load data, train, backtest):
-    python run_worldcup.py --data "C:\\Users\\Chris\\Downloads\\archive"
+  Full overnight run (train, backtest, auto-fetch fixtures, predict):
+    python run_worldcup.py --data path\\to\\archive
 
-  Include only competitive matches (no friendlies):
-    python run_worldcup.py --data "C:\\Users\\Chris\\Downloads\\archive" --competitive-only
+  With your own group-stage fixtures + auto-fetch knockout rounds:
+    python run_worldcup.py --data path\\to\\archive --fixtures wc_groups.csv
 
-  Backtest only (after initial training):
+  Competitive matches only (no friendlies):
+    python run_worldcup.py --data path\\to\\archive --competitive-only
+
+  Quick predict with auto-fetched fixtures (after training):
+    python run_worldcup.py --predict-only
+
+  Backtest only:
     python run_worldcup.py --backtest-only
-
-  Predict specific World Cup fixtures:
-    python run_worldcup.py --predict-only --fixtures worldcup_fixtures.csv
-
-  Full pipeline with predictions:
-    python run_worldcup.py --data "C:\\Users\\Chris\\Downloads\\archive" --fixtures wc_fixtures.csv
         """
     )
 
@@ -495,6 +677,10 @@ Examples:
         '--competitive-only', action='store_true',
         help='Exclude friendlies from training data'
     )
+    parser.add_argument(
+        '--no-fetch', action='store_true',
+        help='Skip auto-fetching fixtures from API-Football'
+    )
 
     args = parser.parse_args()
 
@@ -510,13 +696,14 @@ Examples:
     # Predict-only mode
     # ------------------------------------------------------------------
     if args.predict_only:
-        if not args.fixtures:
-            print("[ERROR] --predict-only requires --fixtures")
-            sys.exit(1)
         if not WC_FEATURES.exists():
             print("[ERROR] No trained models found. Run full pipeline first.")
             sys.exit(1)
-        step_predict(args.fixtures)
+        fixtures_df = _get_fixtures(args.fixtures, args.no_fetch)
+        if fixtures_df.empty:
+            print("[ERROR] No fixtures found. Provide --fixtures or allow auto-fetch.")
+            sys.exit(1)
+        step_predict(fixtures_df=fixtures_df)
         return
 
     # ------------------------------------------------------------------
@@ -569,19 +756,13 @@ Examples:
     # STEP 5: Backtest
     step_backtest(args.backtest_months)
 
-    # STEP 6: Predict (if fixtures provided)
-    if args.fixtures:
-        step_predict(args.fixtures)
+    # STEP 6: Fetch fixtures and predict
+    fixtures_df = _get_fixtures(args.fixtures, args.no_fetch)
+    if not fixtures_df.empty:
+        step_predict(fixtures_df=fixtures_df)
     else:
-        print("\n" + "-"*60)
-        print("   No --fixtures provided. To predict upcoming matches:")
-        print(f"   python run_worldcup.py --fixtures worldcup_fixtures.csv")
-        print()
-        print("   Create a CSV like:")
-        print("   Date,League,HomeTeam,AwayTeam")
-        print("   2026-06-22,FIFA World Cup,Brazil,Germany")
-        print("   2026-06-23,FIFA World Cup,Argentina,France")
-        print("-"*60)
+        print("\n   No fixtures found. After training, run:")
+        print("   python run_worldcup.py --predict-only")
 
     print("\n" + "="*60)
     print(" PIPELINE COMPLETE")
@@ -589,8 +770,9 @@ Examples:
     print(f"   Models:     {WC_MODELS_DIR}")
     print(f"   Backtest:   {WC_OUTPUT_DIR / 'backtest_summary.csv'}")
     print(f"   Detailed:   {WC_OUTPUT_DIR / 'backtest_detailed.csv'}")
-    if args.fixtures:
+    if not fixtures_df.empty:
         print(f"   Predictions: {WC_OUTPUT_DIR / 'weekly_bets.csv'}")
+        print(f"   Fixtures:    {WC_OUTPUT_DIR / 'worldcup_fixtures_fetched.csv'}")
     print("="*60)
 
 
