@@ -377,7 +377,15 @@ def step_predict(fixtures_path: str):
     fixtures_df = pd.read_csv(fixtures)
     print(f"   {len(fixtures_df)} matches to predict")
 
-    # Set League to World Cup if not specified
+    # Accept Kaggle-style column names (date, home_team, away_team, tournament)
+    # as well as internal names (Date, HomeTeam, AwayTeam, League)
+    col_map = {
+        'date': 'Date', 'home_team': 'HomeTeam', 'away_team': 'AwayTeam',
+        'tournament': 'League', 'home_score': 'FTHG', 'away_score': 'FTAG',
+    }
+    fixtures_df = fixtures_df.rename(columns={k: v for k, v in col_map.items()
+                                              if k in fixtures_df.columns})
+
     if 'League' not in fixtures_df.columns:
         fixtures_df['League'] = 'FIFA World Cup'
 
@@ -495,6 +503,10 @@ Examples:
         '--competitive-only', action='store_true',
         help='Exclude friendlies from training data'
     )
+    parser.add_argument(
+        '--retrain', action='store_true',
+        help='Force retrain even if models already exist'
+    )
 
     args = parser.parse_args()
 
@@ -556,31 +568,49 @@ Examples:
 
         save_historical(df)
 
-    # STEP 2: Build features
-    step_build_features()
+    # Check whether models already exist
+    existing_models = list(WC_MODELS_DIR.glob("*.joblib"))
+    new_data_loaded = args.data is not None
+    need_retrain = args.retrain or new_data_loaded or not existing_models
 
-    # STEP 3: Train models
-    step_train_models()
+    if not need_retrain:
+        print(f"\n   Skipping training — {len(existing_models)} models already exist.")
+        print("   Pass --retrain to force a full retrain, or --data to load new data.")
+    else:
+        # STEP 2: Build features
+        step_build_features()
 
-    # STEP 4: Learn blend weights
-    df_hist = pd.read_parquet(WC_HISTORICAL)
-    step_learn_blend_weights(df_hist)
+        # STEP 3: Train models
+        step_train_models()
+
+        # STEP 4: Learn blend weights
+        df_hist = pd.read_parquet(WC_HISTORICAL)
+        step_learn_blend_weights(df_hist)
 
     # STEP 5: Backtest
     step_backtest(args.backtest_months)
 
-    # STEP 6: Predict (if fixtures provided)
-    if args.fixtures:
-        step_predict(args.fixtures)
+    # STEP 6: Predict — use --fixtures, or auto-detect wc_fixtures.csv
+    fixtures_path = args.fixtures
+    if not fixtures_path:
+        default = BASE_DIR / "wc_fixtures.csv"
+        if default.exists():
+            print(f"\n   Auto-detected fixtures: {default}")
+            fixtures_path = str(default)
+
+    if fixtures_path:
+        step_predict(fixtures_path)
     else:
         print("\n" + "-"*60)
-        print("   No --fixtures provided. To predict upcoming matches:")
-        print(f"   python run_worldcup.py --fixtures worldcup_fixtures.csv")
+        print("   No fixtures found. To predict upcoming matches:")
+        print("   Create wc_fixtures.csv in the all_models folder, e.g.:")
         print()
-        print("   Create a CSV like:")
-        print("   Date,League,HomeTeam,AwayTeam")
-        print("   2026-06-22,FIFA World Cup,Brazil,Germany")
-        print("   2026-06-23,FIFA World Cup,Argentina,France")
+        print("   date,home_team,away_team,tournament")
+        print("   2026-06-22,Brazil,Germany,FIFA World Cup")
+        print("   2026-06-23,France,Argentina,FIFA World Cup")
+        print()
+        print("   Then re-run without --data (models are cached):")
+        print("   py run_worldcup.py")
         print("-"*60)
 
     print("\n" + "="*60)
