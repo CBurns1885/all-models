@@ -577,7 +577,7 @@ def _get_fixtures(fixtures_path: str = None, no_fetch: bool = False) -> pd.DataF
     """
     parts = []
 
-    # Auto-detect wc_fixtures.csv if no path given and no API fetch
+    # Auto-detect wc_fixtures.csv if no path given
     if not fixtures_path:
         default = BASE_DIR / "wc_fixtures.csv"
         if default.exists():
@@ -589,7 +589,7 @@ def _get_fixtures(fixtures_path: str = None, no_fetch: bool = False) -> pd.DataF
         fp = Path(fixtures_path)
         if fp.exists():
             file_df = pd.read_csv(fp)
-            # Accept Kaggle-style column names
+            # Accept Kaggle-style column names (same headers as results.csv)
             _col_map = {
                 'date': 'Date', 'home_team': 'HomeTeam', 'away_team': 'AwayTeam',
                 'tournament': 'League', 'home_score': 'FTHG', 'away_score': 'FTAG',
