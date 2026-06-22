@@ -197,8 +197,8 @@ def load_international_data(archive_path: str, min_year: int = MIN_YEAR) -> pd.D
             f"Available: {list(raw.columns)}"
         )
 
-    # Parse dates and filter
-    raw['Date'] = pd.to_datetime(raw['Date'], dayfirst=True, errors='coerce')
+    # Parse dates — use format='mixed' so YYYY-MM-DD and DD/MM/YYYY both work
+    raw['Date'] = pd.to_datetime(raw['Date'], format='mixed', dayfirst=False, errors='coerce')
     raw = raw.dropna(subset=['Date'])
 
     # ---------------------------------------------------------------
@@ -676,25 +676,28 @@ def _get_fixtures(fixtures_path: str = None, use_claude: bool = False) -> pd.Dat
         if not claude_df.empty:
             parts.append(claude_df)
 
-    # Auto-detect wc_fixtures.csv if no path given
+    # Auto-detect wc_fixtures.csv / .xlsx if no path given
     if not fixtures_path:
-        default = BASE_DIR / "wc_fixtures.csv"
-        if default.exists():
-            fixtures_path = str(default)
-            print(f"   Auto-detected: {default}")
+        for _name in ('wc_fixtures.csv', 'wc_fixtures.xlsx'):
+            _default = BASE_DIR / _name
+            if _default.exists():
+                fixtures_path = str(_default)
+                print(f"   Auto-detected: {_default}")
+                break
 
-    # Source 3: Manual CSV provided via --fixtures
+    # Source 3: Manual CSV/XLSX provided via --fixtures or auto-detected
     if fixtures_path:
         fp = Path(fixtures_path)
         if fp.exists():
-            file_df = pd.read_csv(fp)
+            file_df = pd.read_excel(fp) if fp.suffix.lower() in ('.xlsx', '.xls') else pd.read_csv(fp)
             _col_map = {
                 'date': 'Date', 'home_team': 'HomeTeam', 'away_team': 'AwayTeam',
                 'tournament': 'League', 'home_score': 'FTHG', 'away_score': 'FTAG',
             }
             file_df = file_df.rename(columns={k: v for k, v in _col_map.items()
                                               if k in file_df.columns})
-            file_df['Date'] = pd.to_datetime(file_df['Date'])
+            file_df['Date'] = pd.to_datetime(file_df['Date'], format='mixed', errors='coerce')
+            file_df = file_df.dropna(subset=['Date', 'HomeTeam', 'AwayTeam'])
             parts.append(file_df)
             print(f"   Loaded {len(file_df)} fixtures from {fp}")
 
