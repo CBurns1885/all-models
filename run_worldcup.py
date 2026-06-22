@@ -200,7 +200,31 @@ def load_international_data(archive_path: str, min_year: int = MIN_YEAR) -> pd.D
 
     # Parse dates and filter
     raw['Date'] = pd.to_datetime(raw['Date'], dayfirst=True, errors='coerce')
-    raw = raw.dropna(subset=['Date', 'FTHG', 'FTAG'])
+    raw = raw.dropna(subset=['Date'])
+
+    # ---------------------------------------------------------------
+    # Extract upcoming fixtures: rows with blank/null scores OR future dates
+    # ---------------------------------------------------------------
+    has_no_score = raw['FTHG'].isna() | raw['FTAG'].isna()
+    today = pd.Timestamp.now().normalize()
+    is_future = raw['Date'] >= today
+    upcoming_mask = has_no_score | is_future
+
+    upcoming = raw[upcoming_mask].copy()
+    completed = raw[~upcoming_mask].copy()
+
+    if len(upcoming) > 0:
+        fixtures_out = upcoming[['Date', 'HomeTeam', 'AwayTeam']].copy()
+        fixtures_out['League'] = 'FIFA World Cup'
+        if 'Tournament' in upcoming.columns:
+            fixtures_out['League'] = upcoming['Tournament'].fillna('FIFA World Cup')
+        fixtures_csv = WC_OUTPUT_DIR / "worldcup_fixtures_from_data.csv"
+        fixtures_out.to_csv(fixtures_csv, index=False)
+        print(f"   Extracted {len(upcoming)} upcoming fixtures (blank scores / future dates)")
+        print(f"   Saved to {fixtures_csv}")
+
+    # Continue with completed matches only
+    raw = completed.dropna(subset=['FTHG', 'FTAG'])
     raw['FTHG'] = raw['FTHG'].astype(int)
     raw['FTAG'] = raw['FTAG'].astype(int)
 
@@ -572,10 +596,18 @@ def _print_predictions_summary(df: pd.DataFrame):
 
 def _get_fixtures(fixtures_path: str = None, no_fetch: bool = False) -> pd.DataFrame:
     """
-    Get fixtures from file and/or API. Merges both sources, deduplicates.
-    Auto-fetches from API-Football unless --no-fetch is set.
+    Get fixtures from multiple sources, merge, and deduplicate.
+    Priority: 1) extracted from training data  2) manual CSV  3) API-Football
     """
     parts = []
+
+    # Source 1: Fixtures extracted from the training CSV (blank scores / future dates)
+    extracted = WC_OUTPUT_DIR / "worldcup_fixtures_from_data.csv"
+    if extracted.exists():
+        ext_df = pd.read_csv(extracted)
+        ext_df['Date'] = pd.to_datetime(ext_df['Date'])
+        parts.append(ext_df)
+        print(f"   Loaded {len(ext_df)} fixtures extracted from training data")
 
     # Auto-detect wc_fixtures.csv if no path given
     if not fixtures_path:
@@ -584,7 +616,7 @@ def _get_fixtures(fixtures_path: str = None, no_fetch: bool = False) -> pd.DataF
             fixtures_path = str(default)
             print(f"   Auto-detected: {default}")
 
-    # Load from file if provided
+    # Source 2: Manual CSV provided via --fixtures
     if fixtures_path:
         fp = Path(fixtures_path)
         if fp.exists():
@@ -600,7 +632,7 @@ def _get_fixtures(fixtures_path: str = None, no_fetch: bool = False) -> pd.DataF
             parts.append(file_df)
             print(f"   Loaded {len(file_df)} fixtures from {fp}")
 
-    # Auto-fetch from API
+    # Source 3: Auto-fetch from API-Football (for any matches not in the data)
     if not no_fetch:
         try:
             api_df = fetch_worldcup_fixtures()
