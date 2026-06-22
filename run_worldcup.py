@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import json
 import sys
 import shutil
 from pathlib import Path
@@ -465,10 +466,199 @@ def _print_predictions_summary(df: pd.DataFrame):
     print()
 
 
-def _get_fixtures(fixtures_path: str = None) -> pd.DataFrame:
+TEAM_NAME_ALIASES = {
+    'USA': 'United States',
+    'US': 'United States',
+    'Korea Republic': 'South Korea',
+    'Republic of Korea': 'South Korea',
+    'Republic of Ireland': 'Ireland',
+    'Ivory Coast': "Côte d'Ivoire",
+    'Cote d\'Ivoire': "Côte d'Ivoire",
+    'DR Congo': 'Congo DR',
+    'Czech Republic': 'Czechia',
+    'Türkiye': 'Turkey',
+    'Turkiye': 'Turkey',
+    'IR Iran': 'Iran',
+    'Chinese Taipei': 'Taiwan',
+    'Bosnia & Herzegovina': 'Bosnia and Herzegovina',
+    'Trinidad & Tobago': 'Trinidad and Tobago',
+    'St Kitts and Nevis': 'Saint Kitts and Nevis',
+    'Cape Verde Islands': 'Cape Verde',
+    'Cabo Verde': 'Cape Verde',
+}
+
+
+def _normalise_team_name(name: str, known_teams: set) -> str:
+    """Map a team name to the form used in the training data."""
+    if name in known_teams:
+        return name
+    if name in TEAM_NAME_ALIASES and TEAM_NAME_ALIASES[name] in known_teams:
+        return TEAM_NAME_ALIASES[name]
+    lower_map = {t.lower(): t for t in known_teams}
+    if name.lower() in lower_map:
+        return lower_map[name.lower()]
+    return name
+
+
+def fetch_fixtures_via_claude() -> pd.DataFrame:
     """
-    Get fixtures from training data extraction and/or manual CSV.
-    Priority: 1) extracted from training CSV (blank scores)  2) manual CSV
+    Use Claude API with web search to find upcoming World Cup 2026 fixtures.
+    Returns a DataFrame with Date, HomeTeam, AwayTeam columns.
+    Requires ANTHROPIC_API_KEY environment variable.
+    """
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
+    if not api_key:
+        print("   [SKIP] ANTHROPIC_API_KEY not set — skipping Claude fixture fetch")
+        return pd.DataFrame()
+
+    try:
+        import anthropic
+    except ImportError:
+        print("   [SKIP] anthropic package not installed (pip install anthropic)")
+        return pd.DataFrame()
+
+    print("   Fetching upcoming World Cup fixtures via Claude API (web search)...")
+
+    client = anthropic.Anthropic()
+
+    today_str = datetime.now().strftime('%Y-%m-%d')
+
+    response = client.messages.create(
+        model="claude-opus-4-8",
+        max_tokens=4096,
+        thinking={"type": "adaptive"},
+        tools=[
+            {"type": "web_search_20260209", "name": "web_search"},
+        ],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "fixtures": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "date": {
+                                        "type": "string",
+                                        "description": "Match date in YYYY-MM-DD format"
+                                    },
+                                    "home_team": {
+                                        "type": "string",
+                                        "description": "Home team country name"
+                                    },
+                                    "away_team": {
+                                        "type": "string",
+                                        "description": "Away team country name"
+                                    },
+                                    "round": {
+                                        "type": "string",
+                                        "description": "Tournament round e.g. Round of 32, Quarter-final, Semi-final, Final"
+                                    }
+                                },
+                                "required": ["date", "home_team", "away_team", "round"],
+                                "additionalProperties": False
+                            }
+                        },
+                        "source_note": {
+                            "type": "string",
+                            "description": "Brief note about where the fixture data came from"
+                        }
+                    },
+                    "required": ["fixtures", "source_note"],
+                    "additionalProperties": False
+                }
+            }
+        },
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Today is {today_str}. Search the web for the upcoming FIFA World Cup 2026 "
+                "fixtures schedule. I need all matches that have NOT yet been played. "
+                "Return ONLY future/upcoming matches with confirmed teams. "
+                "For knockout rounds where teams are determined by group results, "
+                "only include matches where both teams are known. "
+                "Use the official country names (e.g. 'United States' not 'USA', "
+                "'South Korea' not 'Korea Republic'). "
+                "Return the fixtures as structured JSON."
+            )
+        }],
+    )
+
+    text_content = next(
+        (b.text for b in response.content if b.type == "text"), None
+    )
+    if not text_content:
+        print("   [WARN] Claude returned no text content")
+        return pd.DataFrame()
+
+    try:
+        data = json.loads(text_content)
+    except json.JSONDecodeError as e:
+        print(f"   [WARN] Failed to parse Claude response as JSON: {e}")
+        return pd.DataFrame()
+
+    fixtures = data.get("fixtures", [])
+    if not fixtures:
+        print("   [INFO] Claude found no upcoming fixtures")
+        return pd.DataFrame()
+
+    print(f"   Source: {data.get('source_note', 'Claude web search')}")
+
+    rows = []
+    for fix in fixtures:
+        try:
+            rows.append({
+                'Date': pd.to_datetime(fix['date']),
+                'HomeTeam': fix['home_team'],
+                'AwayTeam': fix['away_team'],
+                'League': 'FIFA World Cup',
+                'Round': fix.get('round', ''),
+            })
+        except (KeyError, ValueError) as e:
+            print(f"   [WARN] Skipping malformed fixture: {e}")
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+
+    # Validate team names against training data so predict_week can find them
+    known_teams = set()
+    if WC_HISTORICAL.exists():
+        hist = pd.read_parquet(WC_HISTORICAL)
+        known_teams = set(hist['HomeTeam'].unique()) | set(hist['AwayTeam'].unique())
+
+    if known_teams:
+        for col in ['HomeTeam', 'AwayTeam']:
+            df[col] = df[col].apply(lambda n: _normalise_team_name(n, known_teams))
+
+        unmatched = set()
+        for col in ['HomeTeam', 'AwayTeam']:
+            unmatched |= set(df[col]) - known_teams
+        if unmatched:
+            print(f"   [WARN] These teams are NOT in training data and will be skipped by predict_week:")
+            for t in sorted(unmatched):
+                print(f"          - {t}")
+            print("   Add them to TEAM_NAME_ALIASES in run_worldcup.py if they have a different name in Kaggle data.")
+
+    out_path = WC_OUTPUT_DIR / "worldcup_fixtures_claude.csv"
+    df.to_csv(out_path, index=False)
+    print(f"   Fetched {len(df)} fixtures via Claude -> {out_path}")
+
+    for _, row in df.iterrows():
+        in_data = "OK" if not known_teams or (row['HomeTeam'] in known_teams and row['AwayTeam'] in known_teams) else "MISSING"
+        print(f"      {row['Date'].strftime('%Y-%m-%d')}  {row['HomeTeam']} vs {row['AwayTeam']}  ({row['Round']})  [{in_data}]")
+
+    return df
+
+
+def _get_fixtures(fixtures_path: str = None, use_claude: bool = False) -> pd.DataFrame:
+    """
+    Get fixtures from multiple sources with priority ordering.
+    Priority: 1) extracted from training CSV  2) Claude API  3) manual CSV
     """
     parts = []
 
@@ -480,6 +670,12 @@ def _get_fixtures(fixtures_path: str = None) -> pd.DataFrame:
         parts.append(ext_df)
         print(f"   Loaded {len(ext_df)} fixtures extracted from training data")
 
+    # Source 2: Claude API web search (for knockout rounds with fewer matches)
+    if use_claude:
+        claude_df = fetch_fixtures_via_claude()
+        if not claude_df.empty:
+            parts.append(claude_df)
+
     # Auto-detect wc_fixtures.csv if no path given
     if not fixtures_path:
         default = BASE_DIR / "wc_fixtures.csv"
@@ -487,7 +683,7 @@ def _get_fixtures(fixtures_path: str = None) -> pd.DataFrame:
             fixtures_path = str(default)
             print(f"   Auto-detected: {default}")
 
-    # Source 2: Manual CSV provided via --fixtures
+    # Source 3: Manual CSV provided via --fixtures
     if fixtures_path:
         fp = Path(fixtures_path)
         if fp.exists():
@@ -545,7 +741,10 @@ Examples:
   Competitive matches only (no friendlies):
     python run_worldcup.py --data path\\to\\archive --competitive-only
 
-  Quick re-predict (after training, uses fixtures extracted from CSV):
+  Quick re-predict with Claude fetching latest knockout fixtures:
+    python run_worldcup.py --predict-only --claude-fixtures
+
+  Quick re-predict (uses fixtures extracted from CSV only):
     python run_worldcup.py --predict-only
 
   Backtest only:
@@ -585,6 +784,10 @@ Examples:
         '--retrain', action='store_true',
         help='Force full retrain even if models already exist'
     )
+    parser.add_argument(
+        '--claude-fixtures', action='store_true',
+        help='Use Claude API with web search to fetch upcoming fixtures (requires ANTHROPIC_API_KEY)'
+    )
 
     args = parser.parse_args()
 
@@ -603,9 +806,9 @@ Examples:
         if not WC_FEATURES.exists():
             print("[ERROR] No trained models found. Run full pipeline first.")
             sys.exit(1)
-        fixtures_df = _get_fixtures(args.fixtures)
+        fixtures_df = _get_fixtures(args.fixtures, use_claude=args.claude_fixtures)
         if fixtures_df.empty:
-            print("[ERROR] No fixtures found. Provide --fixtures or allow auto-fetch.")
+            print("[ERROR] No fixtures found. Provide --fixtures or --claude-fixtures.")
             sys.exit(1)
         step_predict(fixtures_df=fixtures_df)
         return
@@ -669,12 +872,12 @@ Examples:
     step_backtest(args.backtest_months)
 
     # STEP 6: Fetch fixtures and predict
-    fixtures_df = _get_fixtures(args.fixtures)
+    fixtures_df = _get_fixtures(args.fixtures, use_claude=args.claude_fixtures)
     if not fixtures_df.empty:
         step_predict(fixtures_df=fixtures_df)
     else:
         print("\n   No fixtures found. After training, run:")
-        print("   python run_worldcup.py --predict-only")
+        print("   python run_worldcup.py --predict-only --claude-fixtures")
 
     print("\n" + "="*60)
     print(" PIPELINE COMPLETE")
