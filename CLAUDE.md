@@ -9,6 +9,36 @@ backtests them to find where genuine edge exists, and generates betting cards fo
 upcoming fixtures. The whole point is **finding markets where the model beats random
 chance in backtesting, then only betting those** — not betting every market it can predict.
 
+## North Star — working principles (READ THIS)
+
+The goal this year: **a thoroughly backtested model deployed to make real returns.**
+Work toward that with these non-negotiable principles:
+
+1. **Thorough backtesting regime.** Backtest deeply, not quickly — walk forward across as
+   much history as the data allows, enough windows for statistically meaningful sample sizes
+   per market. A market is only trustworthy when its `Edge_%` holds up over many matches, not
+   a lucky few. Prefer more trials, more folds, more history over speed.
+2. **Surface the most accurate markets first.** The best-performing markets (highest sustained
+   `Edge_%` / lowest Brier) must be pushed to the forefront of every output. The betting card
+   leads with what actually wins.
+3. **Markets can differ per league.** Edge is not uniform — Over 2.5 might be strong in the
+   Bundesliga while Asian Handicap wins in Serie A. Backtest and rank markets **per league**,
+   and let each league surface its own best markets. Do not force one global market set.
+4. **Tweak the model as much as needed.** Feature engineering, hyperparameters, blend weights,
+   calibration — iterate aggressively. There is no "leave it alone." If a change improves
+   backtested edge, make it.
+5. **Use only what works best per market.** We have loads of backdata available — but more data
+   is not automatically better. Keep the features/seasons/sources that demonstrably improve a
+   market's backtested edge; drop what adds noise. Quality of signal over quantity of data.
+6. **Deploy to make returns.** The endpoint is a deployed model producing live betting cards,
+   not a notebook. Keep the path from backtest → ranked markets → deployable card clean.
+7. **NO hallucinating, NO hardcoding data.** Never invent fixtures, results, odds, or stats.
+   Never hardcode a "known good" market list or fabricated numbers. Every market that reaches
+   the card must be earned by real backtest results on real pulled data. If data is missing,
+   pull it or say so — do not fill gaps with assumptions.
+8. **All opinions welcome.** Challenge the approach. If you see a better model, feature, metric,
+   staking method, or market — propose it. Push back on weak ideas, including the ones already here.
+
 ## Pipeline architecture
 
 ```
@@ -104,6 +134,22 @@ Tested in test_claude_fixtures.py (36 tests).
 Modules use `from config import X`, which binds at import time. Changing `config.X` later does
 NOT propagate. run_worldcup.py solves this by patching BOTH `config` AND each module's local
 binding via `setattr(mod, attr, val)`. Keep this in mind for any path-isolation work.
+
+## Current gaps vs the North Star (honest state — build these)
+
+The principles above are the target; the code is not all the way there yet. Known gaps:
+
+- **Per-league market ranking is NOT built.** `backtest.py::analyze_by_league()` is a stub — it
+  only prints a hint to check `backtest_detailed.csv`. To satisfy principle 3, the backtest needs
+  to compute `Edge_%`/Brier per (league × market) and emit a per-league ranking, and
+  `generate_predictions_html.py` needs to pick each fixture's markets from its own league's ranking.
+- **HTML card ranks markets globally**, not per-league. Same fix as above.
+- **No deployment path yet** — outputs are local CSV/HTML. Principle 6 needs a clean deploy step.
+- **No staking / bankroll logic** — edge is identified but stake sizing (flat, Kelly, etc.) is open.
+- Verify backtest depth (windows, history span, min sample per market) actually meets principle 1
+  before trusting any ranking — confirm with real pulled data, don't assume.
+
+Treat these as the live worklist. Don't paper over them with hardcoded lists or assumptions.
 
 ## Conventions
 
