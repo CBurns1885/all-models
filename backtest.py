@@ -77,60 +77,58 @@ class BacktestEngine:
         
         return train_df, test_df
     
-    def train_models_on_period(self, train_df: pd.DataFrame) -> bool:
+    def train_models_on_period(self, train_df: pd.DataFrame, test_start: pd.Timestamp = None) -> bool:
         """
-        Train models using only training data
-        Returns True if successful
+        Train models using only training data, then re-learn blend weights
+        on a temporal validation slice to avoid leakage.
+        Returns True if successful.
         """
-        # NEW: Fill NaN BEFORE saving to file
-        print("   🔧 Handling missing values...")
+        print("   Handling missing values...")
         numeric_cols = train_df.select_dtypes(include=[np.number]).columns
         for col in numeric_cols:
             if train_df[col].isna().sum() > 0:
                 train_df[col] = train_df[col].fillna(train_df[col].median())
 
-        # Fill any remaining NaN with 0
         train_df = train_df.fillna(0)
 
-        # Create temporary features file with ONLY training data
         temp_features = DATA_DIR / "temp_backtest_features.parquet"
         train_df.to_parquet(temp_features)
 
-        # Backup original features
         backup_features = DATA_DIR / "original_features_backup.parquet"
         if FEATURES_PARQUET.exists():
             shutil.copy(FEATURES_PARQUET, backup_features)
 
-        # Replace features with training data only
         shutil.copy(temp_features, FEATURES_PARQUET)
 
         try:
-            # Train using your actual system
             from models import train_all_targets
-            
             models = train_all_targets(MODEL_ARTIFACTS_DIR)
-        
-
-            
             success = len(models) > 0
-            
-            # Restore original features
+
+            # Re-learn blend weights on temporal validation slice
+            if success and test_start is not None:
+                try:
+                    from blending import learn_blend_weights_temporal
+                    val_end = test_start.strftime('%Y-%m-%d')
+                    print(f"   Re-learning blend weights (val_end={val_end})...")
+                    learn_blend_weights_temporal(val_end)
+                except Exception as e:
+                    print(f"   [WARN] Blend weight re-learning failed: {e}")
+
             if backup_features.exists():
                 shutil.copy(backup_features, FEATURES_PARQUET)
-            
-            # Cleanup
+
             temp_features.unlink(missing_ok=True)
             backup_features.unlink(missing_ok=True)
-            
+
             return success
-            
+
         except Exception as e:
             print(f"   [WARN] Training failed: {e}")
-            
-            # Restore original features
+
             if backup_features.exists():
                 shutil.copy(backup_features, FEATURES_PARQUET)
-            
+
             return False
     
     def generate_predictions(self, test_df: pd.DataFrame) -> pd.DataFrame:
@@ -154,9 +152,12 @@ class BacktestEngine:
             
             if predictions_file.exists():
                 predictions = pd.read_csv(predictions_file)
+                predictions['Date'] = pd.to_datetime(predictions['Date'])
+                test_df_merge = test_df.copy()
+                test_df_merge['Date'] = pd.to_datetime(test_df_merge['Date'])
                 
                 # Merge predictions with test data
-                test_with_preds = test_df.merge(
+                test_with_preds = test_df_merge.merge(
                     predictions,
                     on=['Date', 'League', 'HomeTeam', 'AwayTeam'],
                     how='left'
@@ -175,143 +176,162 @@ class BacktestEngine:
             temp_fixtures.unlink(missing_ok=True)
             return test_df
     
+    def _discover_markets(self, df: pd.DataFrame) -> Dict:
+        """
+        Auto-discover all evaluable markets by scanning for y_* actual columns
+        and matching BLEND_* or P_* prediction columns.
+        """
+        markets = {}
+        PREFIX_MAP = {'GOAL_RANGE': 'GR'}
+
+        y_cols = sorted(c for c in df.columns if c.startswith('y_'))
+
+        for y_col in y_cols:
+            market = y_col[2:]
+            pred_prefix = PREFIX_MAP.get(market, market)
+            actual_values = set(str(v) for v in df[y_col].dropna().unique())
+
+            if not actual_values:
+                continue
+
+            for src in ('BLEND', 'P'):
+                search = f'{src}_{pred_prefix}_'
+                candidates = [c for c in df.columns if c.startswith(search)]
+                if not candidates:
+                    continue
+
+                outcome_map = {}
+                for col in candidates:
+                    suffix = col[len(search):]
+                    if suffix in actual_values:
+                        outcome_map[col] = suffix
+                    elif suffix.replace('_', '-') in actual_values:
+                        outcome_map[col] = suffix.replace('_', '-')
+
+                if outcome_map:
+                    markets[market] = {
+                        'actual': y_col,
+                        'pred_cols': list(outcome_map.keys()),
+                        'outcomes': list(outcome_map.values()),
+                        'source': src,
+                    }
+                    break
+
+        return markets
+
     def evaluate_predictions(self, df: pd.DataFrame) -> Dict:
         """
-        Evaluate prediction accuracy across all markets
+        Auto-discover and evaluate ALL markets where both actual (y_*)
+        and prediction (BLEND_* or P_*) columns exist.
+        Uses real bookmaker odds for ROI where available.
         """
         results = {
             'total_matches': len(df),
             'markets': {},
-            'league_markets': {}  # NEW: Track league+market combos
         }
-        
-        # Define all markets to evaluate
-        markets = {
-            # 1X2
-            '1X2': {
-                'actual': 'y_1X2',
-                'pred_cols': ['BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A'],
-                'outcomes': ['H', 'D', 'A']
-            },
-            # BTTS
-            'BTTS': {
-                'actual': 'y_BTTS',
-                'pred_cols': ['BLEND_BTTS_Y', 'BLEND_BTTS_N'],
-                'outcomes': ['Y', 'N']
-            },
-            # Over/Under
-            'OU_0_5': {
-                'actual': 'y_OU_0_5',
-                'pred_cols': ['BLEND_OU_0_5_O', 'BLEND_OU_0_5_U'],
-                'outcomes': ['O', 'U']
-            },
-            'OU_1_5': {
-                'actual': 'y_OU_1_5',
-                'pred_cols': ['BLEND_OU_1_5_O', 'BLEND_OU_1_5_U'],
-                'outcomes': ['O', 'U']
-            },
-            'OU_2_5': {
-                'actual': 'y_OU_2_5',
-                'pred_cols': ['BLEND_OU_2_5_O', 'BLEND_OU_2_5_U'],
-                'outcomes': ['O', 'U']
-            },
-            'OU_3_5': {
-                'actual': 'y_OU_3_5',
-                'pred_cols': ['BLEND_OU_3_5_O', 'BLEND_OU_3_5_U'],
-                'outcomes': ['O', 'U']
-            },
-            'OU_4_5': {
-                'actual': 'y_OU_4_5',
-                'pred_cols': ['BLEND_OU_4_5_O', 'BLEND_OU_4_5_U'],
-                'outcomes': ['O', 'U']
-            },
 
+        ODDS_MAP = {
+            '1X2': {'H': 'B365H', 'D': 'B365D', 'A': 'B365A'},
+            'BTTS': {'Y': 'Odds_BTTS_Y', 'N': 'Odds_BTTS_N'},
+            'OU_2_5': {'O': 'Odds_O25', 'U': 'Odds_U25'},
         }
-        
-        for market_name, market_info in markets.items():
-            actual_col = market_info['actual']
-            pred_cols = market_info['pred_cols']
-            outcomes = market_info['outcomes']
-            
-            # Skip if columns don't exist
-            if actual_col not in df.columns:
-                continue
-            
-            available_pred_cols = [c for c in pred_cols if c in df.columns]
-            if not available_pred_cols:
-                continue
-            
-            # Get matches with actual outcomes
+
+        MARKET_WEIGHTS = {
+            '1X2': 3.0, 'BTTS': 2.0, 'OU_2_5': 3.0,
+            'OU_1_5': 1.5, 'OU_3_5': 1.5, 'OU_4_5': 1.0,
+        }
+
+        discovered = self._discover_markets(df)
+
+        for market, info in discovered.items():
+            actual_col = info['actual']
+            pred_cols = info['pred_cols']
+            outcomes = info['outcomes']
+
             valid = df[actual_col].notna()
-            actual = df.loc[valid, actual_col]
-            
+            actual = df.loc[valid, actual_col].astype(str)
+
             if len(actual) == 0:
                 continue
-            
-            # Get predictions
-            predictions = df.loc[valid, available_pred_cols]
-            
-            # Find predicted outcome (highest probability)
-            pred_outcome_idx = predictions.idxmax(axis=1)
-            
-            # Map column names to outcomes
-            outcome_map = {col: outcome for col, outcome in zip(pred_cols, outcomes)}
-            predicted = pred_outcome_idx.map(outcome_map)
-            
-            # Calculate metrics
+
+            predictions = df.loc[valid, pred_cols]
+            has_preds = predictions.notna().any(axis=1) & (predictions != 0).any(axis=1)
+            valid_idx = has_preds[has_preds].index
+
+            if len(valid_idx) < 5:
+                continue
+
+            actual = actual.loc[valid_idx]
+            predictions = predictions.loc[valid_idx]
+
+            outcome_map = dict(zip(pred_cols, outcomes))
+            pred_col_idx = predictions.idxmax(axis=1)
+            predicted = pred_col_idx.map(outcome_map)
+
             correct = (predicted == actual).sum()
             total = len(actual)
             accuracy = correct / total if total > 0 else 0
-            
-            # Brier score (calibration)
-            brier_scores = []
-            for idx in actual.index:
-                true_outcome = actual[idx]
-                for col, outcome in zip(available_pred_cols, outcomes):
-                    if col in df.columns:
-                        pred_prob = df.loc[idx, col]
-                        if pd.notna(pred_prob):
-                            # Convert percentage string if needed
-                            if isinstance(pred_prob, str):
-                                pred_prob = float(pred_prob.strip('%')) / 100
-                            true_prob = 1.0 if outcome == true_outcome else 0.0
-                            brier_scores.append((pred_prob - true_prob) ** 2)
-            
-            brier = np.mean(brier_scores) if brier_scores else 0
-            
-            # ROI calculation using actual bookmaker odds where available
-            try:
-                from odds_utils import get_odds_for_prediction
-                profit = 0.0
-                bets_with_odds = 0
-                for idx in actual.index:
-                    pred_out = predicted.get(idx)
-                    if pred_out is None:
-                        continue
-                    actual_odds = get_odds_for_prediction(df.loc[idx], market_name, pred_out)
-                    if actual_odds is not None:
-                        bets_with_odds += 1
-                        bet_odds = actual_odds
-                    else:
-                        bet_odds = 2.0  # fallback to even money
-                    if pred_out == actual[idx]:
-                        profit += (bet_odds - 1.0)
-                    else:
-                        profit -= 1.0
-                roi = (profit / total * 100) if total > 0 else 0
-            except ImportError:
-                roi = ((correct / total) - 0.5) * 100 if total > 0 else 0
 
-            results['markets'][market_name] = {
+            brier_sum = 0.0
+            brier_count = 0
+            for idx in actual.index:
+                true_out = actual[idx]
+                for col, outcome in zip(pred_cols, outcomes):
+                    prob = predictions.at[idx, col]
+                    if pd.notna(prob):
+                        if isinstance(prob, str):
+                            prob = float(str(prob).strip('%')) / 100
+                        target = 1.0 if outcome == true_out else 0.0
+                        brier_sum += (float(prob) - target) ** 2
+                        brier_count += 1
+
+            brier = brier_sum / brier_count if brier_count > 0 else 0
+
+            odds_cols = ODDS_MAP.get(market, {})
+            has_real_odds = odds_cols and all(
+                c in df.columns for c in odds_cols.values()
+            )
+
+            if has_real_odds:
+                total_staked = 0
+                total_return = 0.0
+                for idx in actual.index:
+                    pred_out = predicted.loc[idx]
+                    odds_col = odds_cols.get(pred_out)
+                    if odds_col and odds_col in df.columns:
+                        match_odds = df.loc[idx, odds_col]
+                        if pd.notna(match_odds) and match_odds > 1.0:
+                            total_staked += 1
+                            if pred_out == actual.loc[idx]:
+                                total_return += float(match_odds)
+                roi = ((total_return - total_staked) / total_staked * 100) if total_staked > 0 else 0.0
+                roi_type = 'real'
+            else:
+                n_outcomes = len(outcomes)
+                baseline = 1.0 / n_outcomes if n_outcomes > 0 else 0.5
+                roi = (accuracy - baseline) / baseline * 100 if baseline > 0 else 0.0
+                roi_type = 'approx'
+
+            weight = MARKET_WEIGHTS.get(market, 1.0)
+
+            results['markets'][market] = {
                 'total': int(total),
                 'correct': int(correct),
                 'accuracy': float(accuracy),
                 'brier_score': float(brier),
-                'roi_pct': float(roi)
+                'roi_pct': float(roi),
+                'roi_type': roi_type,
+                'weight': weight,
+                'n_outcomes': len(outcomes),
+                'source': info['source'],
             }
-        
+
         return results
     
+    def run(self) -> pd.DataFrame:
+        """Alias for run_backtest (used by auto_tune.py)."""
+        return self.run_backtest()
+
     def run_backtest(self) -> pd.DataFrame:
         """Run complete walk-forward backtest"""
         print("\n🔬 BACKTESTING ENGINE")
@@ -321,24 +341,21 @@ class BacktestEngine:
         print("Method: Walk-forward (no data leakage)")
         print("="*60)
         
-        # Load full dataset
+        # Load full dataset (ALL historical data — needed for training)
         full_df = self.load_features_data()
-        
-        # Filter to backtest period
-        full_df = full_df[
-            (full_df['Date'] >= self.start_date) & 
-            (full_df['Date'] <= self.end_date)
-        ]
-        
-        # Get test periods
+
+        # Keep unfiltered copy for training (walk-forward needs all history)
+        all_history_df = full_df
+
+        # Test periods are restricted to the backtest window
         periods = self.get_test_periods()
         print(f"\n📅 Testing {len(periods)} periods\n")
         
         for i, (test_start, test_end) in enumerate(periods, 1):
             print(f"Period {i}/{len(periods)}: {test_start.date()} to {test_end.date()}")
             
-            # Split data
-            train_df, test_df = self.split_data(full_df, test_start, test_end)
+            # Split data — train on ALL history before test_start
+            train_df, test_df = self.split_data(all_history_df, test_start, test_end)
             
             # Check sufficient data
             if len(train_df) < self.min_training_matches:
@@ -352,8 +369,8 @@ class BacktestEngine:
             print(f"   📊 Train: {len(train_df)} matches | Test: {len(test_df)} matches")
             
             # Train models on training data only
-            print(f"   🎯 Training models...")
-            success = self.train_models_on_period(train_df)
+            print(f"   Training models...")
+            success = self.train_models_on_period(train_df, test_start=test_start)
             
             if not success:
                 print(f"   [ERROR] Training failed")
@@ -405,31 +422,42 @@ class BacktestEngine:
             total_matches = 0
             total_correct = 0
             brier_scores = []
-            
+            roi_values = []
+            weight = 1.0
+            roi_type = 'approx'
+            n_outcomes = 2
+            source = 'P'
+
             for result in self.results:
                 if market in result.get('markets', {}):
                     stats = result['markets'][market]
                     total_matches += stats['total']
                     total_correct += stats['correct']
                     brier_scores.append(stats['brier_score'])
-            
+                    roi_values.append(stats.get('roi_pct', 0.0))
+                    weight = stats.get('weight', 1.0)
+                    roi_type = stats.get('roi_type', 'approx')
+                    n_outcomes = stats.get('n_outcomes', 2)
+                    source = stats.get('source', 'P')
+
             if total_matches > 0:
                 accuracy = total_correct / total_matches
-
-                # Aggregate ROI from individual period results
-                total_roi_sum = sum(
-                    result['markets'][market].get('roi_pct', 0)
-                    for result in self.results
-                    if market in result.get('markets', {})
-                )
-                roi = total_roi_sum / len([r for r in self.results if market in r.get('markets', {})])
+                roi = np.mean(roi_values) if roi_values else 0.0
+                baseline = 1.0 / n_outcomes if n_outcomes > 0 else 0.5
+                edge = accuracy - baseline
 
                 market_summary[market] = {
                     'Total_Matches': total_matches,
                     'Correct': total_correct,
                     'Accuracy_%': round(accuracy * 100, 1),
+                    'Baseline_%': round(baseline * 100, 1),
+                    'Edge_%': round(edge * 100, 1),
                     'Brier_Score': round(np.mean(brier_scores), 3),
-                    'ROI_%': round(roi, 1)
+                    'ROI_%': round(roi, 1),
+                    'ROI_Type': roi_type,
+                    'Weight': weight,
+                    'Outcomes': n_outcomes,
+                    'Source': source,
                 }
 
         summary_df = pd.DataFrame.from_dict(market_summary, orient='index')
@@ -438,28 +466,61 @@ class BacktestEngine:
         
         print("\n📊 OVERALL MARKET PERFORMANCE:")
         print(summary_df.to_string())
-        
+
+        # Weighted Brier (the primary tuning objective)
+        if 'Brier_Score' in summary_df.columns and 'Weight' in summary_df.columns:
+            weights = summary_df['Weight'].values
+            briers = summary_df['Brier_Score'].values
+            weighted_brier = np.average(briers, weights=weights)
+            print(f"\n📈 WEIGHTED BRIER (primary metric): {weighted_brier:.4f}")
+            print(f"   (lower = better calibrated; <0.20 is good, <0.15 is excellent)")
+
+            # Check ROI types
+            roi_types = summary_df['ROI_Type'].unique() if 'ROI_Type' in summary_df.columns else []
+            if 'real' in roi_types:
+                real_roi = summary_df[summary_df['ROI_Type'] == 'real']
+                avg_real_roi = np.average(real_roi['ROI_%'], weights=real_roi['Weight'])
+                print(f"   REAL ROI (odds-based): {avg_real_roi:+.1f}%")
+            if 'approx' in roi_types:
+                print(f"   (some markets use approximate odds — get more odds data for precision)")
+
         # 2. League-specific analysis
         self.analyze_by_league()
         
         # 3. Doubles/Trebles analysis
         self.analyze_combinations()
         
-        # Interpretation
+        # Interpretation: use Edge_% (accuracy above random baseline)
         print("\n" + "="*60)
         print("💡 KEY FINDINGS:")
         print("="*60)
-        
-        excellent = summary_df[summary_df['Accuracy_%'] >= 60]
-        good = summary_df[(summary_df['Accuracy_%'] >= 55) & (summary_df['Accuracy_%'] < 60)]
-        
-        if len(excellent) > 0:
-            print(f"[OK] EXCELLENT markets (≥60%): {', '.join(excellent.index.tolist())}")
-        
-        if len(good) > 0:
-            print(f"[OK] GOOD markets (55-60%): {', '.join(good.index.tolist())}")
-        
-        print(f"\n📈 Best overall: {summary_df.index[0]} ({summary_df.iloc[0]['Accuracy_%']:.1f}%)")
+
+        if 'Edge_%' in summary_df.columns:
+            edge_sorted = summary_df.sort_values('Edge_%', ascending=False)
+            strong_edge = edge_sorted[edge_sorted['Edge_%'] >= 10]
+            good_edge = edge_sorted[(edge_sorted['Edge_%'] >= 5) & (edge_sorted['Edge_%'] < 10)]
+            no_edge = edge_sorted[edge_sorted['Edge_%'] <= 0]
+
+            if len(strong_edge) > 0:
+                top_markets = ', '.join(f"{m} (+{edge_sorted.loc[m,'Edge_%']:.1f}%)" for m in strong_edge.index[:10])
+                print(f"[OK] STRONG EDGE (≥10% above baseline): {top_markets}")
+
+            if len(good_edge) > 0:
+                mid_markets = ', '.join(f"{m} (+{edge_sorted.loc[m,'Edge_%']:.1f}%)" for m in good_edge.index[:10])
+                print(f"[OK] MODERATE EDGE (5-10% above baseline): {mid_markets}")
+
+            if len(no_edge) > 0:
+                weak_markets = ', '.join(no_edge.index[:10].tolist())
+                print(f"[  ] NO EDGE (at or below baseline): {weak_markets}")
+
+            print(f"\n📈 Best edge: {edge_sorted.index[0]} (+{edge_sorted.iloc[0]['Edge_%']:.1f}% above {edge_sorted.iloc[0]['Baseline_%']:.0f}% baseline)")
+        else:
+            print(f"\n📈 Best accuracy: {summary_df.index[0]} ({summary_df.iloc[0]['Accuracy_%']:.1f}%)")
+
+        n_markets = len(summary_df)
+        n_blend = len(summary_df[summary_df['Source'] == 'BLEND']) if 'Source' in summary_df.columns else 0
+        n_ml = n_markets - n_blend
+        print(f"\n📊 Evaluated {n_markets} markets ({n_blend} blended, {n_ml} ML-only)")
         
         # Save
         output_path = OUTPUT_DIR / "backtest_summary.csv"
@@ -487,72 +548,78 @@ class BacktestEngine:
         print("   Filter by League column to see market performance per league")
     
     def analyze_combinations(self):
-        """Analyze double/treble success rates"""
+        """Analyze double/treble success rates using top-edge markets"""
         print("\n" + "="*60)
         print("🎲 COMBINATION ANALYSIS (Doubles/Trebles)")
         print("="*60)
-        
+
         from itertools import combinations
-        
-        # Get all market accuracies
-        market_accs = {}
+
+        market_data = {}
         for result in self.results:
             for market, stats in result.get('markets', {}).items():
-                if market not in market_accs:
-                    market_accs[market] = []
+                if market not in market_data:
+                    market_data[market] = {'accs': [], 'n_outcomes': stats.get('n_outcomes', 2)}
                 if stats['total'] > 0:
-                    market_accs[market].append(stats['accuracy'])
-        
-        # Calculate average accuracy per market
-        avg_accs = {m: np.mean(accs) for m, accs in market_accs.items() if len(accs) > 0}
-        
-        # Find best doubles
+                    market_data[market]['accs'].append(stats['accuracy'])
+
+        avg_accs = {}
+        avg_odds = {}
+        for m, data in market_data.items():
+            if data['accs']:
+                acc = np.mean(data['accs'])
+                n = data['n_outcomes']
+                baseline = 1.0 / n if n > 0 else 0.5
+                if acc > baseline:
+                    avg_accs[m] = acc
+                    avg_odds[m] = 1.0 / acc if acc > 0 else 2.0
+
+        if len(avg_accs) < 2:
+            print("   Not enough markets with positive edge for combination analysis.")
+            return
+
+        top_markets = dict(sorted(avg_accs.items(), key=lambda x: x[1], reverse=True)[:20])
+
+        print(f"\n   Using top {len(top_markets)} markets with positive edge")
+
         print("\n🎯 BEST DOUBLES (Top 10):")
         doubles = []
-        for m1, m2 in combinations(avg_accs.keys(), 2):
+        for m1, m2 in combinations(top_markets.keys(), 2):
             combined_prob = avg_accs[m1] * avg_accs[m2]
-            # Assume average odds of 2.0 per leg
-            double_odds = 4.0
+            double_odds = avg_odds[m1] * avg_odds[m2]
             expected_roi = (combined_prob * double_odds - 1) * 100
-            
+
             doubles.append({
                 'combo': f"{m1} + {m2}",
                 'hit_rate_%': round(combined_prob * 100, 1),
+                'est_odds': round(double_odds, 2),
                 'expected_roi_%': round(expected_roi, 1)
             })
-        
+
         doubles_df = pd.DataFrame(doubles).sort_values('expected_roi_%', ascending=False).head(10)
         print(doubles_df.to_string(index=False))
-        
-        # Find best trebles
+
         print("\n🎯 BEST TREBLES (Top 10):")
         trebles = []
-        for m1, m2, m3 in combinations(avg_accs.keys(), 3):
+        for m1, m2, m3 in combinations(top_markets.keys(), 3):
             combined_prob = avg_accs[m1] * avg_accs[m2] * avg_accs[m3]
-            # Assume average odds of 2.0 per leg
-            treble_odds = 8.0
+            treble_odds = avg_odds[m1] * avg_odds[m2] * avg_odds[m3]
             expected_roi = (combined_prob * treble_odds - 1) * 100
-            
+
             trebles.append({
                 'combo': f"{m1} + {m2} + {m3}",
                 'hit_rate_%': round(combined_prob * 100, 1),
+                'est_odds': round(treble_odds, 2),
                 'expected_roi_%': round(expected_roi, 1)
             })
-        
+
         trebles_df = pd.DataFrame(trebles).sort_values('expected_roi_%', ascending=False).head(10)
         print(trebles_df.to_string(index=False))
-        
-        # Save combinations
+
         doubles_df.to_csv(OUTPUT_DIR / "backtest_best_doubles.csv", index=False)
         trebles_df.to_csv(OUTPUT_DIR / "backtest_best_trebles.csv", index=False)
-        
+
         print("\n[OK] Saved combination analysis to outputs/backtest_best_*.csv")
-        
-        print("\n💡 COMBINATION TIPS:")
-        print("   * Look for combinations with >40% hit rate for trebles")
-        print("   * Look for combinations with >60% hit rate for doubles")
-        print("   * Cross-league combos often have better value")
-        print("   * Mix O/U with other markets for decorrelation")
     
     def export_detailed_results(self) -> Path:
         """Export period-by-period breakdown"""

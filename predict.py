@@ -38,8 +38,11 @@ TUNING_OVERRIDES: dict = {}
 # Auto-load tuned params if file exists (written by auto_tune.py)
 _tuned_params_path = Path(__file__).resolve().parent / "outputs" / "tuning_best_params.json"
 if _tuned_params_path.exists():
-    with open(_tuned_params_path) as _f:
-        TUNING_OVERRIDES.update(json.load(_f))
+    try:
+        with open(_tuned_params_path) as _f:
+            TUNING_OVERRIDES.update(json.load(_f))
+    except (json.JSONDecodeError, ValueError):
+        pass
 
 # League scoring profiles (learned from historical data)
 # style: 'attacking' (>2.8 avg), 'balanced' (2.5-2.8), 'defensive' (<2.5)

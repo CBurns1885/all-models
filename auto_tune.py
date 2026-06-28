@@ -141,48 +141,74 @@ def _trial_count():
 # ---------------------------------------------------------------------------
 # Backtest runner
 # ---------------------------------------------------------------------------
+BACKTEST_MONTHS = 6  # default: backtest over last 6 months
+
+
 def run_backtest(overrides: dict) -> dict:
     """Run a single backtest with the given TUNING_OVERRIDES.
 
-    Returns dict with keys: accuracy, brier, roi, duration_s
+    Returns dict with keys: accuracy, brier, weighted_brier, roi, duration_s
     """
-    # Inject overrides into predict module at runtime
     import predict
     predict.TUNING_OVERRIDES.clear()
     predict.TUNING_OVERRIDES.update(overrides)
 
     from backtest import BacktestEngine
+    from datetime import datetime, timedelta
+
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=BACKTEST_MONTHS * 30)
 
     start = time.time()
     try:
-        engine = BacktestEngine()
-        results = engine.run()
+        engine = BacktestEngine(
+            start_date=start_date.strftime('%Y-%m-%d'),
+            end_date=end_date.strftime('%Y-%m-%d'),
+            test_window_days=7,
+        )
+        results = engine.run_backtest()
 
-        # Extract summary metrics
         if results is None or results.empty:
-            return {"accuracy": 0.0, "brier": 1.0, "roi": -100.0, "duration_s": time.time() - start}
+            return {"accuracy": 0.0, "brier": 1.0, "weighted_brier": 1.0,
+                    "roi": -100.0, "duration_s": time.time() - start}
+
+        # Market-weighted Brier (primary metric)
+        weights = results["Weight"].values if "Weight" in results.columns else np.ones(len(results))
+        briers = results["Brier_Score"].values if "Brier_Score" in results.columns else np.ones(len(results))
+        weighted_brier = float(np.average(briers, weights=weights))
 
         accuracy = results["Accuracy_%"].mean() if "Accuracy_%" in results.columns else 0.0
         brier = results["Brier_Score"].mean() if "Brier_Score" in results.columns else 1.0
-        roi = results["ROI_%"].mean() if "ROI_%" in results.columns else -100.0
+        roi = float(np.average(
+            results["ROI_%"].values,
+            weights=weights
+        )) if "ROI_%" in results.columns else -100.0
 
         return {
             "accuracy": round(float(accuracy), 2),
             "brier": round(float(brier), 4),
-            "roi": round(float(roi), 2),
+            "weighted_brier": round(weighted_brier, 4),
+            "roi": round(roi, 2),
             "duration_s": round(time.time() - start, 1),
         }
     except Exception as e:
         print(f"  [ERROR] Backtest failed: {e}")
-        return {"accuracy": 0.0, "brier": 1.0, "roi": -100.0, "duration_s": round(time.time() - start, 1)}
+        return {"accuracy": 0.0, "brier": 1.0, "weighted_brier": 1.0,
+                "roi": -100.0, "duration_s": round(time.time() - start, 1)}
 
 
 def score_result(r: dict) -> float:
     """Single scalar score: higher is better.
 
-    Weighted: 50% accuracy, 30% brier (inverted), 20% ROI.
+    Primary: weighted Brier (60%) — calibration is what the post-processing
+    layer actually moves, so it should dominate the objective.
+    Secondary: ROI (25%) — real-odds profit where available.
+    Tertiary: accuracy (15%) — sanity check only.
     """
-    return r["accuracy"] * 0.50 + (1 - r["brier"]) * 100 * 0.30 + max(r["roi"], -50) * 0.20
+    brier_contrib = (1 - r.get("weighted_brier", r["brier"])) * 100 * 0.60
+    roi_contrib = max(r["roi"], -50) * 0.25
+    acc_contrib = r["accuracy"] * 0.15
+    return brier_contrib + roi_contrib + acc_contrib
 
 
 # ---------------------------------------------------------------------------

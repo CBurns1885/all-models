@@ -206,3 +206,157 @@ def learn_blend_weights() -> Dict[str, float]:
     with open(BLEND_WEIGHTS_JSON, "w") as f:
         json.dump(weights, f, indent=2)
     return weights
+
+
+def learn_blend_weights_temporal(val_end_date: str) -> Dict[str, float]:
+    """
+    Temporal-aware version of learn_blend_weights that avoids data leakage.
+
+    Only uses rows with Date < val_end_date.  Within those rows the first 80%
+    (by date order) are treated as the training partition and the last 20% as
+    the validation partition.
+
+    DC models are fit on the training partition only.  ML predictions are
+    generated on the validation partition using already-trained models (which
+    were fitted on historical data, so predicting on the val partition is
+    legitimate).  The blend alpha is optimised on the validation partition,
+    ensuring it never sees future / test data.
+
+    Parameters
+    ----------
+    val_end_date : str
+        Cut-off date in YYYY-MM-DD format.  Rows with Date >= this value are
+        excluded entirely.
+
+    Returns
+    -------
+    Dict[str, float]
+        target_name -> alpha  (0 = pure DC, 1 = pure ML).
+        Also saved to models/blend_weights.json.
+    """
+    # ------------------------------------------------------------------
+    # 1. Load features and restrict to Date < val_end_date
+    # ------------------------------------------------------------------
+    df = _load_features()
+    df["Date"] = pd.to_datetime(df["Date"])
+    cutoff = pd.Timestamp(val_end_date)
+    df = df[df["Date"] < cutoff].copy()
+    if df.empty:
+        raise ValueError(f"No rows with Date < {val_end_date}")
+
+    df = df.sort_values("Date").reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # 2. Split into train_part (first 80%) and val_part (last 20%)
+    # ------------------------------------------------------------------
+    n = len(df)
+    split_idx = int(n * 0.8)
+    train_part = df.iloc[:split_idx].copy()
+    val_part = df.iloc[split_idx:].copy()
+
+    if val_part.empty or train_part.empty:
+        raise ValueError(
+            f"Temporal split produced an empty partition "
+            f"(train={len(train_part)}, val={len(val_part)})"
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Fit DC on train_part only
+    # ------------------------------------------------------------------
+    dc_base = train_part.dropna(
+        subset=["FTHG", "FTAG", "HomeTeam", "AwayTeam", "League", "Date"]
+    ).copy()
+    dc_params = dc_fit_all(
+        dc_base[["League", "Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]]
+    )
+
+    # ------------------------------------------------------------------
+    # 4. Load trained ML models
+    # ------------------------------------------------------------------
+    models = load_trained_targets()
+
+    # ------------------------------------------------------------------
+    # 5. For each target, optimise alpha on val_part
+    # ------------------------------------------------------------------
+    weights: Dict[str, float] = {}
+
+    for target, m in models.items():
+        if target not in val_part.columns:
+            continue
+        sub = val_part.dropna(subset=[target]).copy()
+        if sub.empty:
+            continue
+
+        # -- ML probs on val_part ---
+        ml_dict = ml_predict({target: m}, sub)
+        p_ml_full = ml_dict[target]  # (n_val, K_ml)
+        ml_labels = list(m.classes_)
+        desired_labels = list(sub[target].astype("category").cat.categories)
+        p_ml = _align_probs_to_labels(p_ml_full, ml_labels, desired_labels)
+        y_int = sub[target].astype("category").cat.codes.values
+
+        # -- DC probs (skip unsupported targets) ---
+        if not _dc_supported(target):
+            continue
+
+        dc_rows = []
+        for _, r in sub[["League", "HomeTeam", "AwayTeam"]].iterrows():
+            lg, ht, at = r["League"], r["HomeTeam"], r["AwayTeam"]
+            mp = {}
+            if lg in dc_params:
+                mp = dc_price_match(dc_params[lg], ht, at, max_goals=8)
+
+            if target == "y_1X2":
+                vec = [mp.get("DC_1X2_H", 0.0), mp.get("DC_1X2_D", 0.0), mp.get("DC_1X2_A", 0.0)]
+                labs = ["H", "D", "A"]
+            elif target == "y_BTTS":
+                vec = [mp.get("DC_BTTS_N", 0.0), mp.get("DC_BTTS_Y", 0.0)]
+                labs = ["N", "Y"]
+            elif target == "y_GOAL_RANGE":
+                labs = ["0", "1", "2", "3", "4", "5+"]
+                vec = [mp.get(f"DC_GR_{k}", 0.0) for k in labs]
+            elif target == "y_CS":
+                labs = [f"{a}-{b}" for a in range(6) for b in range(6)] + ["Other"]
+                vec = (
+                    [mp.get(f"DC_CS_{a}_{b}", 0.0) for a in range(6) for b in range(6)]
+                    + [mp.get("DC_CS_Other", 0.0)]
+                )
+            elif target.startswith("y_OU_"):
+                l = target.split("_")[-1]
+                labs = ["U", "O"]
+                vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
+            elif target.startswith("y_AH_"):
+                l = target.split("_", 2)[2]
+                labs = ["A", "P", "H"]
+                vec = [mp.get(f"DC_AH_{l}_A", 0.0), mp.get(f"DC_AH_{l}_P", 0.0), mp.get(f"DC_AH_{l}_H", 0.0)]
+            else:
+                vec = None
+                labs = []
+
+            if vec is None:
+                dc_rows.append(None)
+            else:
+                vec = np.array(vec, dtype=float)
+                lab_map = {lab: i for i, lab in enumerate(labs)}
+                aligned = np.zeros(len(desired_labels))
+                for j, lab in enumerate(desired_labels):
+                    if lab in lab_map:
+                        aligned[j] = vec[lab_map[lab]]
+                s = aligned.sum()
+                aligned = aligned / s if s > 0 else aligned
+                dc_rows.append(aligned)
+
+        if any(v is None for v in dc_rows):
+            continue
+
+        p_dc = np.vstack(dc_rows)
+        alpha = _opt_alpha(y_int, p_ml, p_dc)
+        weights[target] = alpha
+
+    # ------------------------------------------------------------------
+    # 6. Save and return
+    # ------------------------------------------------------------------
+    BLEND_WEIGHTS_JSON.parent.mkdir(parents=True, exist_ok=True)
+    with open(BLEND_WEIGHTS_JSON, "w") as f:
+        json.dump(weights, f, indent=2)
+    return weights
