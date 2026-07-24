@@ -41,6 +41,16 @@
 - `player_fixture_stats`: 0 rows → being filled by `fetch_player_stats.py` over ~4 days
 - `standings`: 2,200 rows
 
+### ⚠️ New PC setup — do this first after cloning
+1. **Copy `data/football_api.db`** — this file is NOT in the repo (gitignored). It was copied to USB on 2026-07-24.
+   - Source: `C:\Users\Chris\OneDrive\...\Chris Code\data\football_api.db`
+   - Place it at the same path on the new PC: `<repo-parent>\data\football_api.db`
+   - If on the same OneDrive account it may already be there — check before copying from USB.
+2. Create `.env` in `all_models/` with `API_FOOTBALL_KEY=<your key from RapidAPI dashboard>`
+3. `pip install -r requirements.txt`
+4. Run `py fetch_player_stats.py` daily until `[OK] player_fixture_stats fully populated!` (~4 days, 29,471 calls)
+5. Also run `py fetch_season_data.py` to finish the remaining ~5,254 match_stats fixtures
+
 ### ⚠️ Next steps after downloads complete
 1. `py features.py build_features --force` — rebuild with new player-level card/fouls/rating features
 2. `py models.py --speed full` — retrain all 5 models on new features
