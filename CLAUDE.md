@@ -2,9 +2,60 @@
 
 ---
 
-## ⚡ SESSION STATE — READ THIS FIRST (updated 2026-07-14 ~20:00)
+## ⚡ SESSION STATE — READ THIS FIRST (updated 2026-07-24)
 
-### Pipeline chain COMPLETE (Steps 1-3 done; Step 4 run_weekly.py finished or hanging — check weekly_run_new.log)
+### What was done this session (2026-07-24):
+
+1. ✓ **`picks_page.py` created** — standalone HTML picks dashboard generator
+   - Reads `outputs/<date>/weekly_bets_full.csv`, outputs `picks_page.html`
+   - Groups best picks by market (15 markets), confidence bars, fallback detection (`!DATA` badge)
+   - Fallback detection: `P_1X2_H ≈ 0.9047619` → red background + `!DATA` badge
+   - Columns read: all `P_*` raw probability format (e.g. `P_1X2_H`, `P_BTTS_Y`, `P_OU_0_5_O`, etc.)
+
+2. ✓ **`run_weekly.py` now 13 steps** (was 12) — Step 10 inserted:
+   - Step 10: GENERATE PICKS PAGE (between market split and accuracy DB)
+   - Old steps 10/11/12 → 11/12/13 (renumbered)
+   - `picks_page.html` added to archive list (step 12)
+
+3. ✓ **`fetch_player_stats.py` created** — populate `player_fixture_stats` from `/fixtures/players`
+   - Resumable: skips fixture_ids already in table
+   - Ordered `date DESC` (most recent first)
+   - Quota-aware: stops when fewer than 50 requests remain
+   - CLI: `--season N`, `--limit N`, `--dry-run`
+   - Progress every 100 fixtures: `[N/total] pct% fetched=N players=N no_data=N`
+
+4. ✓ **Data downloads kicked off (2026-07-24)**:
+   - Phase 1 DONE: 11,327 fixtures updated across 41 leagues
+   - Phase 2 DONE (eventually): 5,254 fixtures had match_stats fetched (PID 556)
+   - Chain runner (PID 8604): auto-started `fetch_player_stats.py` after Phase 2 complete
+   - Player stats: 29,471 total fixtures to fill → ~4 days at 7,500 API calls/day
+   - Re-run `py fetch_player_stats.py` each day until `[OK] player_fixture_stats fully populated!`
+
+5. ✓ **`.gitignore` updated**: `certs/` (Betfair SSL), `_ul*` (OneDrive), `pipeline_*.log`, `pipeline_*.err`, `chain_runner.py`
+6. ✓ **`catboost_info/` untracked from git** (`git rm --cached catboost_info/ -r`)
+7. ✓ **Repo pushed**: HEAD `aab99df`, working tree clean
+
+### ⚠️ DB state after session (2026-07-24)
+- `data/football_api.db`: 34,725 fixtures, latest FT 2026-06-20
+- `match_stats`: ~34,725 rows (Phase 2 backfill complete)
+- `player_fixture_stats`: 0 rows → being filled by `fetch_player_stats.py` over ~4 days
+- `standings`: 2,200 rows
+
+### ⚠️ Next steps after downloads complete
+1. `py features.py build_features --force` — rebuild with new player-level card/fouls/rating features
+2. `py models.py --speed full` — retrain all 5 models on new features
+3. `py auto_tune.py` — re-tune calibration params on new model
+4. `py backtest.py --weeks 52 --min-conf 0.01` — verify improvement
+5. `py run_weekly.py --speed full --non-interactive` — generate fresh weekly picks
+
+### ⚠️ Security notes (NEVER commit)
+- `certs/` contains `client-2048.crt` and `client-2048.key` — Betfair SSL private key
+- `.env` contains `API_FOOTBALL_KEY=0f17fdba78d15a625710f7244a1cc770` — create on each new PC
+- `betfair_auth.py` reads credentials from env vars only (safe to commit)
+
+---
+
+## Previous session (2026-07-14):
 
 ### All steps done this session (2026-07-14):
 1. ✓ 5-bug pipeline audit + features rebuilt (296 features)
@@ -17,11 +68,6 @@
 
 ### ⚠️ Known issue: Unknown-team fallback in European qualifiers
 Many UCL/UECL early-round teams (Atert Bissen, Tre Fiori, Vardar Skopje, etc.) show exact probability `0.9047619 / 0.047619 / 0.047619` — this is a home-heavy prior fallback when ML+DC have no training data. These predictions are unreliable for betting. NOR/SWE domestic picks are credible.
-
-### Next session: Start betting on top per-league combos
-- Focus on domestic leagues once 2026/27 seasons begin (Aug–Sep)
-- For now: NOR/SWE domestic matches are the only reliable live picks
-- Do NOT bet European qualifier picks for unknown clubs without cross-checking odds
 
 ### What was done this session (2026-07-13/14) — Pipeline Audit
 - **5 bugs fixed in features.py** — 31 features were silently missing + xG was all zeros. See "Bug Fixes" section.
@@ -116,6 +162,9 @@ Football betting prediction system using ensemble ML + Dixon-Coles Poisson model
 | `market_backtest.py` | Market-specific ROI backtest |
 | `blending.py` | Learn DC/ML blend weights per market |
 | `threshold_analysis.py` | Per-market confidence threshold sweep → find min threshold for 95% accuracy |
+| `picks_page.py` | HTML picks dashboard generator — reads `weekly_bets_full.csv`, outputs `picks_page.html` grouped by market |
+| `fetch_player_stats.py` | Populate `player_fixture_stats` from `/fixtures/players` — resumable, quota-aware, run daily until complete |
+| `fetch_season_data.py` | Phase 1: fixture list refresh; Phase 2: match_stats backfill |
 
 ## Data Architecture
 ```
