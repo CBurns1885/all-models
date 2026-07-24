@@ -50,7 +50,7 @@
 
 ### ⚠️ Security notes (NEVER commit)
 - `certs/` contains `client-2048.crt` and `client-2048.key` — Betfair SSL private key
-- `.env` contains `API_FOOTBALL_KEY=0f17fdba78d15a625710f7244a1cc770` — create on each new PC
+- `.env` must contain `API_FOOTBALL_KEY=<your key>` — create on each new PC (key in RapidAPI dashboard)
 - `betfair_auth.py` reads credentials from env vars only (safe to commit)
 
 ---
@@ -97,7 +97,7 @@ Many UCL/UECL early-round teams (Atert Bissen, Tre Fiori, Vardar Skopje, etc.) s
 - **best params confirmed at 71.705** — restored to `outputs/tuning_best_params.json`
 
 ### Core objective (2026-07-03)
-- **API key**: `0f17fdba78d15a625710f7244a1cc770` (in `.env` + pass as env var when running scripts)
+- **API key**: in `.env` as `API_FOOTBALL_KEY` (pass as env var when running scripts)
 - **3,534 new fixtures**: Feb 2026 – Jun 2026 (full end of 2025/26 season)
 - **Stats backfill needed**: Run `py fetch_season_data.py` in user terminal (resumable, 2 days)
 - **Per-league tuning**: Implemented via per-league confidence thresholds (not separate models — global model is still used)
