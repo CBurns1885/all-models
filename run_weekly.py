@@ -188,8 +188,19 @@ if not fixtures_file or not Path(fixtures_file).exists():
         fixtures_file = fixtures_csv
         print(f"[OK] Using manual: {fixtures_file}")
     else:
-        # Try generating sample data as last resort
-        print("[WARN] No fixtures file found, generating sample data...")
+        # Sample data is FABRICATED fixtures — only ever acceptable for testing,
+        # and only when explicitly requested. An autonomous run must fail hard
+        # here rather than generate predictions (and downstream bets) for
+        # matches that don't exist.
+        if not args.use_sample_data:
+            print("[ERROR] No fixtures available from API, fallback download, or manual file.")
+            print("[INFO] Refusing to generate sample (fake) fixtures without --use-sample-data.")
+            print("[INFO] Options:")
+            print("   1. Check API-Football connection / key in .env")
+            print("   2. Check internet connection")
+            print("   3. Manually download from football-data.co.uk/matches.php")
+            sys.exit(1)
+        print("[WARN] No fixtures file found, generating SAMPLE data (--use-sample-data)...")
         try:
             from sample_data_generator import generate_upcoming_fixtures_file, initialize_database_with_sample_data
             from api_football_adapter import check_api_football_db
