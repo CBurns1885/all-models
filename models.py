@@ -117,7 +117,12 @@ def _load_features() -> pd.DataFrame:
     df = pd.read_parquet(FEATURES_PARQUET)
     if not np.issubdtype(df["Date"].dtype, np.datetime64):
         df["Date"] = pd.to_datetime(df["Date"])
-    return df.sort_values(["League", "Date"]).reset_index(drop=True)
+    # Sort GLOBALLY by Date: make_time_split() slices this frame into
+    # contiguous chunks assuming time order. Sorting by (League, Date) here
+    # would turn the "temporal" CV folds into league blocks — the last fold
+    # (used for holdout calibration) would be the alphabetically-last leagues
+    # instead of the most recent matches.
+    return df.sort_values(["Date", "League"], kind="stable").reset_index(drop=True)
 
 # --------------------------------------------------------------------------------------
 # Targets definition
@@ -816,6 +821,24 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
         return _build_base_model(alg, len(classes_), [])
 
 
+def _align_proba_by_classes(proba: np.ndarray, model_classes, K: int) -> np.ndarray:
+    """Scatter a fitted model's predict_proba output into a (n, K) matrix
+    indexed by the GLOBAL class codes 0..K-1, using model.classes_ to place
+    each column. Positional truncation/padding is wrong whenever a training
+    subset is missing a middle class (e.g. fold lacks draws) — columns would
+    silently shift to the wrong outcome.
+    """
+    n = proba.shape[0]
+    P = np.zeros((n, K))
+    for j, cls in enumerate(model_classes):
+        c = int(cls)
+        if 0 <= c < K:
+            P[:, c] = proba[:, j]
+    s = P.sum(axis=1, keepdims=True)
+    s[s == 0] = 1.0
+    return P / s
+
+
 # --------------------------------------------------------------------------------------
 # DC probabilities helper (for OOF & inference)
 # --------------------------------------------------------------------------------------
@@ -1242,23 +1265,41 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     if supports_dc:
         base_models["dc"] = "__DC__"
 
-    # Walk-forward OOF with speed-aware fold count
+    # Walk-forward OOF with speed-aware fold count.
+    # Rows are globally date-sorted (see _load_features), so fold i is strictly
+    # earlier in time than fold i+1. Each fold's models are trained ONLY on
+    # earlier folds — training on "all other folds" would let middle folds see
+    # the future, biasing the meta-learner and calibrator optimistic.
     if _HAS_SPEED_CONFIG:
         n_folds = get_n_folds()
     else:
         n_folds = 5
+    n_folds = max(2, n_folds)
     ps = make_time_split(len(y_int), n_folds=n_folds)
+    fold_ids = np.unique(ps.test_fold)
+    K = len(classes)
     oof_blocks = []
-    for fold in np.unique(ps.test_fold):
-        tr = ps.test_fold != fold
+    oof_valid = np.zeros(len(y_int), dtype=bool)
+    for fold in fold_ids:
+        if fold == fold_ids[0]:
+            continue  # earliest fold has no past data to train on
+        tr = ps.test_fold < fold
         va = ps.test_fold == fold
         Xt = X_all[tr]; yt = y_int[tr]
         Xv = X_all[va]; yv = y_int[va]
+        if len(np.unique(yt)) < 2:
+            print(f"[WARN]  Fold {fold}: training window has <2 classes, skipping fold")
+            continue
         fold_stack = []
         for name, model in base_models.items():
             try:
                 if name == "dc":
                     proba = _dc_probs_for_rows(sub.iloc[tr], sub.iloc[va], target_col)
+                    if proba.shape[1] != K:
+                        P2 = np.zeros((len(Xv), K))
+                        P2[:, :min(K, proba.shape[1])] = proba[:, :min(K, proba.shape[1])]
+                        s = P2.sum(axis=1, keepdims=True); s[s == 0] = 1.0
+                        proba = P2 / s
                 else:
                     m = model
                     # Fit fresh copy per fold to keep OOF strict
@@ -1270,36 +1311,35 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                         m = CORALOrdinal(C=1.0, max_iter=2000)
                     elif name == "bnn" and _HAS_TORCH:
                         m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
-                    if name != "dc":
-                        m.fit(Xt, yt)
-                        proba = m.predict_proba(Xv)
+                    m.fit(Xt, yt)
+                    # Align columns by the model's own classes_, not position —
+                    # a fold's training window can be missing a middle class.
+                    raw = m.predict_proba(Xv)
+                    model_classes = getattr(m, "classes_", np.arange(raw.shape[1]))
+                    proba = _align_proba_by_classes(raw, model_classes, K)
             except Exception as e:
-                # If XGBoost (or any model) fails during CV, skip it and continue
-                if name == "xgb":
-                    print(f"[WARN]  XGBoost failed in fold {fold}: {e}. Continuing without XGBoost.")
-                    continue
-                else:
-                    print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Continuing without this model.")
-                    continue
-            # align width
-            if proba.shape[1] != len(classes):
-                P2 = np.zeros((len(Xv), len(classes)))
-                P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-                s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-                proba = P2 / s
+                # Keep block widths consistent across folds: substitute uniform
+                # probabilities for a failed model instead of dropping columns.
+                print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Using uniform probs for this fold.")
+                proba = np.full((len(Xv), K), 1.0 / K)
             fold_stack.append(proba)
         # concat base probs horizontally
         fold_oof = np.hstack(fold_stack)
         oof_blocks.append((va, fold_oof))
+        oof_valid[va] = True
+
+    if not oof_blocks:
+        print(f"[WARN] Skipping {target_col} - no valid OOF folds")
+        return None
 
     # assemble full OOF in original order
-    oof_pred = np.zeros((len(y_int), sum([len(classes) for _ in base_models])))
+    oof_pred = np.zeros((len(y_int), K * len(base_models)))
     for va_idx, block in oof_blocks:
         oof_pred[va_idx] = block
 
-    # meta-learner on OOF
+    # meta-learner on genuinely out-of-sample rows only
     meta = LogisticRegression(max_iter=2000, n_jobs=-1)
-    meta.fit(oof_pred, y_int)
+    meta.fit(oof_pred[oof_valid], y_int[oof_valid])
 
     # Calibration: use last temporal fold only (true holdout) to avoid in-sample overconfidence.
     # The last fold contains the most recent ~1/n_folds of data — models trained on earlier
@@ -1307,16 +1347,20 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     # confidence distribution to fit against.
     last_fold_id = np.unique(ps.test_fold)[-1]
     cal_mask = ps.test_fold == last_fold_id
-    use_holdout_cal = cal_mask.sum() >= 100  # Fallback to all OOF if too few holdout samples
+    # Require enough samples AND genuine OOF predictions for the whole fold
+    # (a skipped fold leaves zero-filled placeholder rows).
+    use_holdout_cal = cal_mask.sum() >= 100 and bool(oof_valid[cal_mask].all())
 
     if use_holdout_cal:
         cal_oof = oof_pred[cal_mask]
         cal_y = y_int[cal_mask]
         print(f"  [CAL] Holdout calibration on last fold: {cal_mask.sum()} samples")
     else:
-        cal_oof = oof_pred
-        cal_y = y_int
-        print(f"  [CAL] Falling back to full OOF calibration ({len(y_int)} samples, too few holdout)")
+        # Only rows with genuine OOF predictions — fold 0 has zero-filled
+        # placeholders and must not be used to fit a calibrator.
+        cal_oof = oof_pred[oof_valid]
+        cal_y = y_int[oof_valid]
+        print(f"  [CAL] Falling back to full OOF calibration ({oof_valid.sum()} samples, too few holdout)")
 
     if hasattr(meta, "decision_function"):
         decision_scores = meta.decision_function(cal_oof)
@@ -1348,13 +1392,17 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         logits = np.log(np.clip(P_meta_cal, 1e-12, 1-1e-12))
         calibrator = TemperatureScaler().fit(logits, cal_y)
 
-    # Fit base models on FULL data for inference
-    full_stack = []
+    # Fit base models on FULL data for inference.
+    # IMPORTANT: the meta-learner is NOT refit here. Refitting it on the base
+    # models' in-sample predictions (near-perfect for large tree ensembles)
+    # teaches it that base outputs are almost always right, producing extreme
+    # overconfidence at inference — and invalidates the calibrator, which was
+    # fitted against the OOF meta's output distribution. The meta stays as
+    # fitted on genuinely out-of-sample stacked predictions above.
     fitted_bases: Dict[str, object] = {}
     for name, model in base_models.items():
         try:
             if name == "dc":
-                proba = _dc_probs_for_rows(sub, sub, target_col)
                 fitted_bases[name] = "__DC__"
             else:
                 m = model
@@ -1367,25 +1415,12 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 elif name == "bnn" and _HAS_TORCH:
                     m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
                 m.fit(X_all, y_int)
-                proba = m.predict_proba(X_all)
                 fitted_bases[name] = m
         except Exception as e:
-            # If XGBoost (or any model) fails during final fit, skip it and continue
-            if name == "xgb":
-                print(f"[WARN]  XGBoost failed during final fit: {e}. Continuing without XGBoost.")
-                continue
-            else:
-                print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
-                continue
-        # align width
-        if proba.shape[1] != len(classes):
-            P2 = np.zeros((len(X_all), len(classes)))
-            P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-            s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-            proba = P2 / s
-        full_stack.append(proba)
-    full_stack = np.hstack(full_stack)
-    meta.fit(full_stack, y_int)  # refit meta on full stacked features
+            print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
+            # Keep the slot so the stacked-feature width matches the meta:
+            # predict_proba() substitutes uniform probs for missing models.
+            fitted_bases[name] = None
 
     # pack
     return TrainedTarget(
@@ -1410,6 +1445,21 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
         print_speed_info()
 
     df = _load_features()
+
+    # Optional anti-leakage cutoff for honest backtesting: set TRAIN_CUTOFF_DATE
+    # (YYYY-MM-DD) to exclude all matches on/after that date from training.
+    # To evaluate a period honestly, train with the cutoff at the start of the
+    # test period, then run market_backtest over that period.
+    _cutoff = os.environ.get("TRAIN_CUTOFF_DATE", "").strip()
+    if _cutoff:
+        try:
+            _cut_ts = pd.Timestamp(_cutoff)
+            n_before = len(df)
+            df = df[df["Date"] < _cut_ts].reset_index(drop=True)
+            print(f"[CUTOFF] TRAIN_CUTOFF_DATE={_cutoff}: training on {len(df):,}/{n_before:,} rows before cutoff")
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid TRAIN_CUTOFF_DATE '{_cutoff}': {e}")
+
     models: Dict[str, TrainedTarget] = {}
     models_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1482,19 +1532,34 @@ def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> 
 
         try:
             # stacked base predictions
+            K = len(trg.classes_)
             stack_blocks = []
             for name, base in trg.base_models.items():
-                if name == "dc":
+                if base is None:
+                    # Base model failed during final training fit — keep the
+                    # stacked-feature width consistent with uniform probs.
+                    proba = np.full((len(df_future), K), 1.0 / K)
+                elif name == "dc":
                     hist = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
+                    # Only use matches strictly before the fixtures being
+                    # predicted. Harmless for live use (all history is in the
+                    # past) but essential for backtests on historical fixtures —
+                    # otherwise DC parameters are fitted on the very matches
+                    # being "predicted" and on matches after them.
+                    if "Date" in df_future.columns:
+                        _cut = pd.to_datetime(df_future["Date"]).min()
+                        if pd.notna(_cut):
+                            hist = hist[hist["Date"] < _cut]
                     proba = _dc_probs_for_rows(hist, df_future, t)
+                    if proba.shape[1] != K:
+                        P2 = np.zeros((len(df_future), K))
+                        P2[:, :min(K, proba.shape[1])] = proba[:, :min(K, proba.shape[1])]
+                        s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
+                        proba = P2 / s
                 else:
-                    proba = base.predict_proba(Xf)
-                # align width
-                if proba.shape[1] != len(trg.classes_):
-                    P2 = np.zeros((len(df_future), len(trg.classes_)))
-                    P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-                    s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-                    proba = P2 / s
+                    raw = base.predict_proba(Xf)
+                    model_classes = getattr(base, "classes_", np.arange(raw.shape[1]))
+                    proba = _align_proba_by_classes(raw, model_classes, K)
                 stack_blocks.append(proba)
             S = np.hstack(stack_blocks)
             # meta + calibration

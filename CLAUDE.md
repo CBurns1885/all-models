@@ -2,7 +2,41 @@
 
 ---
 
-## ⚡ SESSION STATE — READ THIS FIRST (updated 2026-07-24)
+## 🚨 SESSION STATE — FULL AUDIT + FIXES (2026-07-24, branch claude/betting-models-review-9hgm6c)
+
+### ⚠️ ALL PREVIOUS BACKTEST NUMBERS ARE INVALID — read before betting anything
+A full code audit found the "walk-forward backtest" was in-sample three ways:
+1. ML models were trained on ALL data including the backtest weeks (no cutoff) — 99% accuracies were memorisation.
+2. Dixon-Coles was fitted on the full parquet including the test matches (and their recent form).
+3. models.py refit the stacking meta-learner on in-sample base predictions (line ~1388), destroying calibration.
+Also: CV "time" folds were league blocks (features sorted League,Date, not Date), and Cnsv/fair ROI is circular (odds derived from the model's own probability — a perfectly calibrated model scores exactly −10%).
+**Everything tuned on those numbers is stale: tuning_best_params.json, MARKET_MIN_CONF, league_thresholds.json, league_breakdown.csv, blend_weights.json.**
+
+### Fixes applied this session (all code, no data run yet)
+- **models.py**: global Date sort; forward-only OOF folds (train strictly on past); meta-learner fitted on OOF only (in-sample refit REMOVED); calibration holdout guarded; probabilities aligned by model.classes_ (not position); DC base in predict_proba now fits only on matches before the fixtures; `TRAIN_CUTOFF_DATE` env var supported for honest backtests.
+- **dc_predict.py**: DC fits only on matches strictly before the earliest fixture (kills backtest leak, no-op live).
+- **market_backtest.py**: prints a loud IN-SAMPLE warning unless models were trained with a cutoff ≤ test start; fair-ROI documented as circular calibration yardstick.
+- **features.py**: table-position snapshot now ranks the FULL league table as-of each date (was: only the teams playing that day — Home_TablePos/IsTopSix/IsBottom3 were noise). Requires `build_features --force` rebuild.
+- **predict.py**: cross-market constraints replaced with valid probability bounds (BTTS ≤ OU0.5/OU1.5, Fréchet bounds vs team-goals; no more forced 0.98/hard 0-1 assignments); ML-only markets no longer double-compressed by dc_temperature in blending; Poisson adjustment uses dynamic league profiles; MaxConfidence excludes OU_0_5 and untrained (all-zero) markets; high-confidence combined report uses one source (BLEND>DC>P) instead of max-across-sources; kickoff Time carried through to outputs.
+- **blending.py**: BLEND_WEIGHTS_JSON now the absolute path from config (relative path silently disabled blending from other CWDs).
+- **incremental_trainer.py**: after any retrain — deletes stale tuning_preds_cache.parquet, auto re-learns blend weights, prints reminder to re-run auto_tune/thresholds; records train_cutoff_date + data max date in training_settings.json.
+- **run_weekly.py**: hardcoded API key + emails REMOVED (key must be rotated — it was committed to GitHub); steps 1–4 are now critical (pipeline aborts instead of continuing with stale artifacts).
+- **config.py / api_client.py**: `season_for_league()` — NOR/SWE are calendar-year seasons (the July rule fetched the wrong season Jan–Jun); upcoming fixtures now include a real kickoff `Time` column.
+- **betfair/betfair_ltd.py**: CRITICAL — mis-indented `break` meant the draw price was only found if the draw was the first runner: goal detection/hedge/stop-loss never fired (unhedged lay liability). Fixed. Lay Kelly now sizes LIABILITY not stake (was overbetting risk ~3× at odds 4). Real kickoff times used. Paths fixed for repo layout.
+- **betfair/betfair_placer.py**: paths fixed (betfair/outputs → outputs/); risk state (daily exposure/PnL/pause) persisted to outputs/betfair_risk_state.json across invocations; Kelly uses commission-net odds; drawdown scaling ramps smoothly; --live/--dry-run mutually exclusive; uses raw Prob column; O/U runner names ("Over 2.5 Goals") resolved via find_runner_selection.
+- **betfair/betfair_markets.py**: fuzzy match threshold raised to 0.75 + warning; team-map auto-learn only from EXACT matches (fuzzy matches no longer poison betfair_team_map.json).
+- **tools/best_bets.py**: paths fixed; 0.9047619 fallback fixtures BLOCKED from best bets; adds numeric Prob + Time columns for the placer.
+
+### ⚠️ REQUIRED next steps (in order) before trusting any output
+1. **ROTATE the API-Football key** (the old one was committed in run_weekly.py) and put the new one in `.env` only.
+2. `py -c "from features import build_features; build_features(force=True)"` — table-position features changed.
+3. Honest backtest: `TRAIN_CUTOFF_DATE=<test-start> py run_weekly.py --speed full --non-interactive` then `py market_backtest.py --weeks N`. Expect accuracy/ROI FAR below the old (leaked) tables — that's the true baseline.
+4. Retrain for live (no cutoff), which auto-refreshes blend weights; then re-run auto_tune.py (delete cache happens automatically) and threshold_analysis.py against honest numbers.
+5. Only then re-derive MARKET_MIN_CONF / league_thresholds.json; the current values in market_backtest.py are from leaked data.
+
+---
+
+## ⚡ PREVIOUS SESSION STATE (updated 2026-07-24, morning)
 
 ### What was done this session (2026-07-24):
 

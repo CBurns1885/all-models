@@ -446,6 +446,35 @@ class MarketBacktester:
             df_lb.to_csv(lb_path, index=False)
             print(f"\n[OK] Saved league breakdown -> {lb_path}")
 
+    def _warn_if_models_overlap_test_period(self, test_start_date) -> None:
+        """Loudly warn when saved models were trained on the test period."""
+        import json as _json
+        from config import MODEL_ARTIFACTS_DIR
+        settings_file = MODEL_ARTIFACTS_DIR / "training_settings.json"
+        cutoff = None
+        try:
+            if settings_file.exists():
+                settings = _json.loads(settings_file.read_text())
+                raw = settings.get("train_cutoff_date") or ""
+                if raw:
+                    cutoff = pd.Timestamp(raw)
+        except Exception:
+            pass
+
+        if cutoff is not None and cutoff <= pd.Timestamp(test_start_date):
+            print(f"[OK] Models trained with cutoff {str(cutoff)[:10]} <= test start — evaluation is out-of-sample")
+            return
+
+        print("\n" + "!" * 70)
+        print("!! WARNING: IN-SAMPLE BACKTEST — RESULTS ARE NOT TRUSTWORTHY")
+        print("!! The saved ML models appear to have been trained on data that")
+        print("!! includes this test period. Accuracy/ROI below will be inflated")
+        print("!! by memorisation and MUST NOT be used for thresholds or betting.")
+        print("!! For an honest evaluation:")
+        print(f"!!   TRAIN_CUTOFF_DATE={str(pd.Timestamp(test_start_date))[:10]} py run_weekly.py --speed full --non-interactive")
+        print("!!   (or set the env var before train_all_targets), then re-run this backtest.")
+        print("!" * 70 + "\n")
+
     def run_historical_backtest(self, by_league: bool = False) -> pd.DataFrame:
         """
         Run walk-forward backtest on historical data
@@ -482,6 +511,17 @@ class MarketBacktester:
         ].copy()
 
         print(f"[OK] Found {len(test_matches)} completed matches in test period")
+
+        # ------------------------------------------------------------------
+        # HONESTY CHECK: this backtest predicts historical matches with the
+        # CURRENTLY SAVED ML models. If those models were trained on data that
+        # includes the test period, every number below is IN-SAMPLE and will
+        # be wildly optimistic (tree ensembles memorise their training rows).
+        # Train with TRAIN_CUTOFF_DATE=<test start> before running this.
+        # (Dixon-Coles is handled automatically — dc_predict/models.py now fit
+        # DC only on matches before the fixtures being priced.)
+        # ------------------------------------------------------------------
+        self._warn_if_models_overlap_test_period(test_start_date)
 
         if len(test_matches) == 0:
             print("[ERROR] No completed matches in test period")
@@ -749,10 +789,17 @@ class MarketBacktester:
                      market_name: str = None) -> dict:
         """
         Calculate ROI using actual bookmaker odds where available,
-        falling back to fair odds (1/probability) otherwise.
+        falling back to "fair odds" derived from the model's own probability.
 
-        Returns dict with roi_actual (bookmaker odds), roi_fair (model odds),
-        and odds_coverage (fraction with real odds).
+        IMPORTANT: roi_fair is CIRCULAR — the odds are (1/model_prob)*0.9, so
+        it contains no market information and only measures calibration (a
+        perfectly calibrated model scores exactly -10%). Use it as a relative
+        calibration yardstick, never as evidence of betting edge. Only
+        roi_actual (real bookmaker odds) reflects genuine edge, and only once
+        odds coverage is meaningful.
+
+        Returns dict with roi_actual (bookmaker odds), roi_fair (circular
+        calibration yardstick), and odds_coverage (fraction with real odds).
         """
         from odds_utils import get_odds_for_prediction
 

@@ -17,7 +17,10 @@ def _load_features():
     return df.sort_values(['League', 'Date'])
 
 
-BLEND_WEIGHTS_JSON = Path("models/blend_weights.json")
+# Absolute path from config — a relative Path("models/...") here made blend
+# weights silently "missing" (no BLEND_* columns) whenever scripts ran from a
+# different working directory. config.py is the single source of truth.
+from config import BLEND_WEIGHTS_JSON
 
 # Map model targets -> output column name builder
 OU_LINES = ["0_5","1_5","2_5","3_5","4_5","5_5"]
@@ -112,6 +115,14 @@ def learn_blend_weights() -> Dict[str, float]:
     df = _load_features()
     models = load_trained_targets()
     weights: Dict[str, float] = {}
+
+    # NOTE: the "validation" ML predictions below are only genuinely held out
+    # if the models were trained with TRAIN_CUTOFF_DATE at (or before) the
+    # start of the last-20% window. Models trained on ALL data have already
+    # seen these rows, which biases alpha. For a leak-free procedure use
+    # learn_blend_weights_temporal() with models trained under a cutoff.
+    print("  [NOTE] Blend alphas are only unbiased if models were trained with a date cutoff")
+    print("         before the validation window (see TRAIN_CUTOFF_DATE / learn_blend_weights_temporal).")
 
     # Use only the most recent 20% of data as validation for blend weights
     # This prevents in-sample overfitting of the blend alpha

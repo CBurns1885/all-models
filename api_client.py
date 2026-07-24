@@ -477,9 +477,10 @@ def download_upcoming_fixtures(leagues: List[str] = None, days_ahead: int = 7) -
 
         league_id = API_LEAGUE_MAP[league_code]
 
-        # Determine current season (e.g., 2025 for 2025-2026 season)
-        current_month = today.month
-        current_season = today.year if current_month >= 7 else today.year - 1
+        # Determine current season per league — calendar-year competitions
+        # (NOR, SWE) run spring-autumn and are labelled by that same year.
+        from config import season_for_league
+        current_season = season_for_league(league_code, today)
 
         params = {
             'league': league_id,
@@ -498,8 +499,12 @@ def download_upcoming_fixtures(leagues: List[str] = None, days_ahead: int = 7) -
                 fixture_data = fixture.get('fixture', {})
                 teams = fixture.get('teams', {})
 
+                iso_date = fixture_data.get('date', '')
                 all_fixtures.append({
-                    'Date': fixture_data.get('date', '')[:10],
+                    'Date': iso_date[:10],
+                    # Real kickoff time (HH:MM) — the betting layer needs this
+                    # for in-play timing; never assume a default kickoff.
+                    'Time': iso_date[11:16] if len(iso_date) >= 16 else '',
                     'League': league_code,
                     'HomeTeam': teams.get('home', {}).get('name'),
                     'AwayTeam': teams.get('away', {}).get('name'),

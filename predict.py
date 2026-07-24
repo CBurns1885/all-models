@@ -438,25 +438,27 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
                 row[f'P_OU_{curr_line}_U'] = 1 - row[curr_col]
                 row[f'P_OU_{next_line}_U'] = 1 - row[next_col]
     
-    # 2. BTTS and O/U 0.5 logical consistency
-    if 'P_BTTS_Y' in row and 'P_OU_0_5_U' in row:
-        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_U']):
-            # BTTS=Yes implies Over 0.5 must be very high
-            if row['P_BTTS_Y'] > 0.7:
-                row['P_OU_0_5_U'] = min(row['P_OU_0_5_U'], 0.02)
-                row['P_OU_0_5_O'] = max(row['P_OU_0_5_O'], 0.98)
-            
-            # Under 0.5 high means BTTS=Yes must be zero
-            if row['P_OU_0_5_U'] > 0.5:
-                row['P_BTTS_Y'] = 0.0
-                row['P_BTTS_N'] = 1.0
-    
-    # 3. BTTS and O/U 1.5 consistency
+    # 2. BTTS and O/U 0.5 logical consistency.
+    # BTTS is a SUBSET of Over 0.5 (both scoring => at least one goal), so the
+    # only valid implication is P(Over 0.5) >= P(BTTS). The previous version
+    # forced Over 0.5 to 0.98 whenever BTTS > 0.7 and hard-set BTTS to 0/1 —
+    # unjustified distortions of calibrated probabilities.
+    if 'P_BTTS_Y' in row and 'P_OU_0_5_O' in row:
+        if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_0_5_O']):
+            if row['P_OU_0_5_O'] < row['P_BTTS_Y']:
+                row['P_OU_0_5_O'] = row['P_BTTS_Y']
+                row['P_OU_0_5_U'] = 1 - row['P_OU_0_5_O']
+            # Conversely BTTS cannot exceed P(Over 0.5)
+            if row['P_BTTS_Y'] > row['P_OU_0_5_O']:
+                row['P_BTTS_Y'] = row['P_OU_0_5_O']
+                row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
+
+    # 3. BTTS and O/U 1.5 consistency: BTTS implies >= 2 goals, so
+    # P(Over 1.5) >= P(BTTS) exactly (no 0.9 fudge factor).
     if 'P_BTTS_Y' in row and 'P_OU_1_5_O' in row:
         if pd.notna(row['P_BTTS_Y']) and pd.notna(row['P_OU_1_5_O']):
-            # BTTS=Yes requires at least 2 goals (Over 1.5)
-            if row['P_BTTS_Y'] > 0.6:
-                row['P_OU_1_5_O'] = max(row['P_OU_1_5_O'], row['P_BTTS_Y'] * 0.9)
+            if row['P_OU_1_5_O'] < row['P_BTTS_Y']:
+                row['P_OU_1_5_O'] = row['P_BTTS_Y']
                 row['P_OU_1_5_U'] = 1 - row['P_OU_1_5_O']
     
     # 4. 1X2 probabilities sum to 1.0
@@ -473,25 +475,42 @@ def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
         if pd.notna(row['P_CS_0_0']) and pd.notna(row['P_OU_0_5_U']):
             row['P_CS_0_0'] = min(row['P_CS_0_0'], row['P_OU_0_5_U'])
     
-    # 6. Team goals and BTTS consistency
+    # 6. Team goals and BTTS consistency.
+    # Valid bounds without an independence assumption (Fréchet):
+    #   P(BTTS) <= min(P(home scores), P(away scores))
+    #   P(BTTS) >= P(home scores) + P(away scores) - 1
+    # The old version pushed BTTS UP toward the independence product x0.85,
+    # which is not a valid lower bound when goals are negatively correlated.
     if all(col in row for col in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
         if all(pd.notna(row[col]) for col in ['P_BTTS_Y', 'P_HomeTG_0_5_O', 'P_AwayTG_0_5_O']):
-            # BTTS requires both teams to score
-            min_btts = row['P_HomeTG_0_5_O'] * row['P_AwayTG_0_5_O']
-            row['P_BTTS_Y'] = max(row['P_BTTS_Y'], min_btts * 0.85)
-            row['P_BTTS_N'] = 1 - row['P_BTTS_Y']
-    
+            upper = min(row['P_HomeTG_0_5_O'], row['P_AwayTG_0_5_O'])
+            lower = max(0.0, row['P_HomeTG_0_5_O'] + row['P_AwayTG_0_5_O'] - 1.0)
+            clipped = min(max(row['P_BTTS_Y'], lower), upper)
+            if clipped != row['P_BTTS_Y']:
+                row['P_BTTS_Y'] = clipped
+                row['P_BTTS_N'] = 1 - clipped
+
     return row
 
-def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: float = None, league: str = None) -> pd.Series:
-    """Apply Poisson distribution for goal-based markets"""
+def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: float = None,
+                             league: str = None, league_profiles: Dict = None) -> pd.Series:
+    """Apply Poisson distribution for goal-based markets.
+
+    Prefers per-team rolling xG; falls back to the DYNAMIC league profile
+    (computed from historical data) and only then to the static table.
+    """
     row = row.copy()
-    
+
     # Use league-specific or default xG
-    if league and league in LEAGUE_PROFILES:
-        profile = LEAGUE_PROFILES[league]
+    profile = None
+    if league:
+        if league_profiles and league in league_profiles:
+            profile = league_profiles[league]      # data-driven (preferred)
+        elif league in LEAGUE_PROFILES:
+            profile = LEAGUE_PROFILES[league]      # static fallback
+    if profile:
         total_expected = profile['avg_goals']
-        home_share = 0.54  # Home advantage ~54% of goals
+        home_share = float(TUNING_OVERRIDES.get('poisson_home_share', 0.54))
         home_xg = home_xg or (total_expected * home_share)
         away_xg = away_xg or (total_expected * (1 - home_share))
     else:
@@ -1077,7 +1096,8 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
         row_series = pd.Series(row)
         
         # Apply Poisson adjustments using per-team rolling xG when available
-        row_series = apply_poisson_adjustment(row_series, home_xg=_home_xg, away_xg=_away_xg, league=league)
+        row_series = apply_poisson_adjustment(row_series, home_xg=_home_xg, away_xg=_away_xg,
+                                              league=league, league_profiles=league_profiles)
         
         # Enforce cross-market constraints
         row_series = enforce_cross_market_constraints(row_series)
@@ -1281,13 +1301,22 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             ml_cols, dc_cols = pair_cols_for_target(target)
             if not ml_cols:
                 continue
-            
+
             missing_ml = [c for c in ml_cols if c not in out.columns]
             missing_dc = [c for c in dc_cols if c not in out.columns]
-            
+
             if missing_ml or missing_dc:
                 continue
-            
+
+            # ML-only markets (cards/corners/HTFT) have dc_cols == ml_cols:
+            # there is nothing to blend, and applying dc_temperature to the ML
+            # probs here would double-compress them on top of the
+            # temperature_binary scaling already applied during calibration.
+            if dc_cols == ml_cols:
+                blend_cols = [c.replace("P_", "BLEND_") for c in ml_cols]
+                out.loc[idx, blend_cols] = out.loc[idx, ml_cols].values.astype(np.float64)
+                continue
+
             # Adjust alpha based on league quality, with per-market ML weight cap
             global_cap = TUNING_OVERRIDES.get('ml_weight_cap', 0.85)
             market_cap_key = f'ml_weight_cap_{target.replace("y_", "").lower()}'
@@ -1370,12 +1399,36 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     """
     print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 + BTTS >= 90%)...")
 
-    # Define the target markets and their probability columns
+    # One source per market, in preference order BLEND > DC > P. Taking the
+    # max across ALL sources (as before) cherry-picks whichever model happens
+    # to be most confident per row, systematically inflating "90%+" picks.
+    def _pick_source(df_cols, candidates_by_source):
+        for source_cols in candidates_by_source:
+            if all(c in df_cols for c in source_cols):
+                return source_cols
+        return []
+
     markets = {
-        '1X2': ['DC_1X2_H', 'DC_1X2_D', 'DC_1X2_A', 'BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A', 'P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
-        'OU_2_5': ['DC_OU_2_5_O', 'DC_OU_2_5_U', 'BLEND_OU_2_5_O', 'BLEND_OU_2_5_U', 'P_OU_2_5_O', 'P_OU_2_5_U'],
-        'OU_1_5': ['DC_OU_1_5_O', 'DC_OU_1_5_U', 'BLEND_OU_1_5_O', 'BLEND_OU_1_5_U', 'P_OU_1_5_O', 'P_OU_1_5_U'],
-        'BTTS': ['DC_BTTS_Y', 'DC_BTTS_N', 'BLEND_BTTS_Y', 'BLEND_BTTS_N', 'P_BTTS_Y', 'P_BTTS_N'],
+        '1X2': _pick_source(df.columns, [
+            ['BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A'],
+            ['DC_1X2_H', 'DC_1X2_D', 'DC_1X2_A'],
+            ['P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
+        ]),
+        'OU_2_5': _pick_source(df.columns, [
+            ['BLEND_OU_2_5_O', 'BLEND_OU_2_5_U'],
+            ['DC_OU_2_5_O', 'DC_OU_2_5_U'],
+            ['P_OU_2_5_O', 'P_OU_2_5_U'],
+        ]),
+        'OU_1_5': _pick_source(df.columns, [
+            ['BLEND_OU_1_5_O', 'BLEND_OU_1_5_U'],
+            ['DC_OU_1_5_O', 'DC_OU_1_5_U'],
+            ['P_OU_1_5_O', 'P_OU_1_5_U'],
+        ]),
+        'BTTS': _pick_source(df.columns, [
+            ['BLEND_BTTS_Y', 'BLEND_BTTS_N'],
+            ['DC_BTTS_Y', 'DC_BTTS_N'],
+            ['P_BTTS_Y', 'P_BTTS_N'],
+        ]),
     }
 
     rows = []
@@ -1914,6 +1967,14 @@ def predict_week(fixtures_csv: Path) -> Path:
     for col in ID_COLS:
         if col in df_future.columns:
             df_out[col] = df_future[col].values[:len(df_out)]
+
+    # Carry real kickoff time through to outputs — the betting layer needs it
+    # for in-play timing instead of assuming a default kickoff hour.
+    if "Time" in fx.columns:
+        df_out = df_out.merge(
+            fx[ID_COLS + ["Time"]].drop_duplicates(subset=ID_COLS),
+            on=ID_COLS, how="left",
+        )
     
     # Add DC predictions
     log_header("GENERATE DC PREDICTIONS")
@@ -1948,10 +2009,16 @@ def predict_week(fixtures_csv: Path) -> Path:
     log_header("CALCULATE CONFIDENCE")
     df_out = calculate_confidence_scores(df_out)
 
-    # Calculate max probability across all P_ columns for filtering
-    p_cols = [col for col in df_out.columns if col.startswith('P_')]
+    # Max probability across MEANINGFUL markets for filtering.
+    # Excludes OU_0_5 (Over 0.5 is ~97% in every match, which previously made
+    # MaxConfidence ≈ 0.97 for all rows and useless as a filter) and untrained
+    # markets (whose columns are all-zero placeholders).
+    p_cols = [col for col in df_out.columns
+              if col.startswith('P_') and not col.startswith('P_OU_0_5')]
     if p_cols:
-        df_out['MaxConfidence'] = df_out[p_cols].max(axis=1)
+        nonzero = [c for c in p_cols if pd.to_numeric(df_out[c], errors='coerce').fillna(0).abs().sum() > 0]
+        if nonzero:
+            df_out['MaxConfidence'] = df_out[nonzero].max(axis=1)
 
     # Sort by Date, then League for better readability
     if 'Date' in df_out.columns:

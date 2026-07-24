@@ -34,10 +34,16 @@ if hasattr(sys.stdout, "buffer"):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent
+# This file lives in betfair/ — outputs/ is at the repo root, one level up.
+ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 BET_LOG = OUTPUTS / "betfair_bets.csv"
+RISK_STATE = OUTPUTS / "betfair_risk_state.json"
 COMMISSION = 0.05          # Betfair standard commission rate
+
+# Allow sibling imports (betfair_auth, betfair_markets) regardless of CWD
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 # ---------------------------------------------------------------------------
@@ -50,14 +56,18 @@ def kelly_stake(
     bank: float,
     fraction: float = 0.25,
     max_stake: float = 50.0,
+    commission: float = COMMISSION,
 ) -> float:
     """
-    Quarter-Kelly stake sizing.
+    Quarter-Kelly stake sizing on NET odds (exchange commission included).
 
-    Kelly fraction = (prob * (price - 1) - (1 - prob)) / (price - 1)
+    Winnings on the exchange are (price - 1) * (1 - commission) per unit
+    staked, so Kelly must use that as b — using gross odds oversizes stakes.
     Negative Kelly = no bet.
     """
-    b = back_price - 1.0          # net decimal odds
+    b = (back_price - 1.0) * (1.0 - commission)   # net decimal odds after commission
+    if b <= 0:
+        return 0.0
     q = 1.0 - probability
     kelly_f = (probability * b - q) / b
     if kelly_f <= 0:
@@ -88,6 +98,38 @@ class BettingRiskManager:
         self.max_daily_exposure = bank * max_daily_exposure_pct
         self.drawdown_scale_threshold = drawdown_scale_threshold
         self.paused = False
+        # Daily limits must survive across script invocations — an autonomous
+        # scheduler re-running this hourly would otherwise get a fresh budget
+        # every run. State is persisted per UTC day in RISK_STATE.
+        self._load_state()
+
+    def _today(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _load_state(self):
+        try:
+            if RISK_STATE.exists():
+                state = json.loads(RISK_STATE.read_text())
+                if state.get("date") == self._today():
+                    self.daily_exposure = float(state.get("daily_exposure", 0.0))
+                    self.realised_pnl = float(state.get("realised_pnl", 0.0))
+                    self.paused = bool(state.get("paused", False))
+                    logger.info("Loaded risk state: exposure=%.2f pnl=%.2f paused=%s",
+                                self.daily_exposure, self.realised_pnl, self.paused)
+        except Exception as e:
+            logger.warning("Could not load risk state (%s) — starting fresh", e)
+
+    def save_state(self):
+        try:
+            RISK_STATE.parent.mkdir(parents=True, exist_ok=True)
+            RISK_STATE.write_text(json.dumps({
+                "date": self._today(),
+                "daily_exposure": round(self.daily_exposure, 2),
+                "realised_pnl": round(self.realised_pnl, 2),
+                "paused": self.paused,
+            }, indent=2))
+        except Exception as e:
+            logger.warning("Could not save risk state: %s", e)
 
     @property
     def current_equity(self) -> float:
@@ -121,10 +163,13 @@ class BettingRiskManager:
             if proposed_stake < 2.0:
                 return 0.0, "daily_exposure_cap"
 
-        # Drawdown scaling (reduce stakes as we fall)
+        # Drawdown scaling: ramp linearly from 100% at the threshold down to
+        # 25% at 3x the threshold (the old formula jumped straight to 25%).
         dd = self.drawdown
-        if dd < -self.drawdown_scale_threshold:
-            scale = max(0.25, 1.0 + dd / self.drawdown_scale_threshold)
+        thr = self.drawdown_scale_threshold
+        if dd < -thr:
+            excess = abs(dd) - thr
+            scale = max(0.25, 1.0 - (excess / (2 * thr)) * 0.75)
             proposed_stake = round(proposed_stake * scale, 2)
             logger.warning("Drawdown scaling %.0f%% applied (dd=%.1f%%)", scale * 100, dd * 100)
 
@@ -135,12 +180,14 @@ class BettingRiskManager:
 
     def record_exposure(self, stake: float):
         self.daily_exposure += stake
+        self.save_state()
 
     def settle(self, stake: float, back_price: float, won: bool):
         if won:
             self.realised_pnl += stake * (back_price - 1) * (1 - COMMISSION)
         else:
             self.realised_pnl -= stake
+        self.save_state()
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +216,7 @@ def run_placer(
     top_n: int = 50,
 ):
     from betfair_auth import get_client
-    from betfair_markets import find_market, get_best_back_price, OUTCOME_TO_RUNNER
+    from betfair_markets import find_market, get_best_back_price, find_runner_selection
 
     client = get_client(live=live_key)
     risk = BettingRiskManager(bank=bank)
@@ -197,16 +244,34 @@ def run_placer(
     for _, bet in bets.iterrows():
         market_name = bet["Market"]
         outcome     = bet["Bet"]       # "Home", "Draw", "Away", "Yes", "No", "Over", "Under"
-        confidence  = float(str(bet["Confidence"]).strip("%")) / 100
+        # Prefer the raw numeric probability if best_bets.csv provides it;
+        # fall back to parsing the display percentage.
+        if "Prob" in bet.index and bet["Prob"] == bet["Prob"]:
+            confidence = float(bet["Prob"])
+        else:
+            confidence = float(str(bet["Confidence"]).strip("%")) / 100
         date_str    = str(bet["Date"])
         home        = str(bet["Home"])
         away        = str(bet["Away"])
         league      = str(bet["League"])
 
-        # Parse kickoff datetime (assume UTC noon if no time)
+        if not (0.0 < confidence < 1.0):
+            logger.warning("Suspicious confidence %.4f for %s v %s — skipping", confidence, home, away)
+            skipped += 1
+            continue
+
+        # Parse kickoff datetime (use real Time column when present; 12:00 UTC fallback)
+        kickoff = None
         try:
-            kickoff = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=12, tzinfo=timezone.utc)
-        except ValueError:
+            kickoff = datetime.strptime(date_str[:10], "%Y-%m-%d").replace(hour=12, tzinfo=timezone.utc)
+            time_val = bet.get("Time") if hasattr(bet, "get") else None
+            if time_val is not None and str(time_val) not in ("", "nan", "NaT", "None"):
+                parts = str(time_val).strip().split(":")
+                kickoff = kickoff.replace(hour=int(parts[0]),
+                                          minute=int(parts[1]) if len(parts) > 1 else 0)
+        except (ValueError, IndexError):
+            pass
+        if kickoff is None:
             logger.warning("Could not parse date: %s", date_str)
             continue
 
@@ -221,22 +286,10 @@ def run_placer(
             skipped += 1
             continue
 
-        # Find the runner for our predicted outcome
-        bf_runner_name = OUTCOME_TO_RUNNER.get(outcome)
-        if bf_runner_name is None:
-            logger.debug("No runner mapping for outcome: %s", outcome)
-            skipped += 1
-            continue
-
-        selection_id = runner_map.get(bf_runner_name)
+        # Find the runner for our predicted outcome (handles "Over 2.5 Goals" etc.)
+        selection_id = find_runner_selection(runner_map, outcome)
         if selection_id is None:
-            # Try case-insensitive match
-            for k, v in runner_map.items():
-                if k.lower() == bf_runner_name.lower():
-                    selection_id = v
-                    break
-        if selection_id is None:
-            logger.debug("Runner '%s' not in market %s: %s", bf_runner_name, market_id, list(runner_map.keys()))
+            logger.debug("Runner for outcome '%s' not in market %s: %s", outcome, market_id, list(runner_map.keys()))
             skipped += 1
             continue
 
@@ -328,9 +381,12 @@ if __name__ == "__main__":
     parser.add_argument("--min-edge",     type=float, default=0.05,  help="Min edge after commission (0.05 = 5%%)")
     parser.add_argument("--kelly",        type=float, default=0.25,  help="Kelly fraction (0.25 = quarter-Kelly)")
     parser.add_argument("--top",          type=int,   default=50,    help="Use top N bets from best_bets.csv")
-    parser.add_argument("--dry-run",      action="store_true", default=True,  help="Simulate without placing (default)")
+    parser.add_argument("--dry-run",      action="store_true", help="Simulate without placing (default unless --live)")
     parser.add_argument("--live",         action="store_true", help="Place real bets (use live key)")
     args = parser.parse_args()
+
+    if args.live and args.dry_run:
+        parser.error("--live and --dry-run are mutually exclusive")
 
     run_placer(
         bank=args.bank,

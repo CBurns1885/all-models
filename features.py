@@ -974,15 +974,47 @@ def _add_table_position_features(df: pd.DataFrame) -> pd.DataFrame:
     df['Away_PPG_Season'] = np.where(df['Away_SeasonGames'] > 0,
                                       df['Away_SeasonPts'] / df['Away_SeasonGames'], 0.0)
 
-    # Table position: rank within each League+Season+Date by (Pts desc, GD desc, GF desc)
-    # Use the snapshot of all teams' cumulative stats at each match date
-    snapshot = latest.sort_values(['League', 'Season', 'Date', 'CumPts', 'CumGD', 'CumGF'],
-                                   ascending=[True, True, True, False, False, False])
-    snapshot['TablePos'] = snapshot.groupby(['League', 'Season', 'Date']).cumcount() + 1
+    # Table position: rank the FULL league table as of strictly before each
+    # match date. The previous implementation grouped by League+Season+Date,
+    # which ranked only the teams that happened to PLAY on that exact date —
+    # e.g. "2nd of the 4 teams playing on Tuesday" — so Home_TablePos,
+    # IsTopSix, IsBottom3 etc. were noise rather than real table positions.
+    #
+    # Approach per league-season: pivot each team's post-match cumulative
+    # stats by date, forward-fill (teams keep their standing on days they
+    # don't play), shift one match-date back (state BEFORE that date), then
+    # rank across all teams by Pts desc, GD desc, GF desc.
+    latest['PostPts'] = latest['CumPts'] + latest['Pts']
+    latest['PostGF']  = latest['CumGF'] + latest['GF']
+    latest['PostGA']  = latest['CumGA'] + latest['GA']
 
-    # How many teams in this league-season (for % position calc)
-    team_counts = snapshot.groupby(['League', 'Season'])['Team'].nunique().rename('NumTeams')
-    snapshot = snapshot.merge(team_counts, on=['League', 'Season'], how='left')
+    snap_frames = []
+    for (lg, season), grp in latest.groupby(['League', 'Season'], sort=False):
+        pts = grp.pivot_table(index='Date', columns='Team', values='PostPts', aggfunc='last')
+        gf  = grp.pivot_table(index='Date', columns='Team', values='PostGF',  aggfunc='last')
+        ga  = grp.pivot_table(index='Date', columns='Team', values='PostGA',  aggfunc='last')
+        if pts.empty:
+            continue
+        pts = pts.sort_index().ffill().shift(1).fillna(0.0)
+        gf  = gf.sort_index().ffill().shift(1).fillna(0.0)
+        ga  = ga.sort_index().ffill().shift(1).fillna(0.0)
+        gd  = gf - ga
+        # Composite ranking key (Pts >> GD >> GF); offsets keep GD positive
+        score = pts * 1e8 + (gd + 1000.0) * 1e4 + gf
+        pos = score.rank(axis=1, method='first', ascending=False)
+        n_teams = pts.shape[1]
+        long_pos = pos.stack().rename('TablePos').reset_index()
+        long_pos.columns = ['Date', 'Team', 'TablePos']
+        long_pos['League'] = lg
+        long_pos['Season'] = season
+        long_pos['NumTeams'] = float(n_teams)
+        snap_frames.append(long_pos)
+
+    if not snap_frames:
+        print("   [TABLE] No league-season groups to rank — skipping table positions")
+        return df
+
+    snapshot = pd.concat(snap_frames, ignore_index=True)
     snapshot['TablePosPct'] = snapshot['TablePos'] / snapshot['NumTeams']
 
     snap_idx = snapshot.set_index(['League', 'Season', 'Date', 'Team'])[
