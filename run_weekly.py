@@ -289,7 +289,7 @@ print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}
 # RUN PIPELINE WITH ERROR RECOVERY
 # ============================================================================
 
-TOTAL_STEPS = 12  # Updated to include market splitting step
+TOTAL_STEPS = 13  # Updated to include picks page step
 errors = []
 
 def run_step(step_num, step_name, func, *args, **kwargs):
@@ -494,8 +494,21 @@ try:
 
     run_step(9, "SPLIT BY MARKET", step9)
 
-    # Step 10: Update accuracy database
+    # Step 10: Generate picks page
     def step10():
+        from picks_page import generate_picks_page
+        csv_path = OUTPUT_DIR / "weekly_bets_full.csv"
+        if not csv_path.exists():
+            csv_path = OUTPUT_DIR / "weekly_bets.csv"
+        if csv_path.exists():
+            generate_picks_page(csv_path, OUTPUT_DIR)
+        else:
+            raise FileNotFoundError("weekly_bets*.csv not found")
+
+    run_step(10, "GENERATE PICKS PAGE", step10)
+
+    # Step 11: Update accuracy database
+    def step11_acc():
         try:
             from accuracy_tracker import update_accuracy_database
             update_accuracy_database()
@@ -503,10 +516,10 @@ try:
         except Exception as e:
             print(f"[WARN] Accuracy update skipped: {e}")
 
-    run_step(10, "UPDATE ACCURACY DB", step10)
+    run_step(11, "UPDATE ACCURACY DB", step11_acc)
 
-    # Step 11: Archive outputs
-    def step11():
+    # Step 12: Archive outputs
+    def step12():
         import shutil
         from datetime import datetime
 
@@ -520,6 +533,7 @@ try:
             "top50_weighted.csv",
             "ou_analysis.html",
             "ou_analysis.csv",
+            "picks_page.html",
             "accumulators_safe.html",
             "accumulators_mixed.html",
             "accumulators_aggressive.html",
@@ -541,10 +555,10 @@ try:
 
         print(f"[OK] Archived {archived_count} files to {archive_dir}")
 
-    run_step(11, "ARCHIVE OUTPUTS", step11)
+    run_step(12, "ARCHIVE OUTPUTS", step12)
 
-    # Step 12: Open outputs folder
-    def step12():
+    # Step 13: Open outputs folder
+    def step13():
         import subprocess
         import platform
 
@@ -553,7 +567,7 @@ try:
         elif platform.system() == "Darwin":
             subprocess.run(["open", str(OUTPUT_DIR)], check=False)
 
-    run_step(12, "OPEN OUTPUTS FOLDER", step12)
+    run_step(13, "OPEN OUTPUTS FOLDER", step13)
     
     # ========================================================================
     # SUCCESS SUMMARY
@@ -576,6 +590,7 @@ try:
     print("   * top50_weighted.html - Top picks (weighted)")
     
     print("\n[FOOTBALL] Specialized Reports:")
+    print("   * picks_page.html - All picks by market (grouped dashboard)")
     print("   * ou_analysis.html - Over/Under analysis")
     print("   * accumulators_safe.html - Conservative 4-fold")
     print("   * accumulators_mixed.html - Balanced 5-fold")

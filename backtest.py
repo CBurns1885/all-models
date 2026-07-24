@@ -89,7 +89,10 @@ class BacktestEngine:
             if train_df[col].isna().sum() > 0:
                 train_df[col] = train_df[col].fillna(train_df[col].median())
 
-        train_df = train_df.fillna(0)
+        # Only fill remaining NaN in numeric columns — string/object cols (e.g. referee)
+        # must not be filled with 0 (int) as pyarrow rejects mixed int/str object columns.
+        remaining_num = train_df.select_dtypes(include=[np.number]).columns
+        train_df[remaining_num] = train_df[remaining_num].fillna(0)
 
         temp_features = DATA_DIR / "temp_backtest_features.parquet"
         train_df.to_parquet(temp_features)

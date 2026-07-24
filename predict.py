@@ -11,6 +11,7 @@ Combines:
 - Enhanced HTML reporting
 """
 
+import hashlib
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -19,7 +20,7 @@ import json
 from scipy.stats import poisson
 from datetime import datetime, timedelta
 
-from config import FEATURES_PARQUET, OUTPUT_DIR, MODEL_ARTIFACTS_DIR, log_header
+from config import FEATURES_PARQUET, OUTPUT_DIR, MODEL_ARTIFACTS_DIR, ALL_CUPS, EUROPEAN_CUPS, log_header
 from models import load_trained_targets, predict_proba as model_predict
 from dc_predict import build_dc_for_fixtures
 from progress_utils import heartbeat
@@ -151,35 +152,92 @@ LEAGUE_PROFILES = {
 }
 
 def _load_base_features() -> pd.DataFrame:
-    """Load historical features with preprocessing"""
+    """Load historical features from parquet."""
     df = pd.read_parquet(FEATURES_PARQUET)
     if not np.issubdtype(df["Date"].dtype, np.datetime64):
         df["Date"] = pd.to_datetime(df["Date"])
-    return df.sort_values(["League","Date"])
+    return df.sort_values(["League", "Date"])
 
 def calculate_league_profiles(df: pd.DataFrame) -> Dict:
-    """Calculate actual league profiles from historical data"""
+    """Calculate league profiles from historical data.
+
+    Derives all fields (avg_goals, style, quality, clean_sheet_rate, home_adv, etc.)
+    from the data so any league — including new ones or European competitions — gets
+    accurate calibration without manual static entries.
+    """
     profiles = {}
-    
+
+    # Per-league avg Elo for quality tiering (percentile-based, fully data-driven)
+    league_elo: Dict[str, float] = {}
+    for league in df['League'].unique():
+        ld = df[df['League'] == league]
+        elo_cols = [c for c in ['Elo_Home', 'Elo_Away'] if c in ld.columns]
+        if elo_cols:
+            vals = pd.concat([ld[c] for c in elo_cols]).dropna()
+            if len(vals) > 0:
+                league_elo[league] = float(vals.mean())
+
+    if league_elo:
+        elo_vals = list(league_elo.values())
+        q75 = np.percentile(elo_vals, 75)
+        q50 = np.percentile(elo_vals, 50)
+        q25 = np.percentile(elo_vals, 25)
+    else:
+        q75 = q50 = q25 = 1500.0
+
+    # Global avg goals (used to classify style relative to the overall distribution)
+    total_goals_global = (df['FTHG'].fillna(0) + df['FTAG'].fillna(0))
+    global_avg = float(total_goals_global.mean()) if len(total_goals_global) > 0 else 2.7
+
     for league in df['League'].unique():
         league_data = df[df['League'] == league]
         if len(league_data) < 50:
             continue
-            
+
         total_goals = league_data['FTHG'].fillna(0) + league_data['FTAG'].fillna(0)
         home_wins = (league_data['FTR'] == 'H').mean()
         away_wins = (league_data['FTR'] == 'A').mean()
-        
+        avg_goals = float(total_goals.mean())
+
+        # Style: attacking/balanced/defensive relative to global average
+        if avg_goals > global_avg * 1.08:
+            style = 'attacking'
+        elif avg_goals < global_avg * 0.92:
+            style = 'defensive'
+        else:
+            style = 'balanced'
+
+        # Quality: percentile-rank of avg Elo among all leagues
+        avg_elo = league_elo.get(league)
+        if avg_elo is not None:
+            if avg_elo >= q75:
+                quality = 'elite'
+            elif avg_elo >= q50:
+                quality = 'high'
+            elif avg_elo >= q25:
+                quality = 'medium'
+            else:
+                quality = 'low'
+        else:
+            quality = 'medium'
+
+        # Clean sheet rate: proportion of matches where at least one team kept a clean sheet
+        # Equivalent to 1 - btts_rate (consistent with static LEAGUE_PROFILES convention)
+        clean_sheet_rate = float(((league_data['FTHG'] == 0) | (league_data['FTAG'] == 0)).mean())
+
         profiles[league] = {
-            'avg_goals': total_goals.mean(),
-            'home_adv': home_wins - away_wins,
-            'btts_rate': ((league_data['FTHG'] > 0) & (league_data['FTAG'] > 0)).mean(),
-            'over25_rate': (total_goals > 2.5).mean(),
-            'over15_rate': (total_goals > 1.5).mean(),
-            'over35_rate': (total_goals > 3.5).mean(),
-            'over45_rate': (total_goals > 4.5).mean(),
+            'avg_goals': avg_goals,
+            'home_adv': float(home_wins - away_wins),
+            'btts_rate': float(((league_data['FTHG'] > 0) & (league_data['FTAG'] > 0)).mean()),
+            'over25_rate': float((total_goals > 2.5).mean()),
+            'over15_rate': float((total_goals > 1.5).mean()),
+            'over35_rate': float((total_goals > 3.5).mean()),
+            'over45_rate': float((total_goals > 4.5).mean()),
+            'style': style,
+            'quality': quality,
+            'clean_sheet_rate': clean_sheet_rate,
         }
-    
+
     return profiles
 
 def apply_league_calibration(prob: float, market: str, league: str, league_profiles: Dict) -> float:
@@ -334,6 +392,28 @@ def apply_league_calibration(prob: float, market: str, league: str, league_profi
             # Away covers handicap
             return max(0.01, min(0.85, prob - home_adv * 0.08))
 
+    # Pure-ML binary markets (corners, YC, cards) — no DC signal, near-random → heavy compression
+    # Note: market arrives as a P_ column name (e.g. "P_TotalCorners_O9_5_Y")
+    binary_prefixes_ml = ('P_TotalCorners_', 'P_HomeCorners_', 'P_AwayCorners_',
+                          'P_TotalYC_', 'P_BookingPts_', 'P_HomeTeam_Card', 'P_AwayTeam_Card')
+    if any(market.startswith(pfx) for pfx in binary_prefixes_ml):
+        temp = float(TUNING_OVERRIDES.get('temperature_binary', 1.0))
+        if temp != 1.0 and 0.0 < prob < 1.0:
+            import math
+            log_odds = math.log(prob / (1.0 - prob)) / temp
+            prob = 1.0 / (1.0 + math.exp(-log_odds))
+        return max(0.01, min(0.99, prob))
+
+    # DC-supported TG markets (HomeTG, AwayTG) — better calibrated, gentler compression
+    hometg_prefixes = ('P_HomeTG_', 'P_AwayTG_')
+    if any(market.startswith(pfx) for pfx in hometg_prefixes):
+        temp = float(TUNING_OVERRIDES.get('temperature_hometg', 1.0))
+        if temp != 1.0 and 0.0 < prob < 1.0:
+            import math
+            log_odds = math.log(prob / (1.0 - prob)) / temp
+            prob = 1.0 / (1.0 + math.exp(-log_odds))
+        return max(0.01, min(0.99, prob))
+
     return prob
 
 def enforce_cross_market_constraints(row: pd.Series) -> pd.Series:
@@ -448,77 +528,214 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
     
     return row
 
+_FUTURE_FRAME_CACHE_DIR = Path(__file__).parent / "outputs" / "future_frame_cache"
+
+
 def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
-    """Enhanced feature building with time weighting"""
+    """Enhanced feature building with time weighting.
+
+    Disk-caches the result keyed by fixture content + time_half_life so
+    auto_tune trials with the same test period skip the ~10-min build step.
+    """
+    # Build cache key: fixture content + time_half_life + features.parquet mtime
+    # (cache is automatically invalidated when features are rebuilt)
+    fx_content = Path(fixtures_csv).read_text(errors='replace')
+    thl = TUNING_OVERRIDES.get('time_half_life', 180)
+    feat_mtime = int(Path(FEATURES_PARQUET).stat().st_mtime) if Path(FEATURES_PARQUET).exists() else 0
+    ck = hashlib.md5(f"{fx_content}|{thl}|{feat_mtime}".encode()).hexdigest()[:16]
+    cache_path = _FUTURE_FRAME_CACHE_DIR / f"ff_{ck}.parquet"
+
+    if cache_path.exists():
+        try:
+            cached = pd.read_parquet(cache_path)
+            if len(cached) > 0:
+                return cached
+        except Exception:
+            pass
+
     base = _load_base_features()
+    base["Date"] = pd.to_datetime(base["Date"])
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
-    
-    # Add time weights for recent form emphasis
-    current_date = datetime.now()
-    base['days_ago'] = (current_date - pd.to_datetime(base['Date'])).dt.days
-    base['time_weight'] = np.exp(-base['days_ago'] / TUNING_OVERRIDES.get('time_half_life', 180))
-    
-    rows = []
-    for _, r in fx.iterrows():
-        lg, dt, ht, at = r["League"], r["Date"], r["HomeTeam"], r["AwayTeam"]
-        hist_lg = base[base["League"] == lg]
-        
-        # Get last 10 games for each team with time weighting
-        hrow = hist_lg[(hist_lg["HomeTeam"]==ht) | (hist_lg["AwayTeam"]==ht)]
-        hrow = hrow[hrow["Date"]<dt].sort_values("Date").tail(10)
-        
-        arow = hist_lg[(hist_lg["HomeTeam"]==at) | (hist_lg["AwayTeam"]==at)]
-        arow = arow[arow["Date"]<dt].sort_values("Date").tail(10)
-        
-        if hrow.empty or arow.empty:
-            continue
-        
-        feat_cols = [c for c in base.columns if not c.startswith("y_") 
-                     and c not in ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","days_ago","time_weight"]]
-        
-        fused = pd.DataFrame()
-        
-        # Calculate weighted features for home team
+
+    thl = TUNING_OVERRIDES.get('time_half_life', 180)
+
+    # Only use pre-computed rolling/EWM numeric features for the form calculation.
+    # Exclude raw result cols, metadata strings, and target cols.
+    # Also exclude opponent-specific cols (Elo_Away, Elo_Diff) from home lookup —
+    # those depend on the opponent, not just the home team's form.
+    _meta = {"League", "Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR",
+             "HTHG", "HTAG", "HTR", "referee", "venue_name", "Season",
+             "fixture_id", "league_type"}
+    # These are derived from BOTH teams and must be recomputed after merging home+away form.
+    _opponent_cols = {
+        "Elo_Away", "Elo_Diff",
+        "TablePosDiff", "SeasonPtsDiff",
+        "BothTopSix", "RelegationClash",
+    }
+    home_feat_cols = [c for c in base.columns
+                      if c not in _meta and c not in _opponent_cols
+                      and not c.startswith("y_")
+                      and not c.startswith("Away_")
+                      and pd.api.types.is_numeric_dtype(base[c])]
+    # Away form: Away_* cols + Elo_Away (away team's own Elo from their away games)
+    away_feat_cols = [c for c in base.columns
+                      if c.startswith("Away_") and not c.startswith("y_")
+                      and pd.api.types.is_numeric_dtype(base[c])]
+    if "Elo_Away" in base.columns:
+        away_feat_cols.append("Elo_Away")
+
+    # ----------------------------------------------------------------
+    # Vectorized time-weighted form: last-5 appearances per fixture team
+    # ----------------------------------------------------------------
+    def _weighted_form(fx_df, base_df, team_col, feat_cols, n_games=5):
+        """Return one time-weighted-average row per (League, Date, team_col).
+        All feat_cols must be numeric.
+        """
+        hist = base_df[["League", "Date", team_col] + feat_cols].rename(
+            columns={"Date": "HistDate"})
+
+        merged = fx_df[["League", "Date", team_col]].merge(
+            hist, on=["League", team_col], how="inner"
+        )
+        merged = merged[merged["HistDate"] < merged["Date"]]
+
+        # Keep last n_games per (League, team, fixture-date)
+        merged = merged.sort_values(["League", team_col, "Date", "HistDate"])
+        merged["_rank"] = (merged.groupby(["League", team_col, "Date"])
+                           .cumcount(ascending=False) + 1)
+        merged = merged[merged["_rank"] <= n_games].copy()
+
+        # Time weights
+        merged["_days"] = (merged["Date"] - merged["HistDate"]).dt.days.clip(lower=0)
+        merged["_w"]    = np.exp(-merged["_days"] / thl)
+
+        grp_keys = ["League", "Date", team_col]
+        wsum = merged.groupby(grp_keys)["_w"].sum()
+
+        # Multiply each col by weight then sum, then divide by wsum
         for col in feat_cols:
-            if col in hrow.columns and hrow[col].dtype in ['float64', 'int64']:
-                weights = hrow['time_weight'].values[-5:]
-                values = hrow[col].fillna(0).values[-5:]
-                if weights.sum() > 0:
-                    weighted_avg = np.average(values, weights=weights)
-                    fused.at[0, col] = weighted_avg
-                else:
-                    fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-            else:
-                fused.at[0, col] = hrow[col].iloc[-1] if len(hrow) > 0 else 0
-        
-        # Update away team features
-        for c in fused.columns:
-            if c.startswith("Away_") and c in arow.columns:
-                if arow[c].dtype in ['float64', 'int64']:
-                    weights = arow['time_weight'].values[-5:]
-                    values = arow[c].fillna(0).values[-5:]
-                    if weights.sum() > 0:
-                        weighted_avg = np.average(values, weights=weights)
-                        fused.at[0, c] = weighted_avg
-                else:
-                    fused.at[0, c] = arow[c].iloc[-1] if len(arow) > 0 else 0
-        
-        fused["League"] = lg
-        fused["Date"] = dt
-        fused["HomeTeam"] = ht
-        fused["AwayTeam"] = at
-        
-        for c in base.columns:
-            if c.startswith("y_"):
-                fused[c] = pd.NA
-        
-        rows.append(fused)
-    
-    if not rows:
-        raise RuntimeError("No fixtures matched with historical features.")
-    
-    return pd.concat(rows, ignore_index=True).sort_values(["League","Date","HomeTeam"])
+            merged[col] = merged[col].fillna(0) * merged["_w"]
+        return (merged.groupby(grp_keys)[feat_cols].sum()
+                .div(wsum, axis=0).reset_index())
+
+    home_form = _weighted_form(fx, base, "HomeTeam", home_feat_cols)
+    away_form  = _weighted_form(fx, base, "AwayTeam",  away_feat_cols)
+
+    # Merge into fixture frame
+    result = fx[["League", "Date", "HomeTeam", "AwayTeam"]].copy()
+    # Also carry referee/venue if present in fixture CSV
+    for extra in ["referee", "venue_name"]:
+        if extra in fx.columns:
+            result[extra] = fx[extra]
+
+    result = result.merge(home_form, on=["League", "Date", "HomeTeam"], how="left")
+    result = result.merge(away_form,  on=["League", "Date", "AwayTeam"],  how="left")
+
+    # Add contextual flags AFTER merges to avoid _x/_y suffix collisions
+    # (home_form/away_form may carry is_cup/is_european from base rolling stats)
+    result["is_cup"] = result["League"].isin(ALL_CUPS).astype(int)
+    result["is_european"] = result["League"].isin(EUROPEAN_CUPS).astype(int)
+
+    # Recompute cross-team derived features now that both home and away form are merged
+    if "Elo_Home" in result.columns and "Elo_Away" in result.columns:
+        result["Elo_Diff"] = result["Elo_Home"] - result["Elo_Away"]
+    if "Home_TablePos" in result.columns and "Away_TablePos" in result.columns:
+        result["TablePosDiff"] = result["Home_TablePos"] - result["Away_TablePos"]
+    if "Home_SeasonPts" in result.columns and "Away_SeasonPts" in result.columns:
+        result["SeasonPtsDiff"] = result["Home_SeasonPts"] - result["Away_SeasonPts"]
+    if "IsTopSix_Home" in result.columns and "IsTopSix_Away" in result.columns:
+        result["BothTopSix"]      = ((result["IsTopSix_Home"] == 1) & (result["IsTopSix_Away"] == 1)).astype(float)
+    if "IsBottom3_Home" in result.columns and "IsBottom3_Away" in result.columns:
+        result["RelegationClash"] = ((result["IsBottom3_Home"] == 1) | (result["IsBottom3_Away"] == 1)).astype(float)
+
+    # ----------------------------------------------------------------
+    # H2H features (vectorised per pair)
+    # ----------------------------------------------------------------
+    h2h_cols = {
+        "H2H_HomeWinRate": np.nan, "H2H_AwayWinRate": np.nan, "H2H_DrawRate": np.nan,
+        "H2H_AvgGoals": np.nan, "H2H_BTTSRate": np.nan,
+        "H2H_HomeGoalsAvg": np.nan, "H2H_AwayGoalsAvg": np.nan, "H2H_Count": 0,
+    }
+    for col, default in h2h_cols.items():
+        result[col] = default
+
+    if "FTHG" in base.columns and "FTR" in base.columns:
+        base_h2h = base[["League", "Date", "HomeTeam", "AwayTeam",
+                          "FTHG", "FTAG", "FTR"]].copy()
+        for _, r in fx.iterrows():
+            lg, dt, ht, at = r["League"], r["Date"], r["HomeTeam"], r["AwayTeam"]
+            h2h = base_h2h[
+                (base_h2h["Date"] < dt) & (base_h2h["League"] == lg) &
+                (((base_h2h["HomeTeam"] == ht) & (base_h2h["AwayTeam"] == at)) |
+                 ((base_h2h["HomeTeam"] == at) & (base_h2h["AwayTeam"] == ht)))
+            ].tail(5)
+            if len(h2h) == 0:
+                continue
+            mask = (result["League"] == lg) & (result["Date"] == dt) & \
+                   (result["HomeTeam"] == ht) & (result["AwayTeam"] == at)
+            hah = h2h[h2h["HomeTeam"] == ht]
+            haa = h2h[h2h["HomeTeam"] == at]
+            n = len(h2h)
+            wins   = int((hah["FTR"] == "H").sum()) + int((haa["FTR"] == "A").sum())
+            losses = int((hah["FTR"] == "A").sum()) + int((haa["FTR"] == "H").sum())
+            result.loc[mask, "H2H_HomeWinRate"] = wins / n
+            result.loc[mask, "H2H_AwayWinRate"] = losses / n
+            result.loc[mask, "H2H_DrawRate"]    = (n - wins - losses) / n
+            result.loc[mask, "H2H_AvgGoals"]    = (h2h["FTHG"] + h2h["FTAG"]).mean()
+            result.loc[mask, "H2H_Count"]        = n
+            btts = ((h2h["FTHG"] > 0) & (h2h["FTAG"] > 0))
+            result.loc[mask, "H2H_BTTSRate"]     = btts.mean()
+            hg = pd.concat([hah["FTHG"], haa["FTAG"]])
+            ag = pd.concat([hah["FTAG"], haa["FTHG"]])
+            result.loc[mask, "H2H_HomeGoalsAvg"] = hg.mean() if len(hg) > 0 else np.nan
+            result.loc[mask, "H2H_AwayGoalsAvg"] = ag.mean() if len(ag) > 0 else np.nan
+
+    # ----------------------------------------------------------------
+    # Referee features (vectorised lookup)
+    # ----------------------------------------------------------------
+    ref_cols = ["Ref_AvgGoals", "Ref_HomeWinRate", "Ref_BTTSRate",
+                "Ref_AvgCards", "Ref_AvgFouls", "Ref_Count"]
+    for col in ref_cols:
+        result[col] = np.nan
+
+    if "referee" in base.columns and "referee" in result.columns:
+        has_cy = "Home_CardsY" in base.columns and "Away_CardsY" in base.columns
+        has_foul = "Home_Fouls" in base.columns and "Away_Fouls" in base.columns
+        ref_base = base[["Date", "referee", "FTHG", "FTAG", "FTR"] +
+                        (["Home_CardsY", "Away_CardsY"] if has_cy else []) +
+                        (["Home_Fouls", "Away_Fouls"] if has_foul else [])].dropna(subset=["referee"])
+        for _, r in fx.iterrows():
+            ref = r.get("referee")
+            if pd.isna(ref):
+                continue
+            rp = ref_base[(ref_base["referee"] == ref) & (ref_base["Date"] < r["Date"])]
+            if len(rp) < 3:
+                continue
+            mask = (result["HomeTeam"] == r["HomeTeam"]) & \
+                   (result["Date"] == r["Date"]) & (result["League"] == r["League"])
+            result.loc[mask, "Ref_AvgGoals"]   = (rp["FTHG"] + rp["FTAG"]).mean()
+            result.loc[mask, "Ref_HomeWinRate"] = (rp["FTR"] == "H").mean()
+            result.loc[mask, "Ref_BTTSRate"]    = ((rp["FTHG"] > 0) & (rp["FTAG"] > 0)).mean()
+            result.loc[mask, "Ref_Count"]       = len(rp)
+            if has_cy:
+                result.loc[mask, "Ref_AvgCards"] = (rp["Home_CardsY"] + rp["Away_CardsY"]).mean()
+            if has_foul:
+                result.loc[mask, "Ref_AvgFouls"] = (rp["Home_Fouls"] + rp["Away_Fouls"]).mean()
+
+    # Blank y_ target columns so models ignore them at prediction time
+    for c in base.columns:
+        if c.startswith("y_"):
+            result[c] = pd.NA
+
+    # Save to disk cache for reuse across auto_tune trials
+    try:
+        _FUTURE_FRAME_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        result.to_parquet(cache_path, index=False)
+    except Exception:
+        pass
+
+    return result
 
 def _collect_market_columns() -> List[str]:
     """All expected probability column names - COMPREHENSIVE VERSION"""
@@ -664,6 +881,22 @@ def _collect_market_columns() -> List[str]:
     cols += ["P_DCX2_BTTS_Y_Y", "P_DCX2_BTTS_Y_N"]
     cols += ["P_DCX2_BTTS_N_Y", "P_DCX2_BTTS_N_N"]
 
+    # Corners O/U binary markets
+    for sfx in ["O6_5","O7_5","O8_5","O9_5","O10_5","O11_5","O12_5","O13_5"]:
+        cols += [f"P_TotalCorners_{sfx}_Y", f"P_TotalCorners_{sfx}_N"]
+    for sfx in ["O3_5","O4_5","O5_5","O6_5"]:
+        cols += [f"P_HomeCorners_{sfx}_Y", f"P_HomeCorners_{sfx}_N"]
+        cols += [f"P_AwayCorners_{sfx}_Y", f"P_AwayCorners_{sfx}_N"]
+    cols += ["P_HomeCorners_Win_Y", "P_HomeCorners_Win_N"]
+
+    # Yellow cards / booking points binary markets
+    for sfx in ["O1_5","O2_5","O3_5","O4_5","O5_5","O6_5"]:
+        cols += [f"P_TotalYC_{sfx}_Y", f"P_TotalYC_{sfx}_N"]
+    for sfx in ["O20_5","O30_5","O40_5","O50_5"]:
+        cols += [f"P_BookingPts_{sfx}_Y", f"P_BookingPts_{sfx}_N"]
+    cols += ["P_HomeTeam_Card_Y", "P_HomeTeam_Card_N"]
+    cols += ["P_AwayTeam_Card_Y", "P_AwayTeam_Card_N"]
+
     return cols
 
 def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None) -> Tuple[List[dict], List[str]]:
@@ -689,10 +922,19 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
     
     for i in range(n_rows):
         row = {}
-        
+
         # Get fixture info
         league = fixtures_df.iloc[i]['League'] if fixtures_df is not None and 'League' in fixtures_df.columns else None
-        
+
+        # Extract rolling xG for Poisson blending — use None if missing/NaN
+        _home_xg = _away_xg = None
+        if fixtures_df is not None:
+            _r = fixtures_df.iloc[i]
+            _hx = _r.get('Home_xG_ewm') or _r.get('xG_ewm')
+            _ax = _r.get('Away_xG_ewm')
+            _home_xg = float(_hx) if _hx is not None and not pd.isna(_hx) else None
+            _away_xg = float(_ax) if _ax is not None and not pd.isna(_ax) else None
+
         # Initialize
         for col in out_cols:
             row[col] = 0.0
@@ -772,7 +1014,50 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
             p = preds["y_AwayCorners_BAND"][i]
             for b in ["0-3","4-5","6-7","8-9","10+"]:
                 row[f"P_AwayCorners_{b}"] = pick(p, "y_AwayCorners_BAND", b)
-        
+
+        # Binary corners O/U targets (Y=Over, N=Under)
+        for sfx in ["O6_5","O7_5","O8_5","O9_5","O10_5","O11_5","O12_5","O13_5"]:
+            key = f"y_TotalCorners_{sfx}"
+            if key in preds:
+                p = preds[key][i]
+                row[f"P_TotalCorners_{sfx}_Y"] = pick(p, key, "Y")
+                row[f"P_TotalCorners_{sfx}_N"] = pick(p, key, "N")
+        for sfx in ["O3_5","O4_5","O5_5","O6_5"]:
+            hk = f"y_HomeCorners_{sfx}"
+            ak = f"y_AwayCorners_{sfx}"
+            if hk in preds:
+                p = preds[hk][i]
+                row[f"P_HomeCorners_{sfx}_Y"] = pick(p, hk, "Y")
+                row[f"P_HomeCorners_{sfx}_N"] = pick(p, hk, "N")
+            if ak in preds:
+                p = preds[ak][i]
+                row[f"P_AwayCorners_{sfx}_Y"] = pick(p, ak, "Y")
+                row[f"P_AwayCorners_{sfx}_N"] = pick(p, ak, "N")
+        if "y_HomeCorners_Win" in preds:
+            p = preds["y_HomeCorners_Win"][i]
+            row["P_HomeCorners_Win_Y"] = pick(p, "y_HomeCorners_Win", "Y")
+            row["P_HomeCorners_Win_N"] = pick(p, "y_HomeCorners_Win", "N")
+
+        # Yellow cards / booking points targets (Y=Over, N=Under)
+        for sfx in ["O1_5","O2_5","O3_5","O4_5","O5_5","O6_5"]:
+            key = f"y_TotalYC_{sfx}"
+            if key in preds:
+                p = preds[key][i]
+                row[f"P_TotalYC_{sfx}_Y"] = pick(p, key, "Y")
+                row[f"P_TotalYC_{sfx}_N"] = pick(p, key, "N")
+        for sfx in ["O20_5","O30_5","O40_5","O50_5"]:
+            key = f"y_BookingPts_{sfx}"
+            if key in preds:
+                p = preds[key][i]
+                row[f"P_BookingPts_{sfx}_Y"] = pick(p, key, "Y")
+                row[f"P_BookingPts_{sfx}_N"] = pick(p, key, "N")
+        for side in ["HomeTeam","AwayTeam"]:
+            key = f"y_{side}_Card"
+            if key in preds:
+                p = preds[key][i]
+                row[f"P_{side}_Card_Y"] = pick(p, key, "Y")
+                row[f"P_{side}_Card_N"] = pick(p, key, "N")
+
         if "y_CS" in preds:
             p = preds["y_CS"][i]
             for a in range(6):
@@ -791,8 +1076,8 @@ def _map_preds_to_columns(models, preds: dict, fixtures_df: pd.DataFrame = None)
         # Convert to series
         row_series = pd.Series(row)
         
-        # Apply Poisson adjustments
-        row_series = apply_poisson_adjustment(row_series, league=league)
+        # Apply Poisson adjustments using per-team rolling xG when available
+        row_series = apply_poisson_adjustment(row_series, home_xg=_home_xg, away_xg=_away_xg, league=league)
         
         # Enforce cross-market constraints
         row_series = enforce_cross_market_constraints(row_series)
@@ -892,7 +1177,7 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
         if not BLEND_WEIGHTS_JSON.exists():
             heartbeat("Blend weights file missing; skipping BLEND_* columns.")
             return out
-        
+
         weights = json.loads(BLEND_WEIGHTS_JSON.read_text())
         if not weights:
             heartbeat("No blend weights found; skipping BLEND_* columns.")
@@ -901,27 +1186,73 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
         heartbeat(f"Error loading blend weights: {e}; skipping BLEND_* columns.")
         return out
 
+    # Dynamic league profiles for quality-based ML weight adjustment
+    try:
+        _base = _load_base_features()
+        league_profiles = calculate_league_profiles(_base)
+    except Exception:
+        league_profiles = {}
+
     def pair_cols_for_target(target: str) -> Tuple[List[str], List[str]]:
-        if target == "y_1X2":
+        # Normalise: blend_weights.json may store keys with or without "y_" prefix
+        t = target if target.startswith("y_") else f"y_{target}"
+        if t == "y_1X2":
             ml_cols = ["P_1X2_H","P_1X2_D","P_1X2_A"]
             dc_cols = ["DC_1X2_H","DC_1X2_D","DC_1X2_A"]
-        elif target == "y_BTTS":
+        elif t == "y_BTTS":
             ml_cols = ["P_BTTS_N","P_BTTS_Y"]
             dc_cols = ["DC_BTTS_N","DC_BTTS_Y"]
-        elif target == "y_GOAL_RANGE":
+        elif t == "y_GOAL_RANGE":
             ml_cols = [f"P_GR_{k}" for k in ["0","1","2","3","4","5+"]]
             dc_cols = [f"DC_GR_{k}" for k in ["0","1","2","3","4","5+"]]
-        elif target == "y_CS":
+        elif t == "y_CS":
             ml_cols = [f"P_CS_{a}_{b}" for a in range(6) for b in range(6)] + ["P_CS_Other"]
             dc_cols = [f"DC_CS_{a}_{b}" for a in range(6) for b in range(6)] + ["DC_CS_Other"]
-        elif target.startswith("y_OU_"):
-            line_part = target.replace("y_OU_", "")
+        elif t.startswith("y_OU_"):
+            line_part = t.replace("y_OU_", "")
             ml_cols = [f"P_OU_{line_part}_U", f"P_OU_{line_part}_O"]
             dc_cols = [f"DC_OU_{line_part}_U", f"DC_OU_{line_part}_O"]
-        elif target.startswith("y_AH_"):
-            line_part = target.replace("y_AH_", "")
+        elif t.startswith("y_AH_"):
+            line_part = t.replace("y_AH_", "")
             ml_cols = [f"P_AH_{line_part}_A", f"P_AH_{line_part}_P", f"P_AH_{line_part}_H"]
             dc_cols = [f"DC_AH_{line_part}_A", f"DC_AH_{line_part}_P", f"DC_AH_{line_part}_H"]
+        elif t.startswith("y_HomeTG_"):
+            line_part = t.replace("y_HomeTG_", "")
+            ml_cols = [f"P_HomeTG_{line_part}_U", f"P_HomeTG_{line_part}_O"]
+            dc_cols = [f"DC_HomeTG_{line_part}_U", f"DC_HomeTG_{line_part}_O"]
+        elif t.startswith("y_AwayTG_"):
+            line_part = t.replace("y_AwayTG_", "")
+            ml_cols = [f"P_AwayTG_{line_part}_U", f"P_AwayTG_{line_part}_O"]
+            dc_cols = [f"DC_AwayTG_{line_part}_U", f"DC_AwayTG_{line_part}_O"]
+        # Cards markets (ML only, no DC equivalent)
+        elif t.startswith("y_TotalYC_"):
+            sfx = t.replace("y_TotalYC_", "")
+            ml_cols = [f"P_TotalYC_{sfx}_Y", f"P_TotalYC_{sfx}_N"]
+            dc_cols = ml_cols  # no DC, blend uses ML only (alpha=1.0)
+        elif t.startswith("y_BookingPts_"):
+            sfx = t.replace("y_BookingPts_", "")
+            ml_cols = [f"P_BookingPts_{sfx}_Y", f"P_BookingPts_{sfx}_N"]
+            dc_cols = ml_cols
+        elif t in ("y_HomeTeam_Card", "y_AwayTeam_Card"):
+            name = t.replace("y_", "")
+            ml_cols = [f"P_{name}_Y", f"P_{name}_N"]
+            dc_cols = ml_cols
+        # Corners markets (ML only)
+        elif t.startswith("y_TotalCorners_"):
+            sfx = t.replace("y_TotalCorners_", "")
+            ml_cols = [f"P_TotalCorners_{sfx}_Y", f"P_TotalCorners_{sfx}_N"]
+            dc_cols = ml_cols
+        elif t.startswith("y_HomeCorners_"):
+            sfx = t.replace("y_HomeCorners_", "")
+            ml_cols = [f"P_HomeCorners_{sfx}_Y", f"P_HomeCorners_{sfx}_N"]
+            dc_cols = ml_cols
+        elif t.startswith("y_AwayCorners_"):
+            sfx = t.replace("y_AwayCorners_", "")
+            ml_cols = [f"P_AwayCorners_{sfx}_Y", f"P_AwayCorners_{sfx}_N"]
+            dc_cols = ml_cols
+        elif t == "y_HTFT":
+            ml_cols = [f"P_HTFT_{a}_{b}" for a in ["H","D","A"] for b in ["H","D","A"]]
+            dc_cols = ml_cols  # no DC model for HTFT
         else:
             return [], []
         return ml_cols, dc_cols
@@ -932,10 +1263,13 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
     for idx in range(len(out)):
         league = out.iloc[idx]['League'] if 'League' in out.columns else None
         
-        # Determine ML weight adjustment based on league quality
+        # Determine ML weight adjustment based on league quality (dynamic profiles)
         ml_weight_boost = 0.0
-        if league in LEAGUE_PROFILES:
-            quality = LEAGUE_PROFILES[league].get('quality', 'medium')
+        _lp = league_profiles.get(league) if league_profiles else None
+        if _lp is None and league in LEAGUE_PROFILES:
+            _lp = LEAGUE_PROFILES[league]
+        if _lp:
+            quality = _lp.get('quality', 'medium')
             if quality == 'elite':
                 ml_weight_boost = 0.15  # Trust ML more in top leagues
             elif quality == 'high':
@@ -954,13 +1288,26 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             if missing_ml or missing_dc:
                 continue
             
-            # Adjust alpha based on league quality
-            alpha = min(float(base_alpha) + ml_weight_boost, TUNING_OVERRIDES.get('ml_weight_cap', 0.85))
-            
-            # Get probabilities
-            M = out.loc[idx, ml_cols].values
-            D = out.loc[idx, dc_cols].values
-            
+            # Adjust alpha based on league quality, with per-market ML weight cap
+            global_cap = TUNING_OVERRIDES.get('ml_weight_cap', 0.85)
+            market_cap_key = f'ml_weight_cap_{target.replace("y_", "").lower()}'
+            ml_cap = float(TUNING_OVERRIDES.get(market_cap_key, global_cap))
+            alpha = min(float(base_alpha) + ml_weight_boost, ml_cap)
+
+            # Get probabilities (force float64 — DataFrame loc can return object dtype)
+            M = out.loc[idx, ml_cols].values.astype(np.float64)
+            D = out.loc[idx, dc_cols].values.astype(np.float64)
+
+            # Apply DC temperature scaling to reduce overconfidence (T > 1 softens, T < 1 sharpens)
+            # Per-market overrides take precedence over the global dc_temperature
+            global_temp = float(TUNING_OVERRIDES.get('dc_temperature', 1.0))
+            market_temp_key = f'dc_temperature_{target.replace("y_", "").lower()}'
+            dc_temp = float(TUNING_OVERRIDES.get(market_temp_key, global_temp))
+            if dc_temp != 1.0 and len(D) > 0 and D.sum() > 0:
+                log_D = np.log(np.clip(D, 1e-10, None)) / dc_temp
+                D = np.exp(log_D - log_D.max())
+                D = D / D.sum()
+
             # Blend: alpha * ML + (1-alpha) * DC
             B = alpha * M + (1.0 - alpha) * D
             
@@ -1558,13 +1905,15 @@ def predict_week(fixtures_csv: Path) -> Path:
     
     # Map predictions with all enhancements
     log_header("APPLY ENHANCEMENTS")
-    rows, out_cols = _map_preds_to_columns(models, preds, fx)
-    
-    # Create output
+    # Pass df_future (sorted) to _map_preds_to_columns so league/xG lookups align
+    # with prediction row order (df_future is sorted by League/Date/HomeTeam)
+    rows, out_cols = _map_preds_to_columns(models, preds, df_future)
+
+    # Create output — use df_future for ID columns (same sort order as predictions)
     df_out = pd.DataFrame(rows, columns=out_cols)
     for col in ID_COLS:
-        if col in fx.columns:
-            df_out[col] = fx[col].values[:len(df_out)]
+        if col in df_future.columns:
+            df_out[col] = df_future[col].values[:len(df_out)]
     
     # Add DC predictions
     log_header("GENERATE DC PREDICTIONS")
@@ -1575,12 +1924,14 @@ def predict_week(fixtures_csv: Path) -> Path:
         
         dc_path = build_dc_for_fixtures(fixtures_copy)
         dc_df = pd.read_csv(dc_path)
-        
+        dc_df["Date"] = pd.to_datetime(dc_df["Date"])
+
         dc_cols = [c for c in dc_df.columns if c.startswith("DC_")]
-        for col in dc_cols:
-            if col in dc_df.columns:
-                df_out[col] = dc_df[col].values[:len(df_out)]
-        
+        merge_keys = [k for k in ["League", "Date", "HomeTeam", "AwayTeam"] if k in dc_df.columns]
+        df_out["Date"] = pd.to_datetime(df_out["Date"])
+        df_out = df_out.merge(
+            dc_df[merge_keys + dc_cols], on=merge_keys, how="left", suffixes=("", "_dc")
+        )
         print(f"[OK] Merged {len(dc_cols)} DC predictions")
     except Exception as e:
         print(f"[WARN] DC predictions failed: {e}")

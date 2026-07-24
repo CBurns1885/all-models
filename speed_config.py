@@ -70,11 +70,11 @@ SPEED_CONFIGS: Dict[SpeedMode, SpeedConfig] = {
         n_jobs=-1
     ),
     SpeedMode.FULL: SpeedConfig(
-        n_folds=3,  # Reduced from 5 for speed
+        n_folds=3,
         n_estimators=300,
-        use_tuning=False,  # Use pre-tuned params (skip Optuna for speed)
+        use_tuning=False,
         tuning_trials=0,
-        models=["lgb"],  # LightGBM only (SINGLE MODEL - best overall)
+        models=["lgb", "rf", "et", "xgb", "cat"],  # Full 5-model ensemble
         use_specialized=False,
         use_dc=True,
         skip_rare_markets=False,
@@ -268,7 +268,49 @@ PRIMARY_TRAINED_MARKETS = [
     "y_AwayTG_0_5",
     "y_AwayTG_1_5",
 ]
-# 12 models total — focused, fast, each with real independent signal
+# 11 models total — focused, fast, each with real independent signal
+
+# Cards and corners markets — trained in FULL mode only
+# Each represents a genuine independent betting market with separate signal
+CARDS_CORNERS_MARKETS = [
+    # Half-time / Full-time result (9-class multiclass)
+    "y_HTFT",
+    # Total yellow cards O/U
+    "y_TotalYC_O1_5",
+    "y_TotalYC_O2_5",
+    "y_TotalYC_O3_5",
+    "y_TotalYC_O4_5",
+    "y_TotalYC_O5_5",
+    "y_TotalYC_O6_5",
+    # Booking points
+    "y_BookingPts_O20_5",
+    "y_BookingPts_O30_5",
+    "y_BookingPts_O40_5",
+    # Either team gets a card
+    "y_HomeTeam_Card",
+    "y_AwayTeam_Card",
+    # Total corners O/U
+    "y_TotalCorners_O6_5",
+    "y_TotalCorners_O7_5",
+    "y_TotalCorners_O8_5",
+    "y_TotalCorners_O9_5",
+    "y_TotalCorners_O10_5",
+    "y_TotalCorners_O11_5",
+    "y_TotalCorners_O12_5",
+    "y_TotalCorners_O13_5",
+    # Team corners
+    "y_HomeCorners_O3_5",
+    "y_HomeCorners_O4_5",
+    "y_HomeCorners_O5_5",
+    "y_HomeCorners_O6_5",
+    "y_AwayCorners_O3_5",
+    "y_AwayCorners_O4_5",
+    "y_AwayCorners_O5_5",
+    "y_AwayCorners_O6_5",
+    "y_HomeCorners_Win",
+    # Booking points (extra line)
+    "y_BookingPts_O50_5",
+]
 
 # DERIVED MARKETS — NOT trained, computed from PRIMARY predictions:
 #   y_DC_1X   = P(H) + P(D)                from y_1X2
@@ -306,8 +348,6 @@ SECONDARY_MARKETS = TIER2_VALUE_MARKETS
 # Skip these in FAST mode (rarely bet, complex)
 SKIP_IN_FAST_MODE = [
     "y_CS",  # Correct score - 37 classes, very hard
-    "y_HTFT",  # 9 classes, needs lots of data
-
     # Half-time markets (less data, harder to predict)
     "y_HT",
     "y_HT_OU_0_5", "y_HT_OU_1_5", "y_HT_OU_2_5",
@@ -365,22 +405,24 @@ def get_pretuned_params(model: str, market_type: str) -> Dict:
 def should_train_market(target: str) -> bool:
     """Check if a market needs its own trained ML model.
 
-    Only PRIMARY_TRAINED_MARKETS get a model.  All other markets
-    (DC, DNB, combos, etc.) are derived mathematically from the
-    primary predictions — no model needed.
+    - FAST: core goals markets only (5 models)
+    - BALANCED: all PRIMARY_TRAINED_MARKETS (11 models)
+    - FULL: PRIMARY + CARDS_CORNERS_MARKETS (34 models)
+
+    DC, DNB, combos, etc. are derived mathematically — no model needed.
     """
     mode = get_speed_mode()
 
     if mode == SpeedMode.FAST:
-        # Bare minimum: 1X2 + BTTS + the main O/U lines
         fast_subset = [
             "y_1X2", "y_BTTS",
             "y_OU_1_5", "y_OU_2_5", "y_OU_3_5",
         ]
         return target in fast_subset
+    elif mode == SpeedMode.FULL:
+        return target in PRIMARY_TRAINED_MARKETS or target in CARDS_CORNERS_MARKETS
     else:
-        # BALANCED and FULL both train only PRIMARY — the difference
-        # is in n_estimators, n_folds, etc., not market count.
+        # BALANCED: primary markets only (fast enough for daily use)
         return target in PRIMARY_TRAINED_MARKETS
 
 

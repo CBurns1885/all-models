@@ -46,6 +46,8 @@ PRED_TO_ODDS_COL: Dict[tuple, str] = {
     ('DC_1X', 'Y'): 'ODDS_DC_1X',
     ('DC_12', 'Y'): 'ODDS_DC_12',
     ('DC_X2', 'Y'): 'ODDS_DC_X2',
+    # Half-time / Full-time (market=HTFT_{HT}, selection={FT})
+    **{('HTFT', f'{a}-{b}'): f'ODDS_HTFT_{a}_{b}' for a in ['H','D','A'] for b in ['H','D','A']},
 }
 
 

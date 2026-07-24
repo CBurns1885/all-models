@@ -1,16 +1,51 @@
 # dc_predict.py
 from __future__ import annotations
 from pathlib import Path
+import pickle
 import pandas as pd
 from config import FEATURES_PARQUET, OUTPUT_DIR, log_header
 from models_dc import fit_all, price_match
+
+_DC2_CACHE_DIR = Path(__file__).parent / "outputs" / "dc2_params_cache"
+
+def _dc2_cache_key(df: pd.DataFrame) -> str:
+    dt = pd.to_datetime(df["Date"])
+    return f"{str(dt.min())[:10]}_{str(dt.max())[:10]}_{len(df)}"
+
+def _load_dc2_cache(key: str):
+    p = _DC2_CACHE_DIR / f"dc2_{key}.pkl"
+    if p.exists():
+        try:
+            with open(p, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return None
+
+def _save_dc2_cache(key: str, params) -> None:
+    try:
+        _DC2_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_DC2_CACHE_DIR / f"dc2_{key}.pkl", "wb") as f:
+            pickle.dump(params, f)
+    except Exception:
+        pass
 
 def build_dc_for_fixtures(fixtures_csv: Path) -> Path:
     log_header("DC: fitting per-league parameters")
     base=pd.read_parquet(FEATURES_PARQUET)
     base=base.dropna(subset=["Date","HomeTeam","AwayTeam","FTHG","FTAG"]).copy()
     base["Date"]=pd.to_datetime(base["Date"])
-    params=fit_all(base[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
+    train_df=base[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]]
+
+    cache_key = _dc2_cache_key(train_df)
+    params = _load_dc2_cache(cache_key)
+    if params is not None:
+        print(f"  [CACHE] Loaded DC2 params from disk ({cache_key})")
+    else:
+        params=fit_all(train_df)
+        _save_dc2_cache(cache_key, params)
+        print(f"  [CACHE] Saved DC2 params to disk ({cache_key})")
+
     fx=pd.read_csv(fixtures_csv); fx["Date"]=pd.to_datetime(fx["Date"])
     rows=[]
     for _,r in fx.iterrows():

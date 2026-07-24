@@ -24,6 +24,13 @@ from config import (
 RATE_LIMIT_DELAY = 0.5  # seconds between requests
 MAX_RETRIES = 3
 
+
+def _connect():
+    conn = sqlite3.connect(API_FOOTBALL_DB, timeout=60)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
 # API Headers
 def _get_headers():
     return {
@@ -133,7 +140,7 @@ def _init_database():
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
     cursor = conn.cursor()
 
     # Fixtures table
@@ -307,7 +314,7 @@ def fetch_fixtures_for_league(league_code: str, season: int, status: str = 'FT')
         return 0
 
     # Store in database
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
     cursor = conn.cursor()
 
     count = 0
@@ -382,7 +389,7 @@ def fetch_fixture_statistics(fixture_id: int) -> bool:
 
     stats = data['response']
 
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
     cursor = conn.cursor()
 
     for team_stats in stats:
@@ -567,7 +574,7 @@ def populate_historical_data(leagues: List[str] = None, seasons: List[int] = Non
     if fetch_stats and total > 0:
         print("\nFetching match statistics (this may take a while)...")
 
-        conn = sqlite3.connect(API_FOOTBALL_DB)
+        conn = _connect()
         cursor = conn.cursor()
 
         # Get fixtures without statistics
@@ -617,7 +624,7 @@ def fetch_standings(league_code: str, season: int) -> int:
         return 0
 
     _init_database()
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
     cursor = conn.cursor()
 
     count = 0
@@ -979,7 +986,7 @@ def fetch_odds_for_fixture(fixture_id: int) -> Dict[str, float]:
 def _store_odds(fixture_id: int, bookmaker: str, odds: Dict[str, float]):
     """Store parsed odds in the database."""
     try:
-        conn = sqlite3.connect(API_FOOTBALL_DB)
+        conn = _connect()
         cursor = conn.cursor()
 
         # Clear old odds for this fixture to avoid duplicates
@@ -1065,7 +1072,7 @@ def backfill_historic_odds(
         Number of fixtures successfully backfilled
     """
     _init_database()
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
 
     # Build WHERE clause for optional league/season filtering
     conditions = ["f.status = 'FT'"]
@@ -1168,7 +1175,7 @@ def get_database_stats() -> Dict:
     if not API_FOOTBALL_DB.exists():
         return {'exists': False}
 
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
     cursor = conn.cursor()
 
     cursor.execute("SELECT COUNT(*) FROM fixtures")

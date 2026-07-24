@@ -427,6 +427,18 @@ def price_match(params: DCParams, home: str, away: str,
         out[f'DC_OU_{line_str}_O'] = over_prob
         out[f'DC_OU_{line_str}_U'] = under_prob + on_line_prob
     
+    # Home/Away Team Goals O/U lines — derived from Poisson marginals
+    # p_home[h] = P(home scores exactly h goals); p_away[a] = P(away scores exactly a goals)
+    p_home = P.sum(axis=1)  # shape (max_goals+1,)
+    p_away = P.sum(axis=0)  # shape (max_goals+1,)
+    for line in [0.5, 1.5]:
+        line_str = str(line).replace('.', '_')
+        thresh = int(line) + 1  # goals needed to be "over": 1 for 0.5, 2 for 1.5
+        out[f'DC_HomeTG_{line_str}_O'] = float(p_home[thresh:].sum())
+        out[f'DC_HomeTG_{line_str}_U'] = 1.0 - out[f'DC_HomeTG_{line_str}_O']
+        out[f'DC_AwayTG_{line_str}_O'] = float(p_away[thresh:].sum())
+        out[f'DC_AwayTG_{line_str}_U'] = 1.0 - out[f'DC_AwayTG_{line_str}_O']
+
     # Asian Handicap lines
     ah_lines = [-1.0, -0.5, 0.0, 0.5, 1.0]
     for line in ah_lines:

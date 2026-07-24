@@ -72,10 +72,18 @@ catboost_info/
 
 # Temp/test files
 nul
-_ul
+_ul*
 install_log.txt
 test_run_log.txt
 test_*.py
+
+# Betfair SSL certificates (private key)
+certs/
+
+# Pipeline fetch logs (dated)
+pipeline_fetch_*.log
+pipeline_fetch_*.err
+pipeline_log*.txt
 
 # Keep structure folders but ignore contents
 data/*

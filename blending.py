@@ -66,6 +66,8 @@ def _dc_supported(target: str) -> bool:
         target in ["y_1X2","y_BTTS","y_GOAL_RANGE","y_CS"]
         or target.startswith("y_OU_")
         or target.startswith("y_AH_")
+        or target.startswith("y_HomeTG_")
+        or target.startswith("y_AwayTG_")
     )
 
 def _align_probs_to_labels(probs: np.ndarray, model_labels: List[str], desired_labels: List[str]) -> np.ndarray:
@@ -125,6 +127,17 @@ def learn_blend_weights() -> Dict[str, float]:
     base = df_train.dropna(subset=["FTHG","FTAG","HomeTeam","AwayTeam","League","Date"]).copy()
     dc_params = dc_fit_all(base[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
 
+    # Pre-compute DC prices for all unique (league, home, away) combos in the val set.
+    # dc_price_match returns all markets at once — computing once per match is much faster
+    # than calling it once per target per row.
+    print("  Pre-computing DC prices for val set...")
+    _dc_price_cache: Dict[tuple, dict] = {}
+    for _, r in df_val[["League","HomeTeam","AwayTeam"]].drop_duplicates().iterrows():
+        lg, ht, at = r["League"], r["HomeTeam"], r["AwayTeam"]
+        key = (lg, ht, at)
+        if key not in _dc_price_cache:
+            _dc_price_cache[key] = dc_price_match(dc_params[lg], ht, at, max_goals=8) if lg in dc_params else {}
+
     for target, m in models.items():
         if target not in df_val.columns:
             continue
@@ -149,13 +162,11 @@ def learn_blend_weights() -> Dict[str, float]:
         if not _dc_supported(target):
             continue
 
-        # Build DC probs per row for this target
+        # Build DC probs per row for this target using cached prices
         dc_rows = []
         for _, r in sub[["League","HomeTeam","AwayTeam"]].iterrows():
             lg, ht, at = r["League"], r["HomeTeam"], r["AwayTeam"]
-            mp = {}
-            if lg in dc_params:
-                mp = dc_price_match(dc_params[lg], ht, at, max_goals=8)
+            mp = _dc_price_cache.get((lg, ht, at), {})
             # map mp to desired_labels
             if target == "y_1X2":
                 vec = [mp.get("DC_1X2_H",0.0), mp.get("DC_1X2_D",0.0), mp.get("DC_1X2_A",0.0)]
@@ -175,6 +186,12 @@ def learn_blend_weights() -> Dict[str, float]:
             elif target.startswith("y_AH_"):
                 l = target.split("_",2)[2]; labs = ["A","P","H"]
                 vec = [mp.get(f"DC_AH_{l}_A",0.0), mp.get(f"DC_AH_{l}_P",0.0), mp.get(f"DC_AH_{l}_H",0.0)]
+            elif target.startswith("y_HomeTG_"):
+                l = target.split("_",2)[2]; labs = ["U","O"]
+                vec = [mp.get(f"DC_HomeTG_{l}_U",0.0), mp.get(f"DC_HomeTG_{l}_O",0.0)]
+            elif target.startswith("y_AwayTG_"):
+                l = target.split("_",2)[2]; labs = ["U","O"]
+                vec = [mp.get(f"DC_AwayTG_{l}_U",0.0), mp.get(f"DC_AwayTG_{l}_O",0.0)]
             else:
                 vec = None; labs = []
             if vec is None:
@@ -329,6 +346,12 @@ def learn_blend_weights_temporal(val_end_date: str) -> Dict[str, float]:
                 l = target.split("_", 2)[2]
                 labs = ["A", "P", "H"]
                 vec = [mp.get(f"DC_AH_{l}_A", 0.0), mp.get(f"DC_AH_{l}_P", 0.0), mp.get(f"DC_AH_{l}_H", 0.0)]
+            elif target.startswith("y_HomeTG_"):
+                l = target.split("_", 2)[2]; labs = ["U", "O"]
+                vec = [mp.get(f"DC_HomeTG_{l}_U", 0.0), mp.get(f"DC_HomeTG_{l}_O", 0.0)]
+            elif target.startswith("y_AwayTG_"):
+                l = target.split("_", 2)[2]; labs = ["U", "O"]
+                vec = [mp.get(f"DC_AwayTG_{l}_U", 0.0), mp.get(f"DC_AwayTG_{l}_O", 0.0)]
             else:
                 vec = None
                 labs = []

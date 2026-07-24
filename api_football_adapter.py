@@ -4,11 +4,28 @@ Reads from shared football_api.db (SQLite) instead of downloading CSVs
 Provides richer data: xG, injuries, detailed statistics
 """
 import sqlite3
+import time
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import List, Optional
 from config import API_FOOTBALL_DB, PROCESSED_DIR, log_header
+
+
+def _connect(retries: int = 5, delay: float = 3.0):
+    """Open SQLite connection with WAL mode and retry on disk I/O errors (OneDrive sync)."""
+    last_err = None
+    for attempt in range(retries):
+        try:
+            conn = sqlite3.connect(API_FOOTBALL_DB, timeout=60)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            return conn
+        except sqlite3.OperationalError as e:
+            last_err = e
+            if attempt < retries - 1:
+                time.sleep(delay * (attempt + 1))
+    raise last_err
 
 def get_fixtures_from_db(
     seasons: List[int] = None,
@@ -33,7 +50,7 @@ def get_fixtures_from_db(
             f"Run dc_laptop/runner.py first to download data."
         )
 
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
 
     # Build query - join match_stats for home and away team statistics
     query = """
@@ -166,7 +183,7 @@ def get_standings_from_db(
     if not API_FOOTBALL_DB.exists():
         return pd.DataFrame()
 
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
 
     # Check if standings table exists
     cursor = conn.cursor()
@@ -242,7 +259,7 @@ def get_injuries_from_db(
     if not API_FOOTBALL_DB.exists():
         return pd.DataFrame()
 
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
 
     query = """
         SELECT
@@ -289,7 +306,7 @@ def get_injury_counts_from_db() -> pd.DataFrame:
     if not API_FOOTBALL_DB.exists():
         return pd.DataFrame()
 
-    conn = sqlite3.connect(API_FOOTBALL_DB)
+    conn = _connect()
 
     # Check injuries table exists
     cursor = conn.cursor()
@@ -424,7 +441,7 @@ def check_api_football_db() -> bool:
         return False
 
     try:
-        conn = sqlite3.connect(API_FOOTBALL_DB)
+        conn = _connect()
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM fixtures")
         count = cursor.fetchone()[0]

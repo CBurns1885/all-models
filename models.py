@@ -2,8 +2,10 @@
 # End-to-end model training, stacking, calibration, and prediction for all markets.
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import pickle
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,8 +104,10 @@ try:
 except ImportError:
     _HAS_SPEED_CONFIG = False
 
-# Global DC cache to avoid refitting
+# Global DC cache to avoid refitting (in-process)
 _DC_PARAMS_CACHE = {}
+# Disk cache dir for DC params — survives across subprocess calls
+_DC_DISK_CACHE_DIR = Path(__file__).parent / "outputs" / "dc_params_disk_cache"
 
 
 # --------------------------------------------------------------------------------------
@@ -237,6 +241,23 @@ def _all_targets() -> List[str]:
         # Double Chance + BTTS Combos
         "y_DC1X_BTTS_Y", "y_DC1X_BTTS_N",
         "y_DCX2_BTTS_Y", "y_DCX2_BTTS_N",
+
+        # Cards markets (100% data coverage in features.parquet)
+        "y_TotalYC_O1_5", "y_TotalYC_O2_5", "y_TotalYC_O3_5",
+        "y_TotalYC_O4_5", "y_TotalYC_O5_5", "y_TotalYC_O6_5",
+        "y_BookingPts_O20_5", "y_BookingPts_O30_5",
+        "y_BookingPts_O40_5", "y_BookingPts_O50_5",
+        "y_HomeTeam_Card", "y_AwayTeam_Card",
+
+        # Corners markets (100% data coverage in features.parquet)
+        "y_TotalCorners_O6_5", "y_TotalCorners_O7_5", "y_TotalCorners_O8_5",
+        "y_TotalCorners_O9_5", "y_TotalCorners_O10_5", "y_TotalCorners_O11_5",
+        "y_TotalCorners_O12_5", "y_TotalCorners_O13_5",
+        "y_HomeCorners_O3_5", "y_HomeCorners_O4_5",
+        "y_HomeCorners_O5_5", "y_HomeCorners_O6_5",
+        "y_AwayCorners_O3_5", "y_AwayCorners_O4_5",
+        "y_AwayCorners_O5_5", "y_AwayCorners_O6_5",
+        "y_HomeCorners_Win",
     ]
     return t
 
@@ -294,10 +315,120 @@ def _dc_supported(t: str) -> bool:
 
 
 # --------------------------------------------------------------------------------------
+# Per-market feature selection
+# --------------------------------------------------------------------------------------
+
+# Feature prefix groups — used for domain-based exclusion per market family.
+# Exclusion-based: new features are included by default unless explicitly blocked.
+_FG_ELO        = ("Elo_",)
+_FG_FORM_GOALS = ("Home_GF_", "Away_GF_", "Home_GA_", "Away_GA_")
+_FG_FORM_GEN   = ("Home_PPG_", "Away_PPG_", "Home_W_", "Away_W_",
+                   "Home_D_", "Away_D_", "Home_L_")
+_FG_XG         = ("Home_xG", "Away_xG")
+_FG_BTTS_CS    = ("Home_BTTS_", "Away_BTTS_", "Home_CS_", "Away_CS_")
+_FG_H2H        = ("H2H_",)
+_FG_CARDS      = ("Home_YC_", "Away_YC_", "Home_RC_", "Away_RC_")
+_FG_FOULS      = ("Home_Fouls_", "Away_Fouls_")
+_FG_REFEREE    = ("Ref_",)
+_FG_CORNERS    = ("Home_HC_", "Away_HC_", "Home_AC_", "Away_AC_")
+_FG_SHOTS      = ("Home_HST_", "Away_HST_", "Home_HS_", "Away_HS_")
+_FG_TABLE      = ("Home_table_", "Away_table_", "Home_pos_", "Away_pos_")
+
+# What to EXCLUDE per market family — everything else is kept
+_MARKET_EXCLUDE: Dict[str, tuple] = {
+    # Goals-based markets: cards/fouls/corners/referee don't predict scores
+    "1x2":     _FG_CORNERS + _FG_CARDS + _FG_FOULS + _FG_REFEREE,
+    "btts":    _FG_CORNERS + _FG_CARDS + _FG_FOULS + _FG_REFEREE,
+    "ou":      _FG_CORNERS + _FG_CARDS + _FG_FOULS + _FG_REFEREE,
+    "home_tg": _FG_CORNERS + _FG_CARDS + _FG_FOULS + _FG_REFEREE,
+    "away_tg": _FG_CORNERS + _FG_CARDS + _FG_FOULS + _FG_REFEREE,
+    # Cards markets: goals/xG/corners/BTTS/CS don't predict booking counts
+    "cards":   _FG_CORNERS + _FG_XG + _FG_FORM_GOALS + _FG_BTTS_CS + _FG_SHOTS,
+    # Corners markets: cards/fouls/referee/BTTS/CS don't predict corner counts
+    "corners": _FG_CARDS + _FG_FOULS + _FG_REFEREE + _FG_BTTS_CS,
+    # HTFT: HT result can depend on everything — no exclusions
+    "htft":    (),
+}
+
+
+def _market_family(target_col: str) -> str:
+    """Map target column name to a feature-selection family."""
+    if target_col == "y_1X2":    return "1x2"
+    if target_col == "y_BTTS":   return "btts"
+    if target_col == "y_HTFT":   return "htft"
+    if "OU" in target_col:       return "ou"
+    if target_col.startswith("y_HomeTG"):  return "home_tg"
+    if target_col.startswith("y_AwayTG"):  return "away_tg"
+    if any(x in target_col for x in ("YC", "BookingPts", "Cards")):  return "cards"
+    if any(x in target_col for x in ("Corners", "HC_", "AC_")):      return "corners"
+    return "htft"  # unknown markets: use all features
+
+
+def _domain_filter(target_col: str, num_cols: List[str], cat_cols: List[str]) -> Tuple[List[str], List[str]]:
+    """Remove feature groups that are logically irrelevant for this market."""
+    family = _market_family(target_col)
+    exclude = _MARKET_EXCLUDE.get(family, ())
+    if not exclude:
+        return num_cols, cat_cols
+    def keep(col: str) -> bool:
+        return not any(col == p or col.startswith(p) for p in exclude)
+    return [c for c in num_cols if keep(c)], [c for c in cat_cols if keep(c)]
+
+
+def _importance_prune(
+    sub: pd.DataFrame, num_cols: List[str], cat_cols: List[str],
+    y: np.ndarray, target_col: str, coverage: float = 0.99,
+) -> Tuple[List[str], List[str]]:
+    """Quick 50-tree LGB scan to drop zero/noise features, keeping `coverage` of total importance."""
+    if not _HAS_LGB:
+        return num_cols, cat_cols
+    all_cols = num_cols + cat_cols
+    if len(all_cols) <= 20:
+        return num_cols, cat_cols
+
+    X_scan = sub[all_cols].copy()
+    for c in cat_cols:
+        X_scan[c] = X_scan[c].astype("category")
+
+    n_classes = len(np.unique(y))
+    obj = "binary" if n_classes == 2 else "multiclass"
+    scan_params: Dict = dict(n_estimators=50, num_leaves=31, learning_rate=0.1,
+                              verbose=-1, random_state=42, n_jobs=-1)
+    if n_classes > 2:
+        scan_params["num_class"] = n_classes
+
+    try:
+        cat_indices = [i for i, c in enumerate(all_cols) if c in set(cat_cols)]
+        scan = lgb.LGBMClassifier(objective=obj, **scan_params)
+        scan.fit(X_scan.values, y, categorical_feature=cat_indices if cat_indices else "auto")
+        importances = scan.feature_importances_.astype(float)
+    except Exception as e:
+        print(f"  [FEAT] Importance scan failed ({e}), keeping all features")
+        return num_cols, cat_cols
+
+    total = importances.sum()
+    if total == 0:
+        return num_cols, cat_cols
+
+    order = np.argsort(importances)[::-1]
+    cumsum = np.cumsum(importances[order]) / total
+    n_keep = max(int(np.searchsorted(cumsum, coverage)) + 1, min(20, len(all_cols)))
+    n_keep = min(n_keep, len(all_cols))
+
+    keep_set = set(np.array(all_cols)[order[:n_keep]])
+    dropped = len(all_cols) - n_keep
+    if dropped > 0:
+        print(f"  [FEAT] {target_col}: {len(all_cols)} -> {n_keep} features "
+              f"(dropped {dropped} noise features, {coverage*100:.0f}% importance kept)")
+
+    return [c for c in num_cols if c in keep_set], [c for c in cat_cols if c in keep_set]
+
+
+# --------------------------------------------------------------------------------------
 # Preprocess
 # --------------------------------------------------------------------------------------
 def _feature_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-    id_cols = {"League","Date","HomeTeam","AwayTeam","Season","Referee",
+    id_cols = {"League","Date","HomeTeam","AwayTeam","Season","Referee","referee",
                "fixture_id","Home_ID","Away_ID","League_ID"}
     target_cols = set([c for c in df.columns if c.startswith("y_")])
     # CRITICAL: Exclude ALL result columns — including half-time scores.
@@ -308,15 +439,21 @@ def _feature_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
     # These are the match's own shots/corners/cards — knowing them = knowing the match.
     raw_match_stats = {"HS", "AS", "HST", "AST", "HC", "AC",
                        "HY", "AY", "HR", "AR", "HF", "AF"}
-    exclude = id_cols | target_cols | result_cols | raw_match_stats
+    # Exclude known-blank columns: bookmaker odds (not in API data) and raw xG/BigChances
+    # (fixture_statistics table is empty until API renewal — all zeros, zero variance).
+    blank_cols = {"B365H","B365D","B365A","PSCH","PSCD","PSCA",
+                  "B365_Impl_H","B365_Impl_D","B365_Impl_A","B365_Overround",
+                  "Home_xG","Away_xG","Home_BigChances","Away_BigChances"}
+    exclude = id_cols | target_cols | result_cols | raw_match_stats | blank_cols
     cand = [c for c in df.columns if c not in exclude]
     cat = [c for c in cand if str(df[c].dtype) in ("object","string","category","bool")]
     num = [c for c in cand if c not in cat]
     return num, cat
 
 
-def _preprocessor(df: pd.DataFrame) -> ColumnTransformer:
-    num_cols, cat_cols = _feature_columns(df)
+def _preprocessor(df: pd.DataFrame, num_cols=None, cat_cols=None) -> ColumnTransformer:
+    if num_cols is None or cat_cols is None:
+        num_cols, cat_cols = _feature_columns(df)
     num_trf = Pipeline(steps=[
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler())
@@ -693,14 +830,34 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
     """
     global _DC_PARAMS_CACHE
 
-    # Use cached params if available and caching enabled
-    cache_key = len(train_df)  # Simple cache key based on training data size
+    # Key on (min_date, max_date, row_count)
+    _dt = train_df["Date"]
+    cache_key = (str(_dt.min())[:10], str(_dt.max())[:10], len(train_df))
+    _ck_str = f"{cache_key[0]}_{cache_key[1]}_{cache_key[2]}"
+
     if use_cache and cache_key in _DC_PARAMS_CACHE:
         params = _DC_PARAMS_CACHE[cache_key]
     else:
-        params = dc_fit_all(train_df[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
-        if use_cache:
-            _DC_PARAMS_CACHE[cache_key] = params
+        # Try disk cache first (survives across subprocess calls in auto_tune)
+        disk_path = _DC_DISK_CACHE_DIR / f"dc_{_ck_str}.pkl"
+        if use_cache and disk_path.exists():
+            try:
+                with open(disk_path, "rb") as _f:
+                    params = pickle.load(_f)
+                _DC_PARAMS_CACHE[cache_key] = params
+            except Exception:
+                params = None
+
+        if not use_cache or cache_key not in _DC_PARAMS_CACHE:
+            params = dc_fit_all(train_df[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]])
+            if use_cache:
+                _DC_PARAMS_CACHE[cache_key] = params
+                try:
+                    _DC_DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    with open(disk_path, "wb") as _f:
+                        pickle.dump(params, _f)
+                except Exception:
+                    pass
     out = []
 
     for _, r in rows_df[["League","HomeTeam","AwayTeam"]].iterrows():
@@ -934,9 +1091,16 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     if len(classes) > 50:
         print(f"[WARN] Skipping {target_col} - too many classes ({len(classes)}), max 50 supported")
         return None
-    pre = _preprocessor(sub)
+    # --- Per-market feature selection ---
+    # 1. Domain filter: remove logically irrelevant feature groups
+    # 2. Importance prune: quick LGB scan to drop zero-signal features
+    _num_cols, _cat_cols = _feature_columns(sub)
+    _num_cols, _cat_cols = _domain_filter(target_col, _num_cols, _cat_cols)
+    _num_cols, _cat_cols = _importance_prune(sub, _num_cols, _cat_cols, y_int, target_col)
+
+    pre = _preprocessor(sub, num_cols=_num_cols, cat_cols=_cat_cols)
     X_all = pre.fit_transform(sub)
-    feature_names = [*(pre.transformers_[0][2] or []), *(pre.transformers_[1][2] or [])]
+    feature_names = _num_cols + _cat_cols
 
     # ===== SPEED-AWARE MODEL SELECTION =====
     # Use speed config to determine models, with market config as secondary
@@ -1137,37 +1301,52 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     meta = LogisticRegression(max_iter=2000, n_jobs=-1)
     meta.fit(oof_pred, y_int)
 
-    # Calibration on OOF meta outputs
-    if hasattr(meta, "decision_function"):
-        decision_scores = meta.decision_function(oof_pred)
-        if decision_scores.ndim == 1:  # Binary classification
-            P_meta_oof = meta.predict_proba(oof_pred)
-        else:  # Multi-class
-            P_meta_oof = _softmax_np(decision_scores)
+    # Calibration: use last temporal fold only (true holdout) to avoid in-sample overconfidence.
+    # The last fold contains the most recent ~1/n_folds of data — models trained on earlier
+    # folds produce genuinely out-of-sample predictions here, giving calibrators a realistic
+    # confidence distribution to fit against.
+    last_fold_id = np.unique(ps.test_fold)[-1]
+    cal_mask = ps.test_fold == last_fold_id
+    use_holdout_cal = cal_mask.sum() >= 100  # Fallback to all OOF if too few holdout samples
+
+    if use_holdout_cal:
+        cal_oof = oof_pred[cal_mask]
+        cal_y = y_int[cal_mask]
+        print(f"  [CAL] Holdout calibration on last fold: {cal_mask.sum()} samples")
     else:
-        P_meta_oof = meta.predict_proba(oof_pred)
+        cal_oof = oof_pred
+        cal_y = y_int
+        print(f"  [CAL] Falling back to full OOF calibration ({len(y_int)} samples, too few holdout)")
+
+    if hasattr(meta, "decision_function"):
+        decision_scores = meta.decision_function(cal_oof)
+        if decision_scores.ndim == 1:
+            P_meta_cal = meta.predict_proba(cal_oof)
+        else:
+            P_meta_cal = _softmax_np(decision_scores)
+    else:
+        P_meta_cal = meta.predict_proba(cal_oof)
 
     # Use market-aware calibration
     if _HAS_MARKET_CONFIG:
         calibrator = get_calibrator_for_market(target_col, len(classes))
         if isinstance(calibrator, IsotonicOrdinalCalibrator):
             print(f"  [TREND] Using ISOTONIC ordinal calibration")
-            calibrator.fit(P_meta_oof, y_int)
+            calibrator.fit(P_meta_cal, cal_y)
         elif isinstance(calibrator, BetaCalibrator):
             print(f"  [TREND] Using BETA calibration")
-            calibrator.fit(P_meta_oof, y_int)
+            calibrator.fit(P_meta_cal, cal_y)
         elif isinstance(calibrator, DirichletCalibrator):
             print(f"  [TREND] Using DIRICHLET calibration")
-            calibrator.fit(P_meta_oof, y_int)
+            calibrator.fit(P_meta_cal, cal_y)
         else:
-            logits = np.log(np.clip(P_meta_oof, 1e-12, 1-1e-12))
-            calibrator.fit(logits, y_int)
+            logits = np.log(np.clip(P_meta_cal, 1e-12, 1-1e-12))
+            calibrator.fit(logits, cal_y)
     elif len(classes) > 2:
-        calibrator = DirichletCalibrator(C=1.0, max_iter=2000).fit(P_meta_oof, y_int)
+        calibrator = DirichletCalibrator(C=1.0, max_iter=2000).fit(P_meta_cal, cal_y)
     else:
-        # build pseudo logits
-        logits = np.log(np.clip(P_meta_oof, 1e-12, 1-1e-12))
-        calibrator = TemperatureScaler().fit(logits, y_int)
+        logits = np.log(np.clip(P_meta_cal, 1e-12, 1-1e-12))
+        calibrator = TemperatureScaler().fit(logits, cal_y)
 
     # Fit base models on FULL data for inference
     full_stack = []

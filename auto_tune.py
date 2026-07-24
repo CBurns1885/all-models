@@ -15,9 +15,15 @@ Usage:
     python auto_tune.py --phase2     # joint refinement only (uses existing best)
 """
 
+import sys, io
+# Force UTF-8 stdout so emoji in backtest/predict print statements don't crash on Windows cp1252
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+
 import argparse
 import csv
 import json
+import os
 import signal
 import sys
 import time
@@ -27,6 +33,7 @@ from itertools import product
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -62,8 +69,8 @@ PARAM_GROUPS = [
     {
         "name": "home_advantage",
         "params": {
-            "home_adv_1x2_h": [0.15, 0.2, 0.3, 0.4],
-            "home_adv_1x2_a": [0.15, 0.2, 0.3, 0.4],
+            "home_adv_1x2_h": [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            "home_adv_1x2_a": [0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
         },
         "constraint": lambda p: p["home_adv_1x2_h"] == p["home_adv_1x2_a"],
         "extra_static": {"home_adv_1x2_d": None},  # derived: half of H
@@ -89,7 +96,7 @@ PARAM_GROUPS = [
     {
         "name": "time_halflife",
         "params": {
-            "time_half_life": [90, 120, 150, 180, 210, 270, 365],
+            "time_half_life": [120, 180, 270, 365, 500, 730, 1000],
         },
     },
     # Group 6: ML weight cap (5 trials)
@@ -97,6 +104,44 @@ PARAM_GROUPS = [
         "name": "ml_weight_cap",
         "params": {
             "ml_weight_cap": [0.70, 0.75, 0.80, 0.85, 0.90],
+        },
+    },
+    # Group 7: DC temperature scaling (6 trials) — T>1 softens DC overconfidence
+    {
+        "name": "dc_temperature",
+        "params": {
+            "dc_temperature": [1.0, 1.1, 1.25, 1.5, 1.75, 2.0],
+        },
+    },
+    # Group 8: 1X2-specific DC temperature — 1X2 tends to be overconfident, needs more softening
+    # Uses dc_temperature as floor; independent of global temperature
+    {
+        "name": "dc_temperature_1x2",
+        "params": {
+            "dc_temperature_1x2": [1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0],
+        },
+    },
+    # Group 9: ML weight cap for 1X2 — DC is purpose-built for match results; reduce ML influence
+    {
+        "name": "ml_weight_cap_1x2",
+        "params": {
+            "ml_weight_cap_1x2": [0.40, 0.50, 0.60, 0.70, 0.80],
+        },
+    },
+    # Group 10: Temperature scaling for binary markets (corners, cards, YC, HomeTG, AwayTG)
+    # These have no DC signal; LightGBM outputs near-100% confidence but accuracy is 54-87%
+    # T > 1 compresses probabilities toward 0.5, reducing overconfidence
+    {
+        "name": "temperature_binary",
+        "params": {
+            "temperature_binary": [1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 10.0],
+        },
+    },
+    # HomeTG/AwayTG have DC support so are better calibrated — gentler compression than corners
+    {
+        "name": "temperature_hometg",
+        "params": {
+            "temperature_hometg": [1.0, 1.25, 1.5, 2.0, 2.5, 3.0],
         },
     },
 ]
@@ -141,56 +186,310 @@ def _trial_count():
 # ---------------------------------------------------------------------------
 # Backtest runner
 # ---------------------------------------------------------------------------
-BACKTEST_MONTHS = 6  # default: backtest over last 6 months
+_TUNING_PARAMS_PATH = Path(__file__).parent / "outputs" / "tuning_best_params.json"
+_MARKET_BACKTEST_CSV = Path(__file__).parent / "outputs" / "market_backtest_analysis.csv"
+_PRED_CACHE_PATH = Path(__file__).parent / "outputs" / "tuning_preds_cache.parquet"
+_NEUTRAL_OVERRIDES = {
+    "calibration_scalar": 1.0,
+    "style_boost_magnitude": 0.0,
+    "home_adv_1x2_h": 0.0,
+    "home_adv_1x2_a": 0.0,
+    "home_adv_1x2_d": 0.0,
+    "poisson_blend_weights": {"0_5": 0.0, "1_5": 0.0, "2_5": 0.0, "3_5": 0.0, "4_5": 0.0, "5_5": 0.0},
+    "btts_poisson_weight": 0.0,
+    "time_half_life": 180,
+    "ml_weight_cap": 1.0,
+    "dc_temperature": 1.0,
+    "dc_temperature_1x2": 1.0,
+    "ml_weight_cap_1x2": 1.0,
+    "temperature_binary": 1.0,
+    "temperature_hometg": 1.0,
+}
+_PRED_CACHE: dict = {}  # in-memory: {"df": DataFrame, "built_at": float}
+# Keys whose groups require a full predict_week() re-run (cannot apply in-process)
+_SUBPROCESS_KEYS = {"style_boost_magnitude", "time_half_life"}
+
+
+def _ensure_pred_cache() -> pd.DataFrame:
+    """Build or load the prediction cache.  Cache is built once with NEUTRAL overrides
+    (no calibration_scalar, no home_adv, etc.) so each trial can apply its overrides
+    to the raw P_/DC_ columns in-process.  Returns the cached DataFrame."""
+    import subprocess
+
+    if _PRED_CACHE.get("df") is not None:
+        return _PRED_CACHE["df"]
+
+    if _PRED_CACHE_PATH.exists():
+        df = pd.read_parquet(_PRED_CACHE_PATH)
+        if len(df) > 0:
+            _PRED_CACHE["df"] = df
+            print(f"  [CACHE] Loaded prediction cache: {len(df)} matches")
+            return df
+
+    # Build cache: write neutral overrides then run market_backtest.py
+    print("  [CACHE] Building prediction cache (run once, ~5 min)...")
+    _TUNING_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_TUNING_PARAMS_PATH, "w") as f:
+        json.dump(_NEUTRAL_OVERRIDES, f, indent=2)
+
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "market_backtest.py"),
+         "--weeks", "20", "--min-confidence", "0.70"],
+        text=True, encoding="utf-8", errors="replace", env=env
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Cache build failed (exit {result.returncode})")
+
+    if not _PRED_CACHE_PATH.exists():
+        raise RuntimeError("market_backtest.py ran but did not produce tuning_preds_cache.parquet")
+
+    df = pd.read_parquet(_PRED_CACHE_PATH)
+    _PRED_CACHE["df"] = df
+    print(f"  [CACHE] Built prediction cache: {len(df)} matches")
+    return df
+
+
+def _apply_overrides_and_score(cache: pd.DataFrame, overrides: dict,
+                                min_conf: float = 0.70) -> dict:
+    """Apply TUNING_OVERRIDES to cached P_/DC_ predictions and score accuracy.
+
+    Parameters applied in-process (no re-training or DC re-fitting):
+      - calibration_scalar: scale P_ probs toward/from 0.5
+      - home_adv_1x2_*: multiplicative adjustment to 1X2 P_ columns
+      - dc_temperature: temperature-scale DC_ columns
+      - poisson_blend_weights / btts_poisson_weight: re-blend P_ + DC_
+      - ml_weight_cap: cap max P_ probability
+      - style_boost_magnitude, time_half_life: require prediction re-run — skipped here
+        (subprocess fallback used for those groups)
+    """
+    df = cache.copy()
+
+    cs = float(overrides.get("calibration_scalar", 1.0))
+    ha_h = float(overrides.get("home_adv_1x2_h", 0.0))
+    ha_a = float(overrides.get("home_adv_1x2_a", 0.0))
+    ha_d = float(overrides.get("home_adv_1x2_d", 0.0))
+    dc_temp = float(overrides.get("dc_temperature", 1.0))
+    ml_cap = float(overrides.get("ml_weight_cap", 1.0))
+    pw = overrides.get("poisson_blend_weights", {})
+    bw = float(overrides.get("btts_poisson_weight", 0.0))
+    # Per-market 1X2 params (fall back to global if not set)
+    dc_temp_1x2 = float(overrides.get("dc_temperature_1x2", dc_temp))
+    ml_cap_1x2 = float(overrides.get("ml_weight_cap_1x2", ml_cap))
+
+    def renorm(arr: np.ndarray) -> np.ndarray:
+        s = arr.sum(axis=1, keepdims=True)
+        s = np.where(s == 0, 1.0, s)
+        return arr / s
+
+    def apply_cs(cols):
+        if cs == 1.0:
+            return
+        vals = df[cols].values.astype(float)
+        vals = renorm(0.5 + (vals - 0.5) * cs)
+        df[cols] = vals
+
+    def apply_dc_temp(dc_cols):
+        if dc_temp == 1.0:
+            return
+        vals = df[dc_cols].values.astype(float)
+        log_v = np.log(np.clip(vals, 1e-10, None)) / dc_temp
+        log_v -= log_v.max(axis=1, keepdims=True)
+        df[dc_cols] = renorm(np.exp(log_v))
+
+    # Apply calibration scalar to all P_ columns
+    p_cols_all = [c for c in df.columns if c.startswith("P_")]
+    if p_cols_all and cs != 1.0:
+        vals = df[p_cols_all].values.astype(float)
+        # Scale each group toward 0.5 (don't cross-normalise across markets)
+        df[p_cols_all] = np.clip(0.5 + (vals - 0.5) * cs, 0.0, 1.0)
+
+    # Apply home advantage to 1X2
+    for col, ha in [("P_1X2_H", ha_h), ("P_1X2_A", ha_a), ("P_1X2_D", ha_d)]:
+        if col in df.columns and ha != 0.0:
+            if "H" in col:
+                df[col] = np.minimum(df[col].values.astype(float) * (1 + ha), 0.95)
+            elif "A" in col:
+                df[col] = np.maximum(df[col].values.astype(float) * (1 - ha), 0.05)
+            else:
+                df[col] = np.clip(df[col].values.astype(float) * (1 - ha), 0.05, 0.45)
+
+    # Apply ml_weight_cap
+    if ml_cap < 1.0:
+        for c in p_cols_all:
+            if c in df.columns:
+                df[c] = np.minimum(df[c].values.astype(float), ml_cap)
+
+    # Re-blend 1X2 with per-market DC temperature + ML weight cap
+    dc_cols_1x2 = [c for c in ["DC_1X2_H", "DC_1X2_D", "DC_1X2_A"] if c in df.columns]
+    p_cols_1x2  = [c for c in ["P_1X2_H", "P_1X2_D", "P_1X2_A"]   if c in df.columns]
+    if len(dc_cols_1x2) == 3 and len(p_cols_1x2) == 3:
+        dc_vals = df[dc_cols_1x2].values.astype(float)
+        if dc_temp_1x2 != 1.0:
+            log_v = np.log(np.clip(dc_vals, 1e-10, None)) / dc_temp_1x2
+            log_v -= log_v.max(axis=1, keepdims=True)
+            dc_vals = renorm(np.exp(log_v))
+        p_vals = df[p_cols_1x2].values.astype(float)
+        blend_1x2 = renorm(ml_cap_1x2 * p_vals + (1 - ml_cap_1x2) * dc_vals)
+        df["BLEND_1X2_H"] = blend_1x2[:, 0]
+        df["BLEND_1X2_D"] = blend_1x2[:, 1]
+        df["BLEND_1X2_A"] = blend_1x2[:, 2]
+
+    # Re-blend OU markets
+    for line_tag in ["0_5", "1_5", "2_5", "3_5", "4_5", "5_5"]:
+        alpha = float(pw.get(line_tag, 0.0))
+        p_o = f"P_OU_{line_tag}_O"; p_u = f"P_OU_{line_tag}_U"
+        d_o = f"DC_OU_{line_tag}_O"; d_u = f"DC_OU_{line_tag}_U"
+        b_o = f"BLEND_OU_{line_tag}_O"; b_u = f"BLEND_OU_{line_tag}_U"
+        if p_o in df.columns and d_o in df.columns:
+            df[b_o] = alpha * df[p_o].values.astype(float) + (1 - alpha) * df[d_o].values.astype(float)
+            df[b_u] = alpha * df[p_u].values.astype(float) + (1 - alpha) * df[d_u].values.astype(float)
+
+    # Re-blend BTTS
+    if "P_BTTS_Y" in df.columns and "DC_BTTS_Y" in df.columns and bw != 0.0:
+        df["BLEND_BTTS_Y"] = bw * df["P_BTTS_Y"].values.astype(float) + \
+                             (1 - bw) * df["DC_BTTS_Y"].values.astype(float)
+        df["BLEND_BTTS_N"] = 1 - df["BLEND_BTTS_Y"]
+
+    # Apply temperature_binary to pure-ML binary markets (corners, YC, cards) — NOT HomeTG/AwayTG
+    # HomeTG/AwayTG have DC support and use temperature_hometg (separate param below)
+    temp_b = float(overrides.get("temperature_binary", 1.0))
+    if temp_b != 1.0:
+        binary_prefixes = ("P_TotalCorners_", "P_HomeCorners_", "P_AwayCorners_",
+                           "P_TotalYC_", "P_BookingPts_", "P_HomeTeam_Card", "P_AwayTeam_Card")
+        for col in df.columns:
+            if any(col.startswith(pfx) for pfx in binary_prefixes):
+                vals = df[col].values.astype(float)
+                log_odds = np.log(np.clip(vals, 1e-9, 1 - 1e-9) / np.clip(1 - vals, 1e-9, 1 - 1e-9)) / temp_b
+                df[col] = 1.0 / (1.0 + np.exp(-log_odds))
+
+    # Apply temperature_hometg to DC-supported TG markets (HomeTG, AwayTG)
+    temp_htg = float(overrides.get("temperature_hometg", 1.0))
+    if temp_htg != 1.0:
+        for col in df.columns:
+            if col.startswith("P_HomeTG_") or col.startswith("P_AwayTG_"):
+                vals = df[col].values.astype(float)
+                log_odds = np.log(np.clip(vals, 1e-9, 1 - 1e-9) / np.clip(1 - vals, 1e-9, 1 - 1e-9)) / temp_htg
+                df[col] = 1.0 / (1.0 + np.exp(-log_odds))
+
+    # Score markets
+    MARKET_PAIRS = {
+        "1X2":          (["BLEND_1X2_H", "BLEND_1X2_D", "BLEND_1X2_A"], ["FTR"], {"H": "H", "D": "D", "A": "A"}),
+        "BTTS":         (["P_BTTS_Y", "P_BTTS_N"],           ["BTTS_actual"], None),
+        "OU_2_5":       (["P_OU_2_5_O", "P_OU_2_5_U"],       ["OU_2_5_actual"], None),
+        "OU_1_5":       (["P_OU_1_5_O", "P_OU_1_5_U"],       ["OU_1_5_actual"], None),
+        "OU_3_5":       (["P_OU_3_5_O", "P_OU_3_5_U"],       ["OU_3_5_actual"], None),
+        "HomeTG_0_5":   (["P_HomeTG_0_5_O", "P_HomeTG_0_5_U"], ["y_HomeTG_0_5"], None),
+        "AwayTG_0_5":   (["P_AwayTG_0_5_O", "P_AwayTG_0_5_U"], ["y_AwayTG_0_5"], None),
+        "TotalCorners_O9_5": (["P_TotalCorners_O9_5_Y", "P_TotalCorners_O9_5_N"], ["y_TotalCorners_O9_5"], None),
+        "TotalYC_O3_5": (["P_TotalYC_O3_5_Y", "P_TotalYC_O3_5_N"], ["y_TotalYC_O3_5"], None),
+    }
+
+    # Precompute actual values if not already in cache
+    if "BTTS_actual" not in df.columns:
+        if "FTHG" in df.columns and "FTAG" in df.columns:
+            total = df["FTHG"].fillna(0).astype(int) + df["FTAG"].fillna(0).astype(int)
+            df["BTTS_actual"] = np.where(
+                (df["FTHG"].fillna(0).astype(int) > 0) & (df["FTAG"].fillna(0).astype(int) > 0), "Y", "N")
+            for line in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
+                tag = str(line).replace(".", "_")
+                df[f"OU_{tag}_actual"] = np.where(total > line, "O", "U")
+
+    results = []
+    for market, (prob_cols, actual_cols, label_map) in MARKET_PAIRS.items():
+        pcols = [c for c in prob_cols if c in df.columns]
+        acol = next((c for c in actual_cols if c in df.columns), None)
+        if not pcols or not acol:
+            continue
+        probs = df[pcols].values.astype(float)
+        pred_idx = probs.argmax(axis=1)
+        actual_raw = df[acol].values
+
+        # Normalise actual labels to match prob column suffixes
+        labels = [col.split("_")[-1] for col in pcols]
+        if label_map:
+            actual = np.array([label_map.get(str(a), str(a)) for a in actual_raw])
+        else:
+            actual = np.array([str(a) for a in actual_raw])
+
+        # One-hot encode for real Brier score (sensitive to probability values, not just argmax)
+        one_hot = np.zeros_like(probs)
+        for j, label in enumerate(labels):
+            one_hot[:, j] = (actual == label).astype(float)
+
+        brier = float(np.mean(np.sum((probs - one_hot) ** 2, axis=1)))
+        pred_labels = np.array([labels[i] for i in pred_idx])
+        accuracy = float((pred_labels == actual).mean())
+
+        results.append({
+            "market": market,
+            "n": len(actual),
+            "brier": brier,
+            "accuracy": accuracy,
+        })
+
+    if not results:
+        return {"accuracy": 0.0, "brier": 1.0, "weighted_brier": 1.0, "roi": -100.0}
+
+    total_n = sum(r["n"] for r in results)
+    weighted_brier = sum(r["brier"] * r["n"] for r in results) / total_n
+    avg_acc = float(np.mean([r["accuracy"] for r in results])) * 100
+
+    return {
+        "accuracy": round(avg_acc, 2),
+        "brier": round(weighted_brier, 4),
+        "weighted_brier": round(weighted_brier, 4),
+        "roi": 0.0,
+        "markets": results,
+    }
 
 
 def run_backtest(overrides: dict) -> dict:
-    """Run a single backtest with the given TUNING_OVERRIDES.
+    """Score TUNING_OVERRIDES via market_backtest.py subprocess (~5 min/trial with --weeks 1).
 
-    Returns dict with keys: accuracy, brier, weighted_brier, roi, duration_s
+    Writes overrides to tuning_best_params.json so predict.py picks them up,
+    then calls market_backtest.py --weeks 1 and reads the per-market accuracy CSV.
     """
-    import predict
-    predict.TUNING_OVERRIDES.clear()
-    predict.TUNING_OVERRIDES.update(overrides)
-
-    from backtest import BacktestEngine
-    from datetime import datetime, timedelta
-
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=BACKTEST_MONTHS * 30)
+    import subprocess
 
     start = time.time()
     try:
-        engine = BacktestEngine(
-            start_date=start_date.strftime('%Y-%m-%d'),
-            end_date=end_date.strftime('%Y-%m-%d'),
-            test_window_days=7,
+        _TUNING_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_TUNING_PARAMS_PATH, "w") as f:
+            json.dump(overrides, f, indent=2)
+
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "market_backtest.py"),
+             "--weeks", "20", "--min-confidence", "0.70"],
+            text=True, encoding="utf-8", errors="replace", env=env
         )
-        results = engine.run_backtest()
+        if result.returncode != 0:
+            raise RuntimeError(f"subprocess exit {result.returncode}")
 
-        if results is None or results.empty:
-            return {"accuracy": 0.0, "brier": 1.0, "weighted_brier": 1.0,
-                    "roi": -100.0, "duration_s": time.time() - start}
+        if not _MARKET_BACKTEST_CSV.exists():
+            raise RuntimeError("no analysis CSV produced")
 
-        # Market-weighted Brier (primary metric)
-        weights = results["Weight"].values if "Weight" in results.columns else np.ones(len(results))
-        briers = results["Brier_Score"].values if "Brier_Score" in results.columns else np.ones(len(results))
-        weighted_brier = float(np.average(briers, weights=weights))
+        df_res = pd.read_csv(_MARKET_BACKTEST_CSV)
+        if df_res.empty:
+            raise RuntimeError("empty results CSV")
 
-        accuracy = results["Accuracy_%"].mean() if "Accuracy_%" in results.columns else 0.0
-        brier = results["Brier_Score"].mean() if "Brier_Score" in results.columns else 1.0
-        roi = float(np.average(
-            results["ROI_%"].values,
-            weights=weights
-        )) if "ROI_%" in results.columns else -100.0
+        acc_col   = next((c for c in ["accuracy", "Accuracy_%", "Accuracy"] if c in df_res.columns), None)
+        brier_col = next((c for c in ["brier_score", "brier", "Brier_Score", "Brier"] if c in df_res.columns), None)
+        roi_col   = next((c for c in ["roi_fair", "ROI_%", "ROI", "roi"]   if c in df_res.columns), None)
+
+        acc   = float(df_res[acc_col].mean()   * 100) if acc_col   else 0.0
+        brier = float(df_res[brier_col].mean())        if brier_col else round(1 - acc / 100, 4)
+        roi   = float(df_res[roi_col].mean())          if roi_col   else 0.0
 
         return {
-            "accuracy": round(float(accuracy), 2),
-            "brier": round(float(brier), 4),
-            "weighted_brier": round(weighted_brier, 4),
+            "accuracy": round(acc, 2),
+            "brier": round(brier, 4),
+            "weighted_brier": round(brier, 4),
             "roi": round(roi, 2),
             "duration_s": round(time.time() - start, 1),
         }
+
     except Exception as e:
         print(f"  [ERROR] Backtest failed: {e}")
         return {"accuracy": 0.0, "brier": 1.0, "weighted_brier": 1.0,
@@ -339,6 +638,15 @@ def _build_joint_refinement(best_params: dict) -> list[tuple[str, dict]]:
         combo = {"time_half_life": tv, "ml_weight_cap": mv}
         combos.append(("time×ml", combo))
 
+    # --- Pair 4: dc_temperature × ml_weight_cap ---
+    dc_temp_vals = _neighbours(
+        best_params.get("dc_temperature", 1.0),
+        [1.0, 1.1, 1.25, 1.5, 1.75, 2.0],
+    )
+    for dt, mv in product(dc_temp_vals, ml_vals):
+        combo = {"dc_temperature": dt, "ml_weight_cap": mv}
+        combos.append(("dc_temp×ml", combo))
+
     # --- 3-way cross: calibration × time_half_life × ml_weight_cap ---
     for cal, tv, mv in product(cal_vals, time_vals, ml_vals):
         combo = {"calibration_scalar": cal, "time_half_life": tv, "ml_weight_cap": mv}
@@ -354,6 +662,22 @@ def _build_joint_refinement(best_params: dict) -> list[tuple[str, dict]]:
             unique.append((name, combo))
 
     return unique
+
+
+def _score_trial(overrides: dict, combo: dict) -> dict:
+    """Route to fast in-process scoring or slow subprocess depending on combo keys.
+
+    In-process: applies overrides to cached P_/DC_ columns (~1s per trial).
+    Subprocess: calls market_backtest.py for params that need predict re-run (~17 min).
+    """
+    needs_subprocess = bool(set(combo.keys()) & _SUBPROCESS_KEYS)
+    cache = _PRED_CACHE.get("df")
+    if cache is not None and not needs_subprocess:
+        start = time.time()
+        result = _apply_overrides_and_score(cache, overrides)
+        result["duration_s"] = round(time.time() - start, 1)
+        return result
+    return run_backtest(overrides)
 
 
 def main():
@@ -414,6 +738,30 @@ def main():
     init_csv()
     overall_start = time.time()
 
+    # Snapshot incumbent best score AND params BEFORE any trial writes to BEST_JSON.
+    # run_backtest() overwrites BEST_JSON with trial params (no _tuning_score),
+    # so _write_outputs() must use this pre-run snapshot rather than reading the file.
+    _incumbent_score = -999.0
+    _incumbent_params: dict = {}
+    if BEST_JSON.exists():
+        try:
+            _incumbent_data = json.loads(BEST_JSON.read_text())
+            _incumbent_score = float(_incumbent_data.get("_tuning_score", -999.0))
+            _incumbent_params = _incumbent_data
+            print(f"[TUNE] Incumbent best score: {_incumbent_score:.3f}")
+        except Exception:
+            pass
+
+    # ===================================================================
+    # Load prediction cache for in-process scoring (avoids ~17 min subprocess per trial)
+    # ===================================================================
+    print("\n[CACHE] Loading prediction cache for in-process scoring...")
+    try:
+        _ensure_pred_cache()
+        print(f"[CACHE] Ready — in-process scoring active for non-subprocess groups")
+    except Exception as _ce:
+        print(f"[CACHE] Warning: could not load cache ({_ce}). All trials will use subprocess.")
+
     # ===================================================================
     # PHASE 1: Greedy sequential search
     # ===================================================================
@@ -443,14 +791,14 @@ def main():
                         "trial_counter": trial_counter,
                         "phase": 1,
                     })
-                    _write_outputs(best_params, best_score, overall_start)
+                    _write_outputs(best_params, best_score, overall_start, _incumbent_score, _incumbent_params)
                     sys.exit(0)
 
                 trial_counter += 1
                 overrides = {**best_params, **combo}
 
                 print(f"  Trial {trial_counter}: {combo}")
-                result = run_backtest(overrides)
+                result = _score_trial(overrides, combo)
                 sc = score_result(result)
                 print(f"    -> acc={result['accuracy']:.1f}% brier={result['brier']:.4f} roi={result['roi']:.1f}% score={sc:.3f} ({result['duration_s']:.0f}s)")
 
@@ -508,14 +856,14 @@ def main():
                     "trial_counter": trial_counter,
                     "phase": 2,
                 })
-                _write_outputs(phase2_best, phase2_score, overall_start)
+                _write_outputs(phase2_best, phase2_score, overall_start, _incumbent_score, _incumbent_params)
                 sys.exit(0)
 
             trial_counter += 1
             overrides = {**phase2_best, **combo}
 
             print(f"  Joint {ji+1}/{total_joint} [{joint_name}]: {combo}")
-            result = run_backtest(overrides)
+            result = _score_trial(overrides, combo)
             sc = score_result(result)
             print(f"    -> acc={result['accuracy']:.1f}% brier={result['brier']:.4f} roi={result['roi']:.1f}% score={sc:.3f} ({result['duration_s']:.0f}s)")
 
@@ -530,7 +878,7 @@ def main():
         best_score = phase2_score
         print(f"\n  Phase 2 complete. Joint-refined best score: {best_score:.3f}")
 
-    _write_outputs(best_params, best_score, overall_start)
+    _write_outputs(best_params, best_score, overall_start, _incumbent_score, _incumbent_params)
     if CHECKPOINT.exists():
         CHECKPOINT.unlink()
 
@@ -538,11 +886,23 @@ def main():
     print(f"Best params saved to: {BEST_JSON}")
 
 
-def _write_outputs(best_params: dict, best_score: float, start_time: float):
+def _write_outputs(best_params: dict, best_score: float, start_time: float,
+                   incumbent_score: float = -999.0, incumbent_params: dict = None):
     """Write final JSON outputs."""
     elapsed = time.time() - start_time
 
-    BEST_JSON.write_text(json.dumps(best_params, indent=2))
+    # Guard: only overwrite if this run beats the pre-run incumbent.
+    # Cannot read from BEST_JSON here — run_backtest() overwrites it with trial params
+    # (no _tuning_score), so reading it would always return -999.0.
+    if best_score >= incumbent_score:
+        payload = {**best_params, "_tuning_score": round(best_score, 4)}
+        BEST_JSON.write_text(json.dumps(payload, indent=2))
+        print(f"[TUNE] Params updated (score {incumbent_score:.3f} → {best_score:.3f})")
+    else:
+        # Restore the incumbent params so BEST_JSON is not left with trial garbage.
+        if incumbent_params:
+            BEST_JSON.write_text(json.dumps(incumbent_params, indent=2))
+        print(f"[TUNE] Keeping existing params (stored best {incumbent_score:.3f} > this run {best_score:.3f})")
 
     report = {
         "completed_at": datetime.now().isoformat(timespec="seconds"),

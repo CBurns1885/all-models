@@ -13,8 +13,9 @@ from config import (
     PROCESSED_DIR, FEATURES_PARQUET, HISTORICAL_PARQUET,
     TRAIN_SEASONS_BACK, USE_ELO, USE_ROLLING_FORM, USE_MARKET_FEATURES,
     USE_XG_FEATURES, USE_ADVANCED_STATS, FORM_WINDOWS, EWM_SPAN,
-    log_header
+    ALL_CUPS, EUROPEAN_CUPS, log_header
 )
+from api_football_adapter import get_injury_counts_from_db
 
 # -----------------------------
 # Utilities
@@ -170,16 +171,17 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["Corners"] = out["HC"]
         out["CardsY"] = out["HY"]
         out["CardsR"] = out["HR"]
-        
+        out["Fouls"] = out.get("Home_Fouls", np.nan)
+
         # Advanced stats (from API-Football)
-        out = _ensure_cols(out, ["Home_xG", "Home_Possession", "Home_Shots_Inside_Box", 
+        out = _ensure_cols(out, ["Home_xG", "Home_Possession", "Home_Shots_Inside_Box",
                                   "Home_Big_Chances", "Home_Pass_Accuracy"])
         out["xG"] = out.get("Home_xG", np.nan)
         out["Possession"] = out.get("Home_Possession", np.nan)
         out["ShotsInBox"] = out.get("Home_Shots_Inside_Box", np.nan)
         out["BigChances"] = out.get("Home_Big_Chances", np.nan)
         out["PassAcc"] = out.get("Home_Pass_Accuracy", np.nan)
-        
+
     else:  # Away
         out["Team"] = out["AwayTeam"]
         out["Opp"] = out["HomeTeam"]
@@ -188,14 +190,15 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["Win"] = (out["FTR"] == "A").astype(int)
         out["Draw"] = (out["FTR"] == "D").astype(int)
         out["Loss"] = (out["FTR"] == "H").astype(int)
-        
+
         out = _ensure_cols(out, ["AS","AST","AC","AY","AR"])
         out["Shots"] = out["AS"]
         out["ShotsT"] = out["AST"]
         out["Corners"] = out["AC"]
         out["CardsY"] = out["AY"]
         out["CardsR"] = out["AR"]
-        
+        out["Fouls"] = out.get("Away_Fouls", np.nan)
+
         out = _ensure_cols(out, ["Away_xG", "Away_Possession", "Away_Shots_Inside_Box",
                                   "Away_Big_Chances", "Away_Pass_Accuracy"])
         out["xG"] = out.get("Away_xG", np.nan)
@@ -203,17 +206,17 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["ShotsInBox"] = out.get("Away_Shots_Inside_Box", np.nan)
         out["BigChances"] = out.get("Away_Big_Chances", np.nan)
         out["PassAcc"] = out.get("Away_Pass_Accuracy", np.nan)
-    
+
     out["Side"] = side
     out["CleanSheet"] = (out["GoalsAgainst"] == 0).astype(int)
     out["FailedToScore"] = (out["GoalsFor"] == 0).astype(int)
     out["BTTS"] = ((out["GoalsFor"] > 0) & (out["GoalsAgainst"] > 0)).astype(int)
-    
+
     cols = ["League","Date","Team","Opp","Side","GoalsFor","GoalsAgainst",
-            "Win","Draw","Loss","Shots","ShotsT","Corners","CardsY","CardsR",
+            "Win","Draw","Loss","Shots","ShotsT","Corners","CardsY","CardsR","Fouls",
             "CleanSheet","FailedToScore","BTTS",
             "xG","Possession","ShotsInBox","BigChances","PassAcc"]
-    
+
     return out[[c for c in cols if c in out.columns]]
 
 def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataFrame:
@@ -236,8 +239,8 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         points = shifted["Win"] * 3 + shifted["Draw"]
         team_df[f"PPG_ma{w}"] = points.rolling(window=w, min_periods=1).mean()
 
-        # Shot stats
-        for col in ["Shots","ShotsT","Corners","CardsY","CardsR"]:
+        # Shot/discipline stats
+        for col in ["Shots","ShotsT","Corners","CardsY","CardsR","Fouls"]:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
 
@@ -251,15 +254,20 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
     
-    # EWMA features (recency-weighted)
-    ew = team_df.shift(1).ewm(span=EWM_SPAN, adjust=False)
-    team_df["GF_ewm"] = ew["GoalsFor"].mean()
-    team_df["GA_ewm"] = ew["GoalsAgainst"].mean()
-    team_df["PPG_ewm"] = (ew["Win"].mean() * 3 + ew["Draw"].mean())
-    
-    if "xG" in team_df.columns and team_df["xG"].notna().any():
-        team_df["xG_ewm"] = ew["xG"].mean()
-    
+    # EWMA features — two spans to capture both burst form and stable trend
+    shifted = team_df.shift(1)
+    for span, tag in [(3, "ewm3"), (EWM_SPAN, "ewm")]:
+        ew = shifted.ewm(span=span, adjust=False)
+        team_df[f"GF_{tag}"]  = ew["GoalsFor"].mean()
+        team_df[f"GA_{tag}"]  = ew["GoalsAgainst"].mean()
+        team_df[f"PPG_{tag}"] = ew["Win"].mean() * 3 + ew["Draw"].mean()
+        team_df[f"CleanSheet_rate_{tag}"] = ew["CleanSheet"].mean()
+        team_df[f"FTS_rate_{tag}"]        = ew["FailedToScore"].mean()
+        team_df[f"BTTS_rate_{tag}"]       = ew["BTTS"].mean()
+        for col in ["Shots", "ShotsT", "Corners", "CardsY", "CardsR", "Fouls", "xG"]:
+            if col in team_df.columns and team_df[col].notna().any():
+                team_df[f"{col}_{tag}"] = ew[col].mean()
+
     return team_df
 
 def _build_side_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -279,7 +287,7 @@ def _pivot_back(match_df: pd.DataFrame, side_feats: pd.DataFrame) -> pd.DataFram
     key_cols = ["League","Date","HomeTeam","AwayTeam"]
     
     # Get all potential columns from original
-    base_cols = key_cols + ["FTHG","FTAG","FTR"]
+    base_cols = key_cols + ["FTHG","FTAG","FTR","HTHG","HTAG","HTR","Season"]
     odds_cols = ["B365H","B365D","B365A","PSCH","PSCD","PSCA","AvgH","AvgD","AvgA",
                  "MaxH","MaxD","MaxA","Odds_O25","Odds_U25","Odds_BTTS_Y","Odds_BTTS_N"]
     
@@ -314,7 +322,12 @@ def _pivot_back(match_df: pd.DataFrame, side_feats: pd.DataFrame) -> pd.DataFram
 def _add_contextual_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add contextual match features"""
     out = df.copy()
-    
+
+    # Cup flag — draws are half as common in cups, away wins ~40% vs 31% in leagues
+    out['is_cup'] = out['League'].isin(ALL_CUPS).astype(int)
+    # European flag — UCL/UEL/UECL have elite-only teams, two-leg ties, neutral finals
+    out['is_european'] = out['League'].isin(EUROPEAN_CUPS).astype(int)
+
     # Day of week
     out['Date'] = pd.to_datetime(out['Date'])
     out['DayOfWeek'] = out['Date'].dt.dayofweek
@@ -734,9 +747,467 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     out["y_DCX2_BTTS_Y"] = np.where(out["FTR"].isin(["D", "A"]) & btts, "Y", "N")
     out["y_DCX2_BTTS_N"] = np.where(out["FTR"].isin(["D", "A"]) & ~btts, "Y", "N")
 
+    # ===========================================================================
+    # CARDS MARKETS (requires Home_CardsY, Away_CardsY, Home_CardsR, Away_CardsR)
+    # ===========================================================================
+    home_cy = "Home_CardsY" if "Home_CardsY" in out.columns else "HY" if "HY" in out.columns else None
+    away_cy = "Away_CardsY" if "Away_CardsY" in out.columns else "AY" if "AY" in out.columns else None
+    home_cr = "Home_CardsR" if "Home_CardsR" in out.columns else "HR" if "HR" in out.columns else None
+    away_cr = "Away_CardsR" if "Away_CardsR" in out.columns else "AR" if "AR" in out.columns else None
+
+    if home_cy and away_cy:
+        total_cy = pd.to_numeric(out[home_cy], errors='coerce').fillna(0) + \
+                   pd.to_numeric(out[away_cy], errors='coerce').fillna(0)
+        if home_cr and away_cr:
+            total_cr = pd.to_numeric(out[home_cr], errors='coerce').fillna(0) + \
+                       pd.to_numeric(out[away_cr], errors='coerce').fillna(0)
+            # Yellow cards equivalent: red = 2 yellows (standard booking-points equiv)
+            total_cards_pts = total_cy + total_cr * 2
+        else:
+            total_cards_pts = total_cy
+
+        # Total yellow cards O/U lines
+        for line in [1.5, 2.5, 3.5, 4.5, 5.5, 6.5]:
+            tag = str(line).replace('.', '_')
+            out[f"y_TotalYC_O{tag}"] = np.where(total_cy > line, "Y", "N")
+        # Booking points O/U (common on UK exchanges: 10=yellow, 25=red)
+        bp = pd.to_numeric(out[home_cy], errors='coerce').fillna(0) * 10
+        if home_cr and away_cr:
+            bp += pd.to_numeric(out[home_cr], errors='coerce').fillna(0) * 25
+        bp_away = pd.to_numeric(out[away_cy], errors='coerce').fillna(0) * 10
+        if home_cr and away_cr:
+            bp_away += pd.to_numeric(out[away_cr], errors='coerce').fillna(0) * 25
+        total_bp = bp + bp_away
+        for line in [20.5, 30.5, 40.5, 50.5]:
+            tag = str(line).replace('.', '_')
+            out[f"y_BookingPts_O{tag}"] = np.where(total_bp > line, "Y", "N")
+        # Home/Away team to receive a card
+        out["y_HomeTeam_Card"] = np.where(
+            pd.to_numeric(out[home_cy], errors='coerce').fillna(0) > 0, "Y", "N")
+        out["y_AwayTeam_Card"] = np.where(
+            pd.to_numeric(out[away_cy], errors='coerce').fillna(0) > 0, "Y", "N")
+
+    # ===========================================================================
+    # CORNERS MARKETS (requires Home_Corners, Away_Corners)
+    # ===========================================================================
+    home_cor = "Home_Corners" if "Home_Corners" in out.columns else None
+    away_cor = "Away_Corners" if "Away_Corners" in out.columns else None
+
+    if home_cor and away_cor:
+        total_corners = pd.to_numeric(out[home_cor], errors='coerce').fillna(0) + \
+                        pd.to_numeric(out[away_cor], errors='coerce').fillna(0)
+        for line in [6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5]:
+            tag = str(line).replace('.', '_')
+            out[f"y_TotalCorners_O{tag}"] = np.where(total_corners > line, "Y", "N")
+        # Home/Away team corners O/U
+        hcor = pd.to_numeric(out[home_cor], errors='coerce').fillna(0)
+        acor = pd.to_numeric(out[away_cor], errors='coerce').fillna(0)
+        for line in [3.5, 4.5, 5.5, 6.5]:
+            tag = str(line).replace('.', '_')
+            out[f"y_HomeCorners_O{tag}"] = np.where(hcor > line, "Y", "N")
+            out[f"y_AwayCorners_O{tag}"] = np.where(acor > line, "Y", "N")
+        # Corner handicap (home - away diff)
+        out["y_HomeCorners_Win"] = np.where(hcor > acor, "Y", "N")
+
     return out
 
 # -----------------------------
+# Referee features
+# -----------------------------
+
+def _add_referee_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add referee historical stats features.
+
+    Uses cumulative expanding stats for each referee from past games only
+    (shift-by-1 before expanding mean), so no data leakage.
+
+    Requires: Date, FTHG, FTAG, FTR, and either 'referee' or 'Referee' column.
+    """
+    ref_col = None
+    if 'referee' in df.columns:
+        ref_col = 'referee'
+    elif 'Referee' in df.columns:
+        ref_col = 'Referee'
+    else:
+        print("   [REF] No referee column — skipping")
+        return df
+
+    needed = {ref_col, 'Date', 'FTHG', 'FTAG', 'FTR'}
+    if not needed.issubset(df.columns):
+        print("   [REF] Skipping — required columns missing")
+        return df
+
+    # Work on rows with known referee AND known result to build stats
+    df = df.sort_values('Date').reset_index(drop=True)
+
+    has_ref = df[ref_col].notna() & (df[ref_col] != '')
+    has_result = df['FTHG'].notna() & df['FTAG'].notna()
+    valid = has_ref & has_result
+
+    # Accept both raw card col names (HY/AY from CSV) and processed names (Home_CardsY/Away_CardsY)
+    card_col_candidates = ['HY', 'AY', 'Home_CardsY', 'Away_CardsY']
+    card_cols = [c for c in card_col_candidates if c in df.columns]
+    # Pick one home and one away card column each
+    home_card = next((c for c in ['HY', 'Home_CardsY'] if c in df.columns), None)
+    away_card = next((c for c in ['AY', 'Away_CardsY'] if c in df.columns), None)
+    card_cols = [c for c in [home_card, away_card] if c is not None]
+    # Pick fouls columns if available (Home_Fouls and Away_Fouls are per-match raw values)
+    home_fouls = 'Home_Fouls' if 'Home_Fouls' in df.columns else None
+    away_fouls = 'Away_Fouls' if 'Away_Fouls' in df.columns else None
+    foul_cols = [c for c in [home_fouls, away_fouls] if c is not None]
+
+    extra_cols = card_cols + foul_cols
+    base_cols = [ref_col, 'FTHG', 'FTAG', 'FTR'] + extra_cols
+    tmp = df.loc[valid, base_cols].copy()
+    tmp['_goals'] = tmp['FTHG'] + tmp['FTAG']
+    tmp['_hw'] = (tmp['FTR'] == 'H').astype(float)
+    tmp['_btts'] = ((tmp['FTHG'] > 0) & (tmp['FTAG'] > 0)).astype(float)
+    if card_cols:
+        tmp['_cards'] = tmp[card_cols].sum(axis=1)
+    if foul_cols:
+        tmp['_fouls'] = tmp[foul_cols].sum(axis=1)
+
+    def _expanding_lag_mean(series):
+        return series.shift(1).expanding().mean()
+
+    stat_map = [
+        ('Ref_AvgGoals', '_goals'),
+        ('Ref_HomeWinRate', '_hw'),
+        ('Ref_BTTSRate', '_btts'),
+    ]
+    if card_cols:
+        stat_map.append(('Ref_AvgCards', '_cards'))
+    if foul_cols:
+        stat_map.append(('Ref_AvgFouls', '_fouls'))
+
+    for out_col, src_col in stat_map:
+        df.loc[valid, out_col] = (
+            tmp.groupby(ref_col)[src_col]
+            .transform(_expanding_lag_mean)
+            .values
+        )
+
+    # Ref match count — how much history is available
+    df.loc[valid, 'Ref_Count'] = (
+        tmp.groupby(ref_col)['_goals']
+        .transform(lambda s: s.shift(1).expanding().count())
+        .values
+    )
+
+    return df
+
+
+# -----------------------------
+# League table position features
+# -----------------------------
+
+def _add_table_position_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add live league table position at the time of each match.
+
+    For each match computes cumulative season points/GD for home and away teams
+    using only results BEFORE that match date (no leakage). Then derives:
+      Home_SeasonPts, Away_SeasonPts
+      Home_SeasonGF, Home_SeasonGA, Home_SeasonGD
+      Away_SeasonGF, Away_SeasonGA, Away_SeasonGD
+      Home_TablePos, Away_TablePos   (1 = top; only within same league+season)
+      TablePosDiff                   (Home - Away position; negative = home ranked higher)
+      Home_PPG_Season, Away_PPG_Season
+      IsTopSix_Home, IsTopSix_Away, IsBottom3_Home, IsBottom3_Away
+    """
+    needed = {'Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR', 'League', 'Season'}
+    if not needed.issubset(df.columns):
+        missing = needed - set(df.columns)
+        print(f"   [TABLE] Skipping — missing cols: {missing}")
+        return df
+
+    df = df.sort_values(['League', 'Season', 'Date']).reset_index(drop=True)
+
+    # Build cumulative season points per team per league+season (points BEFORE each game)
+    # One row per appearance (home + away)
+    rows_h = df[['League', 'Season', 'Date', 'HomeTeam', 'FTHG', 'FTAG', 'FTR']].rename(
+        columns={'HomeTeam': 'Team', 'FTHG': 'GF', 'FTAG': 'GA'})
+    rows_h['Pts'] = rows_h['FTR'].map({'H': 3, 'D': 1, 'A': 0}).fillna(0)
+
+    rows_a = df[['League', 'Season', 'Date', 'AwayTeam', 'FTHG', 'FTAG', 'FTR']].rename(
+        columns={'AwayTeam': 'Team', 'FTAG': 'GF', 'FTHG': 'GA'})
+    rows_a['Pts'] = rows_a['FTR'].map({'A': 3, 'D': 1, 'H': 0}).fillna(0)
+
+    apps = pd.concat([rows_h, rows_a], ignore_index=True).sort_values(['League', 'Season', 'Date'])
+
+    # Cumulative season stats up to (but not including) each game
+    apps['CumPts'] = apps.groupby(['League', 'Season', 'Team'])['Pts'].transform(
+        lambda s: s.shift(1).expanding().sum().fillna(0))
+    apps['CumGF'] = apps.groupby(['League', 'Season', 'Team'])['GF'].transform(
+        lambda s: s.shift(1).expanding().sum().fillna(0))
+    apps['CumGA'] = apps.groupby(['League', 'Season', 'Team'])['GA'].transform(
+        lambda s: s.shift(1).expanding().sum().fillna(0))
+    apps['CumGames'] = apps.groupby(['League', 'Season', 'Team'])['Pts'].transform(
+        lambda s: s.shift(1).expanding().count().fillna(0))
+
+    # For each match date: compute the league table snapshot by taking each team's latest row
+    # up to (not including) the match date, then rank by Pts desc, GD desc, GF desc.
+    # We join pre-match cumulative stats onto the main df.
+    latest = apps.copy()
+    latest['CumGD'] = latest['CumGF'] - latest['CumGA']
+
+    # Index-based lookup — avoids copying the already-wide df (merge copies, this doesn't)
+    cum_idx = latest.set_index(['League', 'Season', 'Date', 'Team'])[
+        ['CumPts', 'CumGF', 'CumGA', 'CumGD', 'CumGames']]
+    cum_idx = cum_idx[~cum_idx.index.duplicated(keep='first')]
+
+    h_keys = pd.MultiIndex.from_arrays([df['League'], df['Season'], df['Date'], df['HomeTeam']])
+    a_keys = pd.MultiIndex.from_arrays([df['League'], df['Season'], df['Date'], df['AwayTeam']])
+
+    for src, h_dst, a_dst in [
+        ('CumPts',   'Home_SeasonPts',   'Away_SeasonPts'),
+        ('CumGF',    'Home_SeasonGF',    'Away_SeasonGF'),
+        ('CumGA',    'Home_SeasonGA',    'Away_SeasonGA'),
+        ('CumGD',    'Home_SeasonGD',    'Away_SeasonGD'),
+        ('CumGames', 'Home_SeasonGames', 'Away_SeasonGames'),
+    ]:
+        df[h_dst] = cum_idx[src].reindex(h_keys).values
+        df[a_dst] = cum_idx[src].reindex(a_keys).values
+
+    # Points per game this season
+    df['Home_PPG_Season'] = np.where(df['Home_SeasonGames'] > 0,
+                                      df['Home_SeasonPts'] / df['Home_SeasonGames'], 0.0)
+    df['Away_PPG_Season'] = np.where(df['Away_SeasonGames'] > 0,
+                                      df['Away_SeasonPts'] / df['Away_SeasonGames'], 0.0)
+
+    # Table position: rank within each League+Season+Date by (Pts desc, GD desc, GF desc)
+    # Use the snapshot of all teams' cumulative stats at each match date
+    snapshot = latest.sort_values(['League', 'Season', 'Date', 'CumPts', 'CumGD', 'CumGF'],
+                                   ascending=[True, True, True, False, False, False])
+    snapshot['TablePos'] = snapshot.groupby(['League', 'Season', 'Date']).cumcount() + 1
+
+    # How many teams in this league-season (for % position calc)
+    team_counts = snapshot.groupby(['League', 'Season'])['Team'].nunique().rename('NumTeams')
+    snapshot = snapshot.merge(team_counts, on=['League', 'Season'], how='left')
+    snapshot['TablePosPct'] = snapshot['TablePos'] / snapshot['NumTeams']
+
+    snap_idx = snapshot.set_index(['League', 'Season', 'Date', 'Team'])[
+        ['TablePos', 'TablePosPct', 'NumTeams']]
+    snap_idx = snap_idx[~snap_idx.index.duplicated(keep='first')]
+
+    df['Home_TablePos']   = snap_idx['TablePos'].reindex(h_keys).values
+    df['Home_TablePosPct']= snap_idx['TablePosPct'].reindex(h_keys).values
+    df['Home_NumTeams']   = snap_idx['NumTeams'].reindex(h_keys).values
+    df['Away_TablePos']   = snap_idx['TablePos'].reindex(a_keys).values
+    df['Away_TablePosPct']= snap_idx['TablePosPct'].reindex(a_keys).values
+
+    df['TablePosDiff'] = df['Home_TablePos'] - df['Away_TablePos']  # negative = home higher
+    df['SeasonPtsDiff'] = df['Home_SeasonPts'] - df['Away_SeasonPts']
+
+    # Binary pressure flags based on table % position (bottom 15% = relegation zone, top 15% = title)
+    df['IsBottom3_Home'] = (df['Home_TablePosPct'] >= 0.85).astype(float)
+    df['IsBottom3_Away'] = (df['Away_TablePosPct'] >= 0.85).astype(float)
+    df['IsTopSix_Home']  = (df['Home_TablePosPct'] <= 0.30).astype(float)
+    df['IsTopSix_Away']  = (df['Away_TablePosPct'] <= 0.30).astype(float)
+    df['BothTopSix']     = ((df['IsTopSix_Home'] == 1) & (df['IsTopSix_Away'] == 1)).astype(float)
+    df['RelegationClash'] = ((df['IsBottom3_Home'] == 1) | (df['IsBottom3_Away'] == 1)).astype(float)
+
+    new_cols = ['Home_SeasonPts', 'Away_SeasonPts', 'Home_SeasonGF', 'Home_SeasonGA',
+                'Home_SeasonGD', 'Away_SeasonGF', 'Away_SeasonGA', 'Away_SeasonGD',
+                'Home_PPG_Season', 'Away_PPG_Season', 'Home_TablePos', 'Away_TablePos',
+                'TablePosDiff', 'SeasonPtsDiff', 'IsTopSix_Home', 'IsTopSix_Away',
+                'IsBottom3_Home', 'IsBottom3_Away', 'BothTopSix', 'RelegationClash']
+    added = [c for c in new_cols if c in df.columns]
+    print(f"   Added table position features: {added}")
+    return df
+
+
+# -----------------------------
+# H2H features
+# -----------------------------
+
+def _add_h2h_features(df: pd.DataFrame, n_matches: int = 5) -> pd.DataFrame:
+    """Add head-to-head history features for each fixture.
+
+    For each match computes stats from the last n_matches between the same two
+    teams (either direction) BEFORE the match date, so there is no data leakage.
+
+    Uses a vectorised merge approach rather than row-by-row iteration.
+    """
+    needed = {'Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG'}
+    if not needed.issubset(df.columns):
+        print("   [H2H] Skipping — required columns missing")
+        return df
+    # Derive FTR if not already present (happens when called before _add_all_targets)
+    if 'FTR' not in df.columns:
+        df = df.copy()
+        df['FTR'] = np.where(df['FTHG'] > df['FTAG'], 'H',
+                             np.where(df['FTHG'] < df['FTAG'], 'A', 'D'))
+
+    df = df.sort_values('Date').reset_index(drop=True)
+
+    # Build a long-form table with a canonical (team_a, team_b) pair key (sorted)
+    # to look up all past meetings regardless of home/away direction.
+    ref = df[['Date', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR']].copy()
+    ref['pair'] = [tuple(sorted([h, a])) for h, a in zip(ref['HomeTeam'], ref['AwayTeam'])]
+    ref['_idx'] = ref.index
+
+    # For each fixture, find all past meetings for that pair
+    out_cols = {
+        'H2H_HomeWinRate': [], 'H2H_AwayWinRate': [], 'H2H_DrawRate': [],
+        'H2H_AvgGoals': [], 'H2H_BTTSRate': [],
+        'H2H_HomeGoalsAvg': [], 'H2H_AwayGoalsAvg': [],
+        'H2H_Count': [],
+    }
+
+    # Group past matches by pair for fast lookup
+    pair_groups = ref.groupby('pair')
+
+    for _, row in df[['Date', 'HomeTeam', 'AwayTeam']].iterrows():
+        home, away = row['HomeTeam'], row['AwayTeam']
+        date = row['Date']
+        pair = tuple(sorted([home, away]))
+
+        if pair not in pair_groups.groups:
+            for k in out_cols:
+                out_cols[k].append(np.nan if k != 'H2H_Count' else 0)
+            continue
+
+        past = ref.loc[pair_groups.groups[pair]]
+        past = past[past['Date'] < date].tail(n_matches)
+
+        if len(past) == 0:
+            for k in out_cols:
+                out_cols[k].append(np.nan if k != 'H2H_Count' else 0)
+            continue
+
+        # Wins from current home-team perspective
+        home_as_home = past[(past['HomeTeam'] == home)]
+        home_as_away = past[(past['AwayTeam'] == home)]
+
+        wins = (home_as_home['FTR'] == 'H').sum() + (home_as_away['FTR'] == 'A').sum()
+        losses = (home_as_home['FTR'] == 'A').sum() + (home_as_away['FTR'] == 'H').sum()
+        total = len(past)
+
+        out_cols['H2H_HomeWinRate'].append(wins / total)
+        out_cols['H2H_AwayWinRate'].append(losses / total)
+        out_cols['H2H_DrawRate'].append((total - wins - losses) / total)
+
+        goals = pd.concat([
+            home_as_home['FTHG'] + home_as_home['FTAG'],
+            home_as_away['FTHG'] + home_as_away['FTAG'],
+        ])
+        out_cols['H2H_AvgGoals'].append(goals.mean())
+
+        btts = pd.concat([
+            (home_as_home['FTHG'] > 0) & (home_as_home['FTAG'] > 0),
+            (home_as_away['FTHG'] > 0) & (home_as_away['FTAG'] > 0),
+        ])
+        out_cols['H2H_BTTSRate'].append(btts.mean())
+
+        hgoals = pd.concat([home_as_home['FTHG'], home_as_away['FTAG']])
+        agoals = pd.concat([home_as_home['FTAG'], home_as_away['FTHG']])
+        out_cols['H2H_HomeGoalsAvg'].append(hgoals.mean())
+        out_cols['H2H_AwayGoalsAvg'].append(agoals.mean())
+        out_cols['H2H_Count'].append(total)
+
+    for col, vals in out_cols.items():
+        df[col] = vals
+
+    return df
+
+
+# -----------------------------
+# -----------------------------
+# Previous-season standings features
+# -----------------------------
+
+def _add_prev_season_standings(df: pd.DataFrame) -> pd.DataFrame:
+    """Add previous-season final standings as features (no lookahead bias).
+
+    For each match in season S, looks up the home/away team's final rank,
+    points, and GD from season S-1 in the same league.
+    Falls back to API-Football standings table for teams with no prior history.
+    """
+    needed = {"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "FTR", "League", "Season"}
+    if not needed.issubset(df.columns):
+        print("   [PREV_STANDINGS] Skipping — missing required columns")
+        return df
+
+    # --- Build end-of-season totals from historical match results ---
+    rows_h = df[["League", "Season", "HomeTeam", "FTHG", "FTAG", "FTR"]].copy()
+    rows_h = rows_h.rename(columns={"HomeTeam": "Team", "FTHG": "GF", "FTAG": "GA"})
+    rows_h["Pts"] = rows_h["FTR"].map({"H": 3, "D": 1, "A": 0}).fillna(0)
+
+    rows_a = df[["League", "Season", "AwayTeam", "FTHG", "FTAG", "FTR"]].copy()
+    rows_a = rows_a.rename(columns={"AwayTeam": "Team", "FTAG": "GF", "FTHG": "GA"})
+    rows_a["Pts"] = rows_a["FTR"].map({"A": 3, "D": 1, "H": 0}).fillna(0)
+
+    apps = pd.concat([rows_h, rows_a], ignore_index=True)
+    season_totals = apps.groupby(["League", "Season", "Team"], as_index=False).agg(
+        SeasonPts=("Pts", "sum"),
+        SeasonGF=("GF", "sum"),
+        SeasonGA=("GA", "sum"),
+    )
+    season_totals["SeasonGD"] = season_totals["SeasonGF"] - season_totals["SeasonGA"]
+    season_totals["SeasonRank"] = (
+        season_totals.groupby(["League", "Season"])["SeasonPts"]
+        .rank(ascending=False, method="min")
+        .astype(float)
+    )
+    n_teams = season_totals.groupby(["League", "Season"])["Team"].transform("count")
+    season_totals["SeasonRankPct"] = season_totals["SeasonRank"] / n_teams
+
+    # --- Try to supplement with API standings for seasons not in historical data ---
+    try:
+        import sqlite3
+        from config import API_FOOTBALL_DB
+        conn = sqlite3.connect(str(API_FOOTBALL_DB))
+        api_st = pd.read_sql_query(
+            "SELECT league_code, season, team_name, rank, points, goals_diff FROM standings",
+            conn
+        )
+        conn.close()
+        if not api_st.empty:
+            api_st = api_st.rename(columns={
+                "league_code": "League", "season": "Season",
+                "team_name": "Team", "rank": "SeasonRank",
+                "points": "SeasonPts", "goals_diff": "SeasonGD"
+            })
+            api_st["SeasonRankPct"] = np.nan
+            api_st["SeasonGF"] = np.nan
+            api_st["SeasonGA"] = np.nan
+            # Only use API rows for (League, Season) combos missing from historical
+            hist_keys = set(zip(season_totals["League"], season_totals["Season"].astype(str)))
+            api_st["_key"] = list(zip(api_st["League"], api_st["Season"].astype(str)))
+            api_extra = api_st[~api_st["_key"].isin(hist_keys)].drop(columns=["_key"])
+            season_totals = pd.concat([season_totals, api_extra], ignore_index=True)
+    except Exception:
+        pass
+
+    # --- Create lookup: (League, Season, Team) -> stats ---
+    season_totals = season_totals.drop_duplicates(subset=["League", "Season", "Team"], keep="first")
+    lut = season_totals.set_index(["League", "Season", "Team"])
+
+    prev = df["Season"] - 1
+    h_keys = list(zip(df["League"], prev, df["HomeTeam"]))
+    a_keys = list(zip(df["League"], prev, df["AwayTeam"]))
+
+    def _lookup(keys, col):
+        idx = pd.MultiIndex.from_tuples(keys)
+        return lut[col].reindex(idx).values
+
+    df["Home_PrevSeasonRank"]    = _lookup(h_keys, "SeasonRank")
+    df["Away_PrevSeasonRank"]    = _lookup(a_keys, "SeasonRank")
+    df["Home_PrevSeasonPts"]     = _lookup(h_keys, "SeasonPts")
+    df["Away_PrevSeasonPts"]     = _lookup(a_keys, "SeasonPts")
+    df["Home_PrevSeasonGD"]      = _lookup(h_keys, "SeasonGD")
+    df["Away_PrevSeasonGD"]      = _lookup(a_keys, "SeasonGD")
+    df["Home_PrevSeasonRankPct"] = _lookup(h_keys, "SeasonRankPct")
+    df["Away_PrevSeasonRankPct"] = _lookup(a_keys, "SeasonRankPct")
+    df["PrevSeasonRankDiff"]     = df["Home_PrevSeasonRank"] - df["Away_PrevSeasonRank"]
+    df["PrevSeasonPtsDiff"]      = df["Home_PrevSeasonPts"]  - df["Away_PrevSeasonPts"]
+    df["PrevSeasonGDDiff"]       = df["Home_PrevSeasonGD"]   - df["Away_PrevSeasonGD"]
+
+    filled = df["Home_PrevSeasonRank"].notna().sum()
+    print(f"   Added prev-season standings: {filled:,}/{len(df):,} rows have data")
+    return df
+
+
 # Main build function
 # -----------------------------
 
@@ -757,7 +1228,11 @@ def build_features(force: bool = False) -> Path:
     df = pd.read_parquet(hist_path)
     df = df.dropna(subset=["Date","HomeTeam","AwayTeam"]).copy()
     df = df.sort_values(["League","Date"]).reset_index(drop=True)
-    
+
+    # Normalise xG column names (historical_matches uses lowercase home_xG/away_xG)
+    if 'home_xG' in df.columns:
+        df = df.rename(columns={'home_xG': 'Home_xG', 'away_xG': 'Away_xG'})
+
     print(f"Loaded {len(df):,} matches")
 
     # 1. Elo ratings
@@ -780,20 +1255,49 @@ def build_features(force: bool = False) -> Path:
 
         print(f"   Added Elo features")
 
+    # 1b. League table position — run BEFORE rolling features to keep df narrow for merge
+    print("1b. Adding league table position features...")
+    df = _add_table_position_features(df)
+
+    # 1c. Previous-season standings — needs FTHG/FTAG/FTR which survive only before pivot
+    print("1c. Adding previous-season standings features...")
+    df = _add_prev_season_standings(df)
+
     # 2. Rolling form/stats
     print("2. Calculating rolling form...")
     if USE_ROLLING_FORM:
-        # Store Elo columns before reshape (they get lost in pivot)
-        elo_cols = [c for c in df.columns if c.startswith('Elo_')]
-        if elo_cols:
-            elo_data = df[['League', 'Date', 'HomeTeam', 'AwayTeam'] + elo_cols].copy()
+        # Store columns that get dropped by _pivot_back
+        preserve_cols = [c for c in df.columns if c.startswith('Elo_')]
+        # 'Season' is already preserved by _pivot_back's base_cols — exclude it here to avoid
+        # Season_x/Season_y collision when merging preserve_data back.
+        meta_cols = [c for c in ['referee', 'venue_name', 'fixture_id'] if c in df.columns]
+        # Table position (step 1b) and prev-season standings (step 1c) get dropped by _pivot_back
+        # (only base_cols survive the pivot); preserve them here so they survive.
+        extra_pfx = ('Home_SeasonPts', 'Away_SeasonPts', 'Home_SeasonGF', 'Away_SeasonGF',
+                     'Home_SeasonGA', 'Away_SeasonGA', 'Home_SeasonGD', 'Away_SeasonGD',
+                     'Home_SeasonGames', 'Away_SeasonGames', 'Home_PPG_Season', 'Away_PPG_Season',
+                     'Home_TablePos', 'Away_TablePos', 'IsTopSix_Home', 'IsTopSix_Away',
+                     'IsBottom3_Home', 'IsBottom3_Away', 'TablePosDiff', 'SeasonPtsDiff',
+                     'Home_PrevSeasonRank', 'Away_PrevSeasonRank', 'Home_PrevSeasonPts',
+                     'Away_PrevSeasonPts', 'Home_PrevSeasonGD', 'Away_PrevSeasonGD',
+                     'Home_PrevSeasonRankPct', 'Away_PrevSeasonRankPct',
+                     'PrevSeasonRankDiff', 'PrevSeasonPtsDiff', 'PrevSeasonGDDiff')
+        extra_cols = [c for c in df.columns if c.startswith(extra_pfx)]
+        preserve_cols += meta_cols + extra_cols
+        if preserve_cols:
+            preserve_data = df[['League', 'Date', 'HomeTeam', 'AwayTeam'] + preserve_cols].copy()
 
         side_feats = _build_side_features(df)
         df = _pivot_back(df, side_feats)
 
-        # Re-merge Elo columns if they existed
-        if elo_cols:
-            df = df.merge(elo_data, on=['League', 'Date', 'HomeTeam', 'AwayTeam'], how='left')
+        # Re-merge preserved columns
+        if preserve_cols:
+            df = df.merge(preserve_data, on=['League', 'Date', 'HomeTeam', 'AwayTeam'], how='left')
+        # _pivot_back already keeps Season; if a collision created Season_x/Season_y, clean it up
+        if 'Season_x' in df.columns:
+            df = df.rename(columns={'Season_x': 'Season'})
+        if 'Season_y' in df.columns:
+            df = df.drop(columns=['Season_y'])
 
         print(f"   Added rolling features")
 
@@ -808,13 +1312,53 @@ def build_features(force: bool = False) -> Path:
         df = _add_market_features(df)
         print(f"   Added market features")
 
-    # 5. Targets
-    print("5. Creating target variables...")
+    # 5. Injury features
+    print("5. Adding injury features...")
+    try:
+        injuries = get_injury_counts_from_db()
+        if not injuries.empty:
+            home_inj = injuries.rename(columns={'Team': 'HomeTeam', 'InjuryCount': 'Home_InjuryCount'})
+            away_inj = injuries.rename(columns={'Team': 'AwayTeam', 'InjuryCount': 'Away_InjuryCount'})
+            df = df.merge(home_inj[['League','Date','HomeTeam','Home_InjuryCount']],
+                          on=['League','Date','HomeTeam'], how='left')
+            df = df.merge(away_inj[['League','Date','AwayTeam','Away_InjuryCount']],
+                          on=['League','Date','AwayTeam'], how='left')
+            df['Home_InjuryCount'] = df['Home_InjuryCount'].fillna(0)
+            df['Away_InjuryCount'] = df['Away_InjuryCount'].fillna(0)
+            df['InjuryDiff'] = df['Home_InjuryCount'] - df['Away_InjuryCount']
+            n_with = (df['Home_InjuryCount'] + df['Away_InjuryCount'] > 0).sum()
+            print(f"   Injury data for {n_with:,} / {len(df):,} matches")
+        else:
+            print("   [INJ] No injury data in DB — skipping")
+    except Exception as e:
+        print(f"   [INJ] Skipping: {e}")
+
+    # 6. Referee features
+    print("6. Adding referee features...")
+    df = _add_referee_features(df)
+    h2h_ref_cols = [c for c in df.columns if c.startswith('Ref_')]
+    print(f"   Added referee features: {h2h_ref_cols}")
+
+    # 7. H2H features
+    print("7. Adding H2H features...")
+    df = _add_h2h_features(df, n_matches=5)
+    h2h_cols = [c for c in df.columns if c.startswith('H2H_')]
+    print(f"   Added H2H features: {h2h_cols}")
+
+    # 8. Targets (note: _add_all_targets requires FTR in df)
+    print("8. Creating target variables...")
     df = _add_all_targets(df)
     print(f"   Added targets")
 
-    # 6. Handle NaN values
-    print("6. Handling missing values...")
+    # 9. Handle NaN values
+    print("9. Handling missing values...")
+    # Drop metadata-only cols that serve no training purpose (venue_name is not predictive)
+    df.drop(columns=[c for c in ['venue_name', 'fixture_id'] if c in df.columns], inplace=True)
+    # Ensure referee is purely string — DB can store integer IDs for some entries and
+    # pyarrow rejects mixed int/str object columns when writing parquet.
+    if 'referee' in df.columns:
+        df['referee'] = df['referee'].where(df['referee'].isna(), df['referee'].astype(str))
+    # Note: 'referee' string col kept for predict.py lookup; models.py excludes it from features
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
         if not col.startswith('y_'):
@@ -849,13 +1393,19 @@ def get_feature_columns() -> List[str]:
     exclude = {
         # IDs / metadata
         'Date', 'League', 'HomeTeam', 'AwayTeam', 'Referee', 'Season',
+        'Season_x', 'Season_y',  # collision artifacts — real Season is already excluded
         'fixture_id', 'Home_ID', 'Away_ID', 'League_ID',
         # Result columns (LEAKAGE if used as features)
         'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR',
         'HomeGoals', 'AwayGoals', 'OU25',
-        # Raw current-match stats (LEAKAGE)
+        # Raw current-match stats (LEAKAGE — only rolling versions are valid)
         'HS', 'AS', 'HST', 'AST', 'HC', 'AC',
         'HY', 'AY', 'HR', 'AR', 'HF', 'AF',
+        # Per-match API stats (LEAKAGE — only rolling/EWM versions are valid)
+        'Home_xG', 'Away_xG', 'Home_Possession', 'Away_Possession',
+        'Home_Shots_Inside_Box', 'Away_Shots_Inside_Box',
+        'Home_Pass_Accuracy', 'Away_Pass_Accuracy',
+        'Home_Fouls', 'Away_Fouls',
     }
 
     df = pd.read_parquet(FEATURES_PARQUET)

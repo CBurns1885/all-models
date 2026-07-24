@@ -150,13 +150,10 @@ class SeasonalAccumulatorBuilder:
         return float(val)
     
     def get_realistic_odds(self, market: str, probability: float) -> float:
-        """Realistic market odds"""
-        odds_map = {
-            'Under_4_5': 1.10,
-            'Over_1_5': 1.20,
-            'Home_Win': 1.50 if probability >= 0.85 else 1.60
-        }
-        return odds_map.get(market, 1.50)
+        """Conservative bookmaker odds estimate: fair odds minus ~10% margin."""
+        if probability <= 0:
+            return 1.0
+        return (1.0 / probability) * 0.9
     
     def identify_value_bets(self, 
                            confidence_threshold: float = 0.85,

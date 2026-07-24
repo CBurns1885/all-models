@@ -2,6 +2,11 @@
 from pathlib import Path
 import os
 from datetime import date, datetime
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env", override=False)
+except ImportError:
+    pass
 
 # --- Paths ---
 BASE_DIR = Path(__file__).resolve().parent
