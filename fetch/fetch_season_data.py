@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 
 # ensure we can import project modules
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Load .env before any project imports so API_FOOTBALL_KEY is available
 try:

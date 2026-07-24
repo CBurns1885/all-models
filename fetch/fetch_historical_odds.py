@@ -7,6 +7,8 @@ Resumable: skips fixtures that already have odds in the DB.
 """
 import time
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from api_client import fetch_odds_for_fixture, _connect, _make_request
 
 def check_quota() -> int:

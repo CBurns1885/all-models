@@ -1,6 +1,8 @@
 # ingest_local_run.py
 from __future__ import annotations
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd
 from config import DATA_DIR, log_header
 from progress_utils import Timer

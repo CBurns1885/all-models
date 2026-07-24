@@ -5,6 +5,8 @@ Stores in the standings table of football_api.db.
 """
 import sys
 import time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import API_LEAGUE_MAP
 from api_client import fetch_standings, _make_request
 

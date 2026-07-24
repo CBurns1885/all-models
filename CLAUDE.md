@@ -29,7 +29,7 @@
    - Phase 2 DONE (eventually): 5,254 fixtures had match_stats fetched (PID 556)
    - Chain runner (PID 8604): auto-started `fetch_player_stats.py` after Phase 2 complete
    - Player stats: 29,471 total fixtures to fill → ~4 days at 7,500 API calls/day
-   - Re-run `py fetch_player_stats.py` each day until `[OK] player_fixture_stats fully populated!`
+   - Re-run `py fetch/fetch_player_stats.py` each day until `[OK] player_fixture_stats fully populated!`
 
 5. ✓ **`.gitignore` updated**: `certs/` (Betfair SSL), `_ul*` (OneDrive), `pipeline_*.log`, `pipeline_*.err`, `chain_runner.py`
 6. ✓ **`catboost_info/` untracked from git** (`git rm --cached catboost_info/ -r`)
@@ -49,7 +49,7 @@
 2. Create `.env` in `all_models/` with `API_FOOTBALL_KEY=<your key from RapidAPI dashboard>`
 3. `pip install -r requirements.txt`
 4. Run `py fetch_player_stats.py` daily until `[OK] player_fixture_stats fully populated!` (~4 days, 29,471 calls)
-5. Also run `py fetch_season_data.py` to finish the remaining ~5,254 match_stats fixtures
+5. Also run `py fetch/fetch_season_data.py` to finish the remaining ~5,254 match_stats fixtures
 
 ### ⚠️ Next steps after downloads complete
 1. `py features.py build_features --force` — rebuild with new player-level card/fouls/rating features
@@ -173,8 +173,10 @@ Football betting prediction system using ensemble ML + Dixon-Coles Poisson model
 | `blending.py` | Learn DC/ML blend weights per market |
 | `threshold_analysis.py` | Per-market confidence threshold sweep → find min threshold for 95% accuracy |
 | `picks_page.py` | HTML picks dashboard generator — reads `weekly_bets_full.csv`, outputs `picks_page.html` grouped by market |
-| `fetch_player_stats.py` | Populate `player_fixture_stats` from `/fixtures/players` — resumable, quota-aware, run daily until complete |
-| `fetch_season_data.py` | Phase 1: fixture list refresh; Phase 2: match_stats backfill |
+| `fetch/fetch_player_stats.py` | Populate `player_fixture_stats` from `/fixtures/players` — resumable, quota-aware, run daily until complete |
+| `fetch/fetch_season_data.py` | Phase 1: fixture list refresh; Phase 2: match_stats backfill |
+| `betfair/betfair_auth.py` | Betfair API authentication (reads creds from env vars) |
+| `betfair/betfair_ltd.py` | Bet placement via Betfair Exchange |
 
 ## Data Architecture
 ```

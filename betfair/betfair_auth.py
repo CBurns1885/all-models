@@ -19,9 +19,9 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent / ".env")
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 CERTS_DIR = ROOT / "certs"
 
 BETFAIR_USERNAME   = os.getenv("BETFAIR_USERNAME", "")

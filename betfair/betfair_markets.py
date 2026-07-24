@@ -14,7 +14,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 
 # Maps our market names → Betfair market type codes
 # Full list: https://betfair-developer-docs.atlassian.net/wiki/spaces/1smk3cen4v3lu3yomq5qye0ni/pages/2687561/Market+Types
