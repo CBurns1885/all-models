@@ -80,10 +80,11 @@ test_*.py
 # Betfair SSL certificates (private key)
 certs/
 
-# Pipeline fetch logs (dated)
-pipeline_fetch_*.log
-pipeline_fetch_*.err
+# Pipeline / fetch / chain runtime files
+pipeline_*.log
+pipeline_*.err
 pipeline_log*.txt
+chain_runner.py
 
 # Keep structure folders but ignore contents
 data/*
