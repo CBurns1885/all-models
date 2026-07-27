@@ -35,6 +35,21 @@ def build_dc_for_fixtures(fixtures_csv: Path) -> Path:
     base=pd.read_parquet(FEATURES_PARQUET)
     base=base.dropna(subset=["Date","HomeTeam","AwayTeam","FTHG","FTAG"]).copy()
     base["Date"]=pd.to_datetime(base["Date"])
+
+    # Anti-leakage cutoff: only fit on matches strictly BEFORE the earliest
+    # fixture being priced. For live predictions this filters nothing (all
+    # history is in the past). For backtests over historical fixtures it is
+    # essential — without it the DC attack/defence parameters (and the
+    # recent-form multipliers inside fit_all) are estimated from the very
+    # matches being "predicted" and from matches played after them.
+    _fx_dates = pd.to_datetime(pd.read_csv(fixtures_csv)["Date"], errors="coerce")
+    _cutoff = _fx_dates.min()
+    if pd.notna(_cutoff):
+        n_before = len(base)
+        base = base[base["Date"] < _cutoff]
+        if len(base) < n_before:
+            print(f"  [CUTOFF] DC training restricted to {len(base):,}/{n_before:,} matches before {str(_cutoff)[:10]}")
+
     train_df=base[["League","Date","HomeTeam","AwayTeam","FTHG","FTAG"]]
 
     cache_key = _dc2_cache_key(train_df)

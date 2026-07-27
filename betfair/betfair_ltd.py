@@ -40,9 +40,14 @@ if hasattr(sys.stdout, "buffer"):
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-ROOT    = Path(__file__).resolve().parent
+# This file lives in betfair/ — outputs/ is at the repo root, one level up.
+ROOT    = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
 LTD_LOG = OUTPUTS / "ltd_trades.csv"
+
+# Allow sibling imports (betfair_auth, betfair_markets) regardless of CWD
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # --- Strategy parameters ---
 DRAW_ODDS_MIN       = 2.8    # min Betfair draw price to enter
@@ -105,6 +110,27 @@ class LTDPosition:
         return (now - self.kickoff).total_seconds() / 60
 
 
+def _parse_kickoff(date_str: str, time_val=None) -> Optional[datetime]:
+    """Parse a kickoff datetime from a date string plus optional HH:MM time.
+
+    Falls back to 15:00 UTC only when no time is available; in-play timing
+    (stop-loss minutes, goal-spike detection) depends on this being right,
+    so fixture files should always carry a real Time column.
+    """
+    try:
+        base = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    hour, minute = 15, 0
+    if time_val is not None and str(time_val) not in ("", "nan", "NaT", "None"):
+        try:
+            parts = str(time_val).strip().split(":")
+            hour, minute = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+        except (ValueError, IndexError):
+            pass
+    return base.replace(hour=hour, minute=minute, tzinfo=timezone.utc)
+
+
 # ---------------------------------------------------------------------------
 # Entry scan — find qualifying LTD opportunities
 # ---------------------------------------------------------------------------
@@ -159,9 +185,8 @@ def scan_entries(client, bank: float, max_stake: float, kelly_fraction: float = 
         date_str = str(row.get("Date", ""))[:10]
         our_draw_prob = float(row.get(draw_col, 0))
 
-        try:
-            kickoff = datetime.strptime(date_str, "%Y-%m-%d").replace(hour=15, tzinfo=timezone.utc)
-        except ValueError:
+        kickoff = _parse_kickoff(date_str, row.get("Time"))
+        if kickoff is None:
             continue
 
         # Only upcoming matches (within next 48h)
@@ -219,14 +244,18 @@ def scan_entries(client, bank: float, max_stake: float, kelly_fraction: float = 
                          edge*100, home, away, bf_draw_implied*100, our_draw_prob*100)
             continue
 
-        # Kelly stake on the lay
-        # For a lay: b = 1/(price-1), prob = 1 - implied_draw
+        # Kelly stake on the lay.
+        # For a lay bet the amount RISKED is the liability = stake * (price - 1),
+        # and winning pays `stake` (i.e. net odds b = 1/(price-1) per unit risked).
+        # Kelly therefore gives the fraction of bank to put at risk as LIABILITY;
+        # sizing the stake directly would overbet risk by (price-1)x.
         p_win = 1.0 - our_draw_prob
         b = 1.0 / (draw_lay_price - 1.0)
         kelly_f = (p_win * b - our_draw_prob) / b
         if kelly_f <= 0:
             continue
-        stake = round(min(bank * kelly_f * kelly_fraction, max_stake), 2)
+        liability = bank * kelly_f * kelly_fraction
+        stake = round(min(liability / (draw_lay_price - 1.0), max_stake), 2)
         if stake < 2.0:
             continue
 
@@ -407,11 +436,12 @@ def monitor_positions(client, positions: list[LTDPosition], dry_run: bool):
             # Get current best back price for draw
             current_price = None
             for runner in book.runners:
-                if runner.selection_id == pos.draw_selection and runner.ex:
-                    backs = runner.ex.available_to_back
-                    if backs:
-                        current_price = backs[0].price
-                break
+                if runner.selection_id == pos.draw_selection:
+                    if runner.ex:
+                        backs = runner.ex.available_to_back
+                        if backs:
+                            current_price = backs[0].price
+                    break
 
             if current_price is None:
                 continue
@@ -534,9 +564,12 @@ if __name__ == "__main__":
     parser.add_argument("--bank",       type=float, default=500.0)
     parser.add_argument("--max-stake",  type=float, default=30.0)
     parser.add_argument("--kelly",      type=float, default=0.25)
-    parser.add_argument("--dry-run",    action="store_true", default=True)
+    parser.add_argument("--dry-run",    action="store_true", help="Simulate (default unless --live)")
     parser.add_argument("--live",       action="store_true")
     args = parser.parse_args()
+
+    if args.live and args.dry_run:
+        parser.error("--live and --dry-run are mutually exclusive")
 
     run(
         bank=args.bank,

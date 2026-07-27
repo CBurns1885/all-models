@@ -77,14 +77,8 @@ os.environ["N_ESTIMATORS"] = estimator_counts.get(args.speed, "150")
 
 os.environ["USE_API_FOOTBALL"] = "1"  # Use API-Football for data
 os.environ["USE_XG_FEATURES"] = "1"   # Use expected goals features
-os.environ["API_FOOTBALL_KEY"] = "0f17fdba78d15a625710f7244a1cc770"
-
-# Email configuration (optional)
-os.environ["EMAIL_SMTP_SERVER"] = "smtp-mail.outlook.com"
-os.environ["EMAIL_SMTP_PORT"] = "587"
-os.environ["EMAIL_SENDER"] = "christopher_burns@live.co.uk"
-os.environ["EMAIL_PASSWORD"] = ""
-os.environ["EMAIL_RECIPIENT"] = "christopher_burns@live.co.uk"
+# API_FOOTBALL_KEY and email settings come from .env (loaded by config.py).
+# Never hardcode credentials here — this file is committed to a public repo.
 
 TRAINING_START_YEAR = 2023  # More recent data = better accuracy
 NON_INTERACTIVE = args.non_interactive
@@ -194,8 +188,19 @@ if not fixtures_file or not Path(fixtures_file).exists():
         fixtures_file = fixtures_csv
         print(f"[OK] Using manual: {fixtures_file}")
     else:
-        # Try generating sample data as last resort
-        print("[WARN] No fixtures file found, generating sample data...")
+        # Sample data is FABRICATED fixtures — only ever acceptable for testing,
+        # and only when explicitly requested. An autonomous run must fail hard
+        # here rather than generate predictions (and downstream bets) for
+        # matches that don't exist.
+        if not args.use_sample_data:
+            print("[ERROR] No fixtures available from API, fallback download, or manual file.")
+            print("[INFO] Refusing to generate sample (fake) fixtures without --use-sample-data.")
+            print("[INFO] Options:")
+            print("   1. Check API-Football connection / key in .env")
+            print("   2. Check internet connection")
+            print("   3. Manually download from football-data.co.uk/matches.php")
+            sys.exit(1)
+        print("[WARN] No fixtures file found, generating SAMPLE data (--use-sample-data)...")
         try:
             from sample_data_generator import generate_upcoming_fixtures_file, initialize_database_with_sample_data
             from api_football_adapter import check_api_football_db
@@ -292,10 +297,19 @@ print(f"   Training period: {TRAINING_START_YEAR}-{datetime.datetime.now().year}
 TOTAL_STEPS = 13  # Updated to include picks page step
 errors = []
 
-def run_step(step_num, step_name, func, *args, **kwargs):
-    """Run a step with error recovery"""
+class CriticalStepFailure(Exception):
+    """Raised when a step the rest of the pipeline depends on fails."""
+
+
+def run_step(step_num, step_name, func, *args, critical=False, **kwargs):
+    """Run a step with error recovery.
+
+    critical=True: a failure aborts the whole pipeline instead of continuing.
+    Predictions generated from stale/partial data must never reach the
+    betting layer, so data/feature/model/prediction steps are critical.
+    """
     log_step(step_num, TOTAL_STEPS, step_name)
-    
+
     try:
         result = func(*args, **kwargs)
         print(f"[OK] Step {step_num} complete")
@@ -303,10 +317,14 @@ def run_step(step_num, step_name, func, *args, **kwargs):
     except Exception as e:
         error_msg = f"Step {step_num} ({step_name}): {str(e)}"
         errors.append(error_msg)
-        print(f"[WARN] Step {step_num} failed: {e}")
-        print("   Continuing to next step...")
         import traceback
         traceback.print_exc()
+        if critical:
+            print(f"[FATAL] Critical step {step_num} failed: {e}")
+            print("        Aborting pipeline — downstream outputs would be unreliable.")
+            raise CriticalStepFailure(error_msg) from e
+        print(f"[WARN] Step {step_num} failed: {e}")
+        print("   Continuing to next step...")
         return None, error_msg
 
 try:
@@ -361,14 +379,14 @@ try:
         force = args.clean or os.environ.get("FORCE_RETRAIN") == "1"
         build_historical_results(force=force)
 
-    run_step(1, "BUILD HISTORICAL DATABASE", step1)
+    run_step(1, "BUILD HISTORICAL DATABASE", step1, critical=True)
 
     # Step 2: Build features
     def step2():
         force = args.clean or os.environ.get("FORCE_RETRAIN") == "1"
         build_features(force=force)
 
-    run_step(2, "BUILD FEATURES", step2)
+    run_step(2, "BUILD FEATURES", step2, critical=True)
 
     # Step 3: Train/load models (with intelligent caching + compatibility check)
     def step3():
@@ -378,7 +396,7 @@ try:
         print(f"  Tip: use --clean to force full rebuild of data + features + models")
         return smart_train_or_load()
 
-    models, err = run_step(3, "TRAIN/LOAD MODELS", step3)
+    models, err = run_step(3, "TRAIN/LOAD MODELS", step3, critical=True)
 
     # Step 4: Generate predictions
     def step4():
@@ -393,7 +411,7 @@ try:
         else:
             predict_week(fixtures_file)
 
-    run_step(4, "GENERATE PREDICTIONS", step4)
+    run_step(4, "GENERATE PREDICTIONS", step4, critical=True)
 
     # Step 5: Log predictions
     def step5():
@@ -608,6 +626,11 @@ except ImportError as e:
     print(f"[ERROR] Missing required file: {e}")
     print("[FIX] Ensure all Python files are in the project folder")
     print("[PACKAGE] Run: pip install -r requirements.txt")
+
+except CriticalStepFailure as e:
+    print(f"[ABORTED] Pipeline stopped at a critical step: {e}")
+    print("[INFO] No predictions were finalised — nothing should be bet from this run.")
+    sys.exit(1)
 
 except Exception as e:
     print(f"[ERROR] Error: {e}")

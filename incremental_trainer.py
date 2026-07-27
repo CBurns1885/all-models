@@ -102,7 +102,7 @@ def needs_retraining(models_dir: Path = MODEL_ARTIFACTS_DIR, days_threshold: int
                 new_league_only = new_leagues - old_leagues
                 if new_league_only:
                     print(f"New leagues detected: {new_league_only}")
-                    print("Will train only new leagues (incremental training)...")
+                    print("Retraining all markets to include the new leagues...")
                     return True
                 else:
                     print(f"Removed leagues: {old_leagues - new_leagues}")
@@ -180,6 +180,32 @@ def needs_retraining(models_dir: Path = MODEL_ARTIFACTS_DIR, days_threshold: int
     return False
 
 
+def _invalidate_stale_artifacts():
+    """After a retrain: delete the auto_tune prediction cache (built from the
+    old models' outputs) and re-learn blend weights (the old alphas were fit
+    against the old models' OOF distribution)."""
+    from pathlib import Path as _Path
+    tuning_cache = _Path(__file__).resolve().parent / "outputs" / "tuning_preds_cache.parquet"
+    if tuning_cache.exists():
+        try:
+            tuning_cache.unlink()
+            print("[STALE] Deleted outputs/tuning_preds_cache.parquet (built from previous models)")
+        except OSError as e:
+            print(f"[WARN] Could not delete stale tuning cache: {e}")
+
+    try:
+        from blending import learn_blend_weights
+        print("[BLEND] Re-learning DC/ML blend weights for the new models...")
+        learn_blend_weights()
+        print("[BLEND] Blend weights refreshed")
+    except Exception as e:
+        print(f"[WARN] Could not re-learn blend weights automatically: {e}")
+        print("       Run: py -c \"from blending import learn_blend_weights; learn_blend_weights()\"")
+
+    print("[REMINDER] auto_tune params and per-league thresholds were tuned against the")
+    print("           PREVIOUS models — re-run auto_tune.py and threshold_analysis.py.")
+
+
 def smart_train_or_load():
     """Train models if needed, otherwise load existing ones"""
     if needs_retraining():
@@ -196,6 +222,11 @@ def smart_train_or_load():
 
         models = train_all_targets()
 
+        # A retrain invalidates every artifact derived from the old models.
+        # Keeping them would silently mix old-model calibration/weights with
+        # new-model predictions on the next run.
+        _invalidate_stale_artifacts()
+
         # Save training settings + feature hash for future compatibility checks
         try:
             df = _load_features()
@@ -209,6 +240,8 @@ def smart_train_or_load():
                 "speed_mode": os.environ.get("SPEED_MODE", "balanced"),
                 "leagues": current_leagues,
                 "feature_hash": feature_hash,
+                "train_cutoff_date": os.environ.get("TRAIN_CUTOFF_DATE", ""),
+                "train_data_max_date": str(df["Date"].max())[:10] if "Date" in df.columns and len(df) else "",
                 "trained_at": datetime.now().isoformat()
             }
             settings_file = MODEL_ARTIFACTS_DIR / "training_settings.json"

@@ -27,7 +27,13 @@ torchaudio>=2.0.0
 requests>=2.28.0
 openpyxl>=3.1.0
 beautifulsoup4>=4.11.0
+pyarrow>=14.0.0
+
+# Environment (REQUIRED — API keys/credentials load from .env, never hardcoded)
 python-dotenv>=1.0.0
+
+# Betfair Exchange (OPTIONAL — only for betfair/ betting scripts)
+# betfairlightweight>=2.19.0
 
 # Visualization (OPTIONAL - for analysis reports)
 matplotlib>=3.5.0

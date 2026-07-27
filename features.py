@@ -756,36 +756,35 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     away_cr = "Away_CardsR" if "Away_CardsR" in out.columns else "AR" if "AR" in out.columns else None
 
     if home_cy and away_cy:
-        total_cy = pd.to_numeric(out[home_cy], errors='coerce').fillna(0) + \
-                   pd.to_numeric(out[away_cy], errors='coerce').fillna(0)
-        if home_cr and away_cr:
-            total_cr = pd.to_numeric(out[home_cr], errors='coerce').fillna(0) + \
-                       pd.to_numeric(out[away_cr], errors='coerce').fillna(0)
-            # Yellow cards equivalent: red = 2 yellows (standard booking-points equiv)
-            total_cards_pts = total_cy + total_cr * 2
-        else:
-            total_cards_pts = total_cy
+        # Matches without card data must get NaN targets, not "no cards".
+        # fillna(0) here mislabelled every stats-less fixture as Under/No,
+        # poisoning the classifiers for ~half the dataset.
+        hcy = pd.to_numeric(out[home_cy], errors='coerce')
+        acy = pd.to_numeric(out[away_cy], errors='coerce')
+        cards_valid = hcy.notna() & acy.notna()
+        total_cy = hcy + acy
 
         # Total yellow cards O/U lines
         for line in [1.5, 2.5, 3.5, 4.5, 5.5, 6.5]:
             tag = str(line).replace('.', '_')
-            out[f"y_TotalYC_O{tag}"] = np.where(total_cy > line, "Y", "N")
+            out[f"y_TotalYC_O{tag}"] = np.where(
+                cards_valid, np.where(total_cy > line, "Y", "N"), None)
         # Booking points O/U (common on UK exchanges: 10=yellow, 25=red)
-        bp = pd.to_numeric(out[home_cy], errors='coerce').fillna(0) * 10
+        bp = hcy * 10
+        bp_away = acy * 10
         if home_cr and away_cr:
-            bp += pd.to_numeric(out[home_cr], errors='coerce').fillna(0) * 25
-        bp_away = pd.to_numeric(out[away_cy], errors='coerce').fillna(0) * 10
-        if home_cr and away_cr:
-            bp_away += pd.to_numeric(out[away_cr], errors='coerce').fillna(0) * 25
+            bp = bp + pd.to_numeric(out[home_cr], errors='coerce').fillna(0) * 25
+            bp_away = bp_away + pd.to_numeric(out[away_cr], errors='coerce').fillna(0) * 25
         total_bp = bp + bp_away
         for line in [20.5, 30.5, 40.5, 50.5]:
             tag = str(line).replace('.', '_')
-            out[f"y_BookingPts_O{tag}"] = np.where(total_bp > line, "Y", "N")
+            out[f"y_BookingPts_O{tag}"] = np.where(
+                cards_valid, np.where(total_bp > line, "Y", "N"), None)
         # Home/Away team to receive a card
         out["y_HomeTeam_Card"] = np.where(
-            pd.to_numeric(out[home_cy], errors='coerce').fillna(0) > 0, "Y", "N")
+            cards_valid, np.where(hcy > 0, "Y", "N"), None)
         out["y_AwayTeam_Card"] = np.where(
-            pd.to_numeric(out[away_cy], errors='coerce').fillna(0) > 0, "Y", "N")
+            cards_valid, np.where(acy > 0, "Y", "N"), None)
 
     # ===========================================================================
     # CORNERS MARKETS (requires Home_Corners, Away_Corners)
@@ -794,20 +793,24 @@ def _add_all_targets(df: pd.DataFrame) -> pd.DataFrame:
     away_cor = "Away_Corners" if "Away_Corners" in out.columns else None
 
     if home_cor and away_cor:
-        total_corners = pd.to_numeric(out[home_cor], errors='coerce').fillna(0) + \
-                        pd.to_numeric(out[away_cor], errors='coerce').fillna(0)
+        # Same NaN-target rule as cards: no data -> no label, not "Under".
+        hcor = pd.to_numeric(out[home_cor], errors='coerce')
+        acor = pd.to_numeric(out[away_cor], errors='coerce')
+        corners_valid = hcor.notna() & acor.notna()
+        total_corners = hcor + acor
         for line in [6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5]:
             tag = str(line).replace('.', '_')
-            out[f"y_TotalCorners_O{tag}"] = np.where(total_corners > line, "Y", "N")
-        # Home/Away team corners O/U
-        hcor = pd.to_numeric(out[home_cor], errors='coerce').fillna(0)
-        acor = pd.to_numeric(out[away_cor], errors='coerce').fillna(0)
+            out[f"y_TotalCorners_O{tag}"] = np.where(
+                corners_valid, np.where(total_corners > line, "Y", "N"), None)
         for line in [3.5, 4.5, 5.5, 6.5]:
             tag = str(line).replace('.', '_')
-            out[f"y_HomeCorners_O{tag}"] = np.where(hcor > line, "Y", "N")
-            out[f"y_AwayCorners_O{tag}"] = np.where(acor > line, "Y", "N")
+            out[f"y_HomeCorners_O{tag}"] = np.where(
+                corners_valid, np.where(hcor > line, "Y", "N"), None)
+            out[f"y_AwayCorners_O{tag}"] = np.where(
+                corners_valid, np.where(acor > line, "Y", "N"), None)
         # Corner handicap (home - away diff)
-        out["y_HomeCorners_Win"] = np.where(hcor > acor, "Y", "N")
+        out["y_HomeCorners_Win"] = np.where(
+            corners_valid, np.where(hcor > acor, "Y", "N"), None)
 
     return out
 
@@ -974,15 +977,47 @@ def _add_table_position_features(df: pd.DataFrame) -> pd.DataFrame:
     df['Away_PPG_Season'] = np.where(df['Away_SeasonGames'] > 0,
                                       df['Away_SeasonPts'] / df['Away_SeasonGames'], 0.0)
 
-    # Table position: rank within each League+Season+Date by (Pts desc, GD desc, GF desc)
-    # Use the snapshot of all teams' cumulative stats at each match date
-    snapshot = latest.sort_values(['League', 'Season', 'Date', 'CumPts', 'CumGD', 'CumGF'],
-                                   ascending=[True, True, True, False, False, False])
-    snapshot['TablePos'] = snapshot.groupby(['League', 'Season', 'Date']).cumcount() + 1
+    # Table position: rank the FULL league table as of strictly before each
+    # match date. The previous implementation grouped by League+Season+Date,
+    # which ranked only the teams that happened to PLAY on that exact date —
+    # e.g. "2nd of the 4 teams playing on Tuesday" — so Home_TablePos,
+    # IsTopSix, IsBottom3 etc. were noise rather than real table positions.
+    #
+    # Approach per league-season: pivot each team's post-match cumulative
+    # stats by date, forward-fill (teams keep their standing on days they
+    # don't play), shift one match-date back (state BEFORE that date), then
+    # rank across all teams by Pts desc, GD desc, GF desc.
+    latest['PostPts'] = latest['CumPts'] + latest['Pts']
+    latest['PostGF']  = latest['CumGF'] + latest['GF']
+    latest['PostGA']  = latest['CumGA'] + latest['GA']
 
-    # How many teams in this league-season (for % position calc)
-    team_counts = snapshot.groupby(['League', 'Season'])['Team'].nunique().rename('NumTeams')
-    snapshot = snapshot.merge(team_counts, on=['League', 'Season'], how='left')
+    snap_frames = []
+    for (lg, season), grp in latest.groupby(['League', 'Season'], sort=False):
+        pts = grp.pivot_table(index='Date', columns='Team', values='PostPts', aggfunc='last')
+        gf  = grp.pivot_table(index='Date', columns='Team', values='PostGF',  aggfunc='last')
+        ga  = grp.pivot_table(index='Date', columns='Team', values='PostGA',  aggfunc='last')
+        if pts.empty:
+            continue
+        pts = pts.sort_index().ffill().shift(1).fillna(0.0)
+        gf  = gf.sort_index().ffill().shift(1).fillna(0.0)
+        ga  = ga.sort_index().ffill().shift(1).fillna(0.0)
+        gd  = gf - ga
+        # Composite ranking key (Pts >> GD >> GF); offsets keep GD positive
+        score = pts * 1e8 + (gd + 1000.0) * 1e4 + gf
+        pos = score.rank(axis=1, method='first', ascending=False)
+        n_teams = pts.shape[1]
+        long_pos = pos.stack().rename('TablePos').reset_index()
+        long_pos.columns = ['Date', 'Team', 'TablePos']
+        long_pos['League'] = lg
+        long_pos['Season'] = season
+        long_pos['NumTeams'] = float(n_teams)
+        snap_frames.append(long_pos)
+
+    if not snap_frames:
+        print("   [TABLE] No league-season groups to rank — skipping table positions")
+        return df
+
+    snapshot = pd.concat(snap_frames, ignore_index=True)
     snapshot['TablePosPct'] = snapshot['TablePos'] / snapshot['NumTeams']
 
     snap_idx = snapshot.set_index(['League', 'Season', 'Date', 'Team'])[
@@ -1255,6 +1290,15 @@ def build_features(force: bool = False) -> Path:
 
         print(f"   Added Elo features")
 
+    # 1a. Glicko-2 ratings — Elo with explicit uncertainty (RD). RD is both a
+    # feature (data sparsity signal) and the betting layer's unknown-team gate.
+    print("1a. Calculating Glicko-2 ratings...")
+    try:
+        from ratings_glicko import add_glicko_features
+        df = add_glicko_features(df)
+    except Exception as e:
+        print(f"   [GLICKO] Skipping: {e}")
+
     # 1b. League table position — run BEFORE rolling features to keep df narrow for merge
     print("1b. Adding league table position features...")
     df = _add_table_position_features(df)
@@ -1267,7 +1311,9 @@ def build_features(force: bool = False) -> Path:
     print("2. Calculating rolling form...")
     if USE_ROLLING_FORM:
         # Store columns that get dropped by _pivot_back
-        preserve_cols = [c for c in df.columns if c.startswith('Elo_')]
+        preserve_cols = [c for c in df.columns
+                         if c.startswith('Elo_')
+                         or c.startswith(('Home_Glicko', 'Away_Glicko', 'Glicko_'))]
         # 'Season' is already preserved by _pivot_back's base_cols — exclude it here to avoid
         # Season_x/Season_y collision when merging preserve_data back.
         meta_cols = [c for c in ['referee', 'venue_name', 'fixture_id'] if c in df.columns]
@@ -1359,11 +1405,32 @@ def build_features(force: bool = False) -> Path:
     if 'referee' in df.columns:
         df['referee'] = df['referee'].where(df['referee'].isna(), df['referee'].astype(str))
     # Note: 'referee' string col kept for predict.py lookup; models.py excludes it from features
+
+    # Missingness indicators BEFORE any filling — median-fill erases the
+    # difference between "average team" and "no data", which is exactly how
+    # unknown teams ended up with confident garbage predictions.
+    if 'Home_Corners' in df.columns:
+        df['Has_MatchStats'] = df['Home_Corners'].notna().astype(float)
+    if 'Home_xG' in df.columns:
+        df['Has_xG'] = df['Home_xG'].notna().astype(float)
+    if 'Home_PrevSeasonRank' in df.columns:
+        df['Has_PrevSeason'] = df['Home_PrevSeasonRank'].notna().astype(float)
+    # Count columns: NaN means "no history", which IS zero occurrences
+    for cnt_col in ('H2H_Count', 'Ref_Count'):
+        if cnt_col in df.columns:
+            df[cnt_col] = df[cnt_col].fillna(0)
+
+    # Median-fill ONLY genuine feature columns. Raw current-match stats
+    # (Home_Corners, Away_CardsY, ...) are OUTCOMES used as count-model
+    # targets — imputing them would fabricate results for ~half the fixtures
+    # (matches without stats coverage). Result columns likewise stay NaN.
+    from feature_rules import is_feature_col
     numeric_cols = df.select_dtypes(include=[np.number]).columns
     for col in numeric_cols:
-        if not col.startswith('y_'):
-            median_val = df[col].median()
-            df[col] = df[col].fillna(median_val if pd.notna(median_val) else 0)
+        if col.startswith('y_') or not is_feature_col(col):
+            continue
+        median_val = df[col].median()
+        df[col] = df[col].fillna(median_val if pd.notna(median_val) else 0)
 
     # Save
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1385,34 +1452,16 @@ def build_features(force: bool = False) -> Path:
 def get_feature_columns() -> List[str]:
     """Return list of feature columns (not targets, metadata, or raw match stats).
 
-    Must stay in sync with models.py:_feature_columns() exclusion list.
-    Raw match stats (HS, AS, HST, etc.) are from the CURRENT match and would
-    leak the result if used as features. Only ROLLING versions (Home_Shots_ma3
-    etc.) are valid features.
+    Exclusions come from feature_rules.py — the same single source of truth
+    used by models.py:_feature_columns(), so the lists cannot drift apart.
+    Raw CURRENT-match stats (both pre-pivot HS/HC/HY names and post-pivot
+    Home_Corners/Away_CardsY/... names) leak the result; only rolling/EWM
+    versions computed from prior matches are valid features.
     """
-    exclude = {
-        # IDs / metadata
-        'Date', 'League', 'HomeTeam', 'AwayTeam', 'Referee', 'Season',
-        'Season_x', 'Season_y',  # collision artifacts — real Season is already excluded
-        'fixture_id', 'Home_ID', 'Away_ID', 'League_ID',
-        # Result columns (LEAKAGE if used as features)
-        'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR',
-        'HomeGoals', 'AwayGoals', 'OU25',
-        # Raw current-match stats (LEAKAGE — only rolling versions are valid)
-        'HS', 'AS', 'HST', 'AST', 'HC', 'AC',
-        'HY', 'AY', 'HR', 'AR', 'HF', 'AF',
-        # Per-match API stats (LEAKAGE — only rolling/EWM versions are valid)
-        'Home_xG', 'Away_xG', 'Home_Possession', 'Away_Possession',
-        'Home_Shots_Inside_Box', 'Away_Shots_Inside_Box',
-        'Home_Pass_Accuracy', 'Away_Pass_Accuracy',
-        'Home_Fouls', 'Away_Fouls',
-    }
+    from feature_rules import is_feature_col
 
     df = pd.read_parquet(FEATURES_PARQUET)
-
-    return [col for col in df.columns
-            if col not in exclude
-            and not col.startswith('y_')]
+    return [col for col in df.columns if is_feature_col(col)]
 
 
 if __name__ == "__main__":

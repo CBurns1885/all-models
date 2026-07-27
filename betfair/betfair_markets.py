@@ -29,7 +29,10 @@ OUR_MARKET_TO_BF = {
     "OU_5_5":       "OVER_UNDER_55",
 }
 
-# Maps our outcome labels → Betfair runner names
+# Maps our outcome labels → Betfair runner names.
+# NOTE: O/U runners are named "Over 2.5 Goals" / "Under 2.5 Goals" on Betfair,
+# so "Over"/"Under" are matched by PREFIX via find_runner_selection() below —
+# an exact lookup would never match and every O/U bet would be skipped.
 OUTCOME_TO_RUNNER = {
     "Home":  "Home",
     "Draw":  "The Draw",
@@ -39,6 +42,30 @@ OUTCOME_TO_RUNNER = {
     "Over":  "Over",
     "Under": "Under",
 }
+
+
+def find_runner_selection(runner_map: dict, outcome: str):
+    """Resolve our outcome label to a selection_id in a runner map.
+
+    Tries exact match, then case-insensitive, then prefix match (needed for
+    O/U markets where runners are e.g. "Over 2.5 Goals").
+    Returns selection_id or None.
+    """
+    bf_name = OUTCOME_TO_RUNNER.get(outcome)
+    if bf_name is None:
+        return None
+    if bf_name in runner_map:
+        return runner_map[bf_name]
+    low = bf_name.lower()
+    for name, sel_id in runner_map.items():
+        if name.lower() == low:
+            return sel_id
+    # Prefix match for "Over X.Y Goals" / "Under X.Y Goals" style runners
+    matches = [sel_id for name, sel_id in runner_map.items()
+               if name.lower().startswith(low + " ")]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 # Persistent team name mapping: our name → Betfair name
 TEAM_MAP_PATH = ROOT / "data" / "betfair_team_map.json"
@@ -116,6 +143,7 @@ def find_market(client, home: str, away: str, kickoff_dt: datetime, our_market: 
     bf_away = team_map.get(away, away)
 
     best_market = None
+    matched_exactly = False
     for m in markets:
         event_name = m.event.name if m.event else ""
         # Betfair event names are typically "Home v Away" or "Home vs Away"
@@ -125,14 +153,19 @@ def find_market(client, home: str, away: str, kickoff_dt: datetime, our_market: 
 
         if h_lower in event_lower and a_lower in event_lower:
             best_market = m
+            matched_exactly = True
             break
 
-    # Fallback: fuzzy match on event names
+    # Fallback: fuzzy match on event names — use a strict threshold; a wrong
+    # match here means betting on the wrong fixture.
     if best_market is None:
         all_event_names = [m.event.name for m in markets if m.event]
-        matched_name = _fuzzy_match(f"{bf_home} {bf_away}", all_event_names)
+        matched_name = _fuzzy_match(f"{bf_home} {bf_away}", all_event_names, threshold=0.75)
         if matched_name:
             best_market = next((m for m in markets if m.event and m.event.name == matched_name), None)
+            if best_market is not None:
+                logger.warning("FUZZY market match for %s v %s -> '%s' — verify before trusting",
+                               home, away, matched_name)
 
     if best_market is None:
         logger.debug("Could not match %s v %s in %d markets", home, away, len(markets))
@@ -142,18 +175,25 @@ def find_market(client, home: str, away: str, kickoff_dt: datetime, our_market: 
     runner_map = {r.runner_name: r.selection_id for r in best_market.runners}
     logger.debug("Matched: %s → market %s, runners: %s", best_market.event.name, best_market.market_id, list(runner_map.keys()))
 
-    # Auto-learn team name mapping from confirmed match
-    event_name = best_market.event.name or ""
-    parts = [p.strip() for p in event_name.replace(" vs ", " v ").split(" v ")]
-    if len(parts) == 2:
-        bf_h, bf_a = parts
-        if home not in team_map and home != bf_h:
-            team_map[home] = bf_h
-            logger.info("Learned team mapping: %s -> %s", home, bf_h)
-        if away not in team_map and away != bf_a:
-            team_map[away] = bf_a
-            logger.info("Learned team mapping: %s -> %s", away, bf_a)
-        save_team_map(team_map)
+    # Auto-learn team name mapping — ONLY from exact substring matches.
+    # Persisting a fuzzy match would permanently poison the map: every future
+    # run would silently bet the wrong fixture for that team name.
+    if matched_exactly:
+        event_name = best_market.event.name or ""
+        parts = [p.strip() for p in event_name.replace(" vs ", " v ").split(" v ")]
+        if len(parts) == 2:
+            bf_h, bf_a = parts
+            changed = False
+            if home not in team_map and home != bf_h:
+                team_map[home] = bf_h
+                logger.info("Learned team mapping: %s -> %s", home, bf_h)
+                changed = True
+            if away not in team_map and away != bf_a:
+                team_map[away] = bf_a
+                logger.info("Learned team mapping: %s -> %s", away, bf_a)
+                changed = True
+            if changed:
+                save_team_map(team_map)
 
     return best_market.market_id, runner_map
 
@@ -177,5 +217,5 @@ def get_best_back_price(client, market_id: str, selection_id: int) -> Optional[f
         if runner.selection_id == selection_id:
             offers = runner.ex.available_to_back if runner.ex else []
             if offers:
-                return offers[0].price   # best (lowest) back price
+                return offers[0].price   # best (highest) available back price
     return None

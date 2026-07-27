@@ -142,9 +142,23 @@ SEASON_START_YEAR = int(os.environ.get("FOOTY_SEASON_START_YEAR", 2023))
 SEASONS = [f"{str(y)[-2:]}{str(y+1)[-2:]}" for y in range(SEASON_START_YEAR, ACTIVE_SEASON_START + 1)]
 
 def get_current_season() -> int:
-    """Get current season start year"""
+    """Get current season start year (European Aug-May convention)"""
     now = datetime.now()
     return now.year if now.month >= 7 else now.year - 1
+
+# Leagues whose season runs within one calendar year (spring-autumn).
+# API-Football labels e.g. the 2026 Eliteserien as season=2026, so applying
+# the European "month >= 7" rule to these leagues requests the WRONG season
+# for the entire first half of their campaign (Jan-Jun).
+CALENDAR_YEAR_LEAGUES = {"NOR", "SWE"}
+
+def season_for_league(league_code: str, when: "datetime | None" = None) -> int:
+    """Season start year for a league at a given date, respecting
+    calendar-year competitions (Norway, Sweden)."""
+    when = when or datetime.now()
+    if league_code in CALENDAR_YEAR_LEAGUES:
+        return when.year
+    return when.year if when.month >= 7 else when.year - 1
 
 # --- Coverage ---
 LEAGUE_CODES = [

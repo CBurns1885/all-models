@@ -117,7 +117,12 @@ def _load_features() -> pd.DataFrame:
     df = pd.read_parquet(FEATURES_PARQUET)
     if not np.issubdtype(df["Date"].dtype, np.datetime64):
         df["Date"] = pd.to_datetime(df["Date"])
-    return df.sort_values(["League", "Date"]).reset_index(drop=True)
+    # Sort GLOBALLY by Date: make_time_split() slices this frame into
+    # contiguous chunks assuming time order. Sorting by (League, Date) here
+    # would turn the "temporal" CV folds into league blocks — the last fold
+    # (used for holdout calibration) would be the alphabetically-last leagues
+    # instead of the most recent matches.
+    return df.sort_values(["Date", "League"], kind="stable").reset_index(drop=True)
 
 # --------------------------------------------------------------------------------------
 # Targets definition
@@ -428,23 +433,16 @@ def _importance_prune(
 # Preprocess
 # --------------------------------------------------------------------------------------
 def _feature_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-    id_cols = {"League","Date","HomeTeam","AwayTeam","Season","Referee","referee",
-               "fixture_id","Home_ID","Away_ID","League_ID"}
-    target_cols = set([c for c in df.columns if c.startswith("y_")])
-    # CRITICAL: Exclude ALL result columns — including half-time scores.
-    # HTHG/HTAG/HTR are outcomes, NOT features. Using them leaks the result.
-    result_cols = {"FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
-                   "HomeGoals", "AwayGoals", "OU25"}
-    # Also exclude raw match stats that are from the CURRENT match (not rolling).
-    # These are the match's own shots/corners/cards — knowing them = knowing the match.
-    raw_match_stats = {"HS", "AS", "HST", "AST", "HC", "AC",
-                       "HY", "AY", "HR", "AR", "HF", "AF"}
-    # Exclude known-blank columns: bookmaker odds (not in API data) and raw xG/BigChances
-    # (fixture_statistics table is empty until API renewal — all zeros, zero variance).
-    blank_cols = {"B365H","B365D","B365A","PSCH","PSCD","PSCA",
-                  "B365_Impl_H","B365_Impl_D","B365_Impl_A","B365_Overround",
-                  "Home_xG","Away_xG","Home_BigChances","Away_BigChances"}
-    exclude = id_cols | target_cols | result_cols | raw_match_stats | blank_cols
+    # Exclusions live in feature_rules.py (shared with models_goal/models_counts
+    # and features.get_feature_columns so the lists cannot drift apart).
+    # CRITICAL: this includes the post-pivot current-match stats
+    # (Home_Corners, Away_CardsY, Home_Shots, ...) — the match's own stats
+    # under side-prefixed names. Training on them leaks the outcome: the old
+    # list only excluded the pre-pivot names (HC, AY, HS, ...), which is why
+    # cards/corners backtests showed impossible accuracies.
+    from feature_rules import feature_exclusions
+    target_cols = set(c for c in df.columns if c.startswith("y_"))
+    exclude = feature_exclusions() | target_cols
     cand = [c for c in df.columns if c not in exclude]
     cat = [c for c in cand if str(df[c].dtype) in ("object","string","category","bool")]
     num = [c for c in cand if c not in cat]
@@ -832,6 +830,245 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
         return _build_base_model(alg, len(classes_), [])
 
 
+def _align_proba_by_classes(proba: np.ndarray, model_classes, K: int) -> np.ndarray:
+    """Scatter a fitted model's predict_proba output into a (n, K) matrix
+    indexed by the GLOBAL class codes 0..K-1, using model.classes_ to place
+    each column. Positional truncation/padding is wrong whenever a training
+    subset is missing a middle class (e.g. fold lacks draws) — columns would
+    silently shift to the wrong outcome.
+    """
+    n = proba.shape[0]
+    P = np.zeros((n, K))
+    for j, cls in enumerate(model_classes):
+        c = int(cls)
+        if 0 <= c < K:
+            P[:, c] = proba[:, j]
+    s = P.sum(axis=1, keepdims=True)
+    s[s == 0] = 1.0
+    return P / s
+
+
+def _market_vec_from_prices(mp: dict, target: str, max_goals: int = 8):
+    """Map a DC_*-keyed market-price dict to a probability vector for `target`.
+
+    NOTE: column order is a FIXED per-target convention (H/D/A for 1X2,
+    U/O for O/U, N/Y for BTTS, ...), not sorted-category order. That is fine
+    for stacking — the meta-learner only needs the order to be identical
+    between OOF training and inference, which it is — but do NOT interpret
+    these columns as aligned with pandas categorical codes.
+    Shared by every grid-based pseudo-base (dc, gem, dyn) so they price
+    targets identically. Returns None when the target is not derivable."""
+    vec = None
+
+    # Core markets
+    if target == "y_1X2":
+        vec = [mp.get("DC_1X2_H", 0.0), mp.get("DC_1X2_D", 0.0), mp.get("DC_1X2_A", 0.0)]
+
+    elif target == "y_BTTS":
+        vec = [mp.get("DC_BTTS_N", 0.0), mp.get("DC_BTTS_Y", 0.0)]
+
+    elif target == "y_GOAL_RANGE":
+        labs = ["0", "1", "2", "3", "4", "5+"]
+        vec = [mp.get(f"DC_GR_{k}", 0.0) for k in labs]
+
+    elif target == "y_CS":
+        vec = [mp.get(f"DC_CS_{a}_{b}", 0.0) for a in range(6) for b in range(6)] + [mp.get("DC_CS_Other", 0.0)]
+
+    # Over/Under total goals
+    elif target.startswith("y_OU_"):
+        # "y_OU_2_5" -> "2_5" (split("_")[-1] gave "5" — a long-standing bug
+        # that made the DC pseudo-base return zeros for ALL O/U targets)
+        l = target.split("_", 2)[2]
+        vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
+
+    # Asian Handicap
+    elif target.startswith("y_AH_"):
+        l = target.split("_", 2)[2]
+        vec = [mp.get(f"DC_AH_{l}_A", 0.0), mp.get(f"DC_AH_{l}_P", 0.0), mp.get(f"DC_AH_{l}_H", 0.0)]
+
+    # Team Goals Over/Under — prefer the direct grid-derived DC_HomeTG_*
+    # keys; fall back to summing correct-score cells.
+    # NOTE: line parsing was broken here too ("y_HomeTG_1_5" -> 5.0).
+    elif target.startswith("y_HomeTG_"):
+        l = target.replace("y_HomeTG_", "")            # "1_5"
+        if f"DC_HomeTG_{l}_O" in mp:
+            p_over = mp[f"DC_HomeTG_{l}_O"]
+        else:
+            line = float(l.replace("_", "."))
+            p_over = 0.0
+            for h in range(max_goals + 1):
+                if h > line:
+                    for a in range(max_goals + 1):
+                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_over, p_over]  # [Under, Over]
+
+    elif target.startswith("y_AwayTG_"):
+        l = target.replace("y_AwayTG_", "")
+        if f"DC_AwayTG_{l}_O" in mp:
+            p_over = mp[f"DC_AwayTG_{l}_O"]
+        else:
+            line = float(l.replace("_", "."))
+            p_over = 0.0
+            for a in range(max_goals + 1):
+                if a > line:
+                    for h in range(max_goals + 1):
+                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    # Double Chance - derive from 1X2
+    elif target == "y_DC_1X":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_d = mp.get("DC_1X2_D", 0.0)
+        vec = [1.0 - (p_h + p_d), p_h + p_d]  # [No, Yes]
+
+    elif target == "y_DC_X2":
+        p_d = mp.get("DC_1X2_D", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        vec = [1.0 - (p_d + p_a), p_d + p_a]
+
+    elif target == "y_DC_12":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        vec = [1.0 - (p_h + p_a), p_h + p_a]
+
+    # Draw No Bet - derive from 1X2 (excluding draws)
+    elif target == "y_DNB_H":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        total = p_h + p_a
+        if total > 0:
+            vec = [p_a / total, p_h / total]  # [No (Away wins), Yes (Home wins)]
+        else:
+            vec = [0.5, 0.5]
+
+    elif target == "y_DNB_A":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        total = p_h + p_a
+        if total > 0:
+            vec = [p_h / total, p_a / total]
+        else:
+            vec = [0.5, 0.5]
+
+    # Exact Total Goals - derive from goal range
+    elif target.startswith("y_ExactTotal_"):
+        n = target.split("_")[-1]
+        if n == "6+":
+            p_exact = mp.get("DC_GR_5+", 0.0)  # 5+ includes 6+
+        else:
+            p_exact = mp.get(f"DC_GR_{n}", 0.0)
+        vec = [1.0 - p_exact, p_exact]
+
+    # Exact Team Goals - derive from score grid
+    elif target.startswith("y_HomeExact_"):
+        n = target.split("_")[-1]
+        p_exact = 0.0
+        if n == "3+":
+            for h in range(3, max_goals + 1):
+                for a in range(max_goals + 1):
+                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        else:
+            h = int(n)
+            for a in range(max_goals + 1):
+                p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_exact, p_exact]
+
+    elif target.startswith("y_AwayExact_"):
+        n = target.split("_")[-1]
+        p_exact = 0.0
+        if n == "3+":
+            for a in range(3, max_goals + 1):
+                for h in range(max_goals + 1):
+                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        else:
+            a = int(n)
+            for h in range(max_goals + 1):
+                p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_exact, p_exact]
+
+    # To Score markets
+    elif target == "y_HomeToScore":
+        # P(Home scores at least 1) = 1 - P(Home scores 0)
+        p_zero = 0.0
+        for a in range(max_goals + 1):
+            p_zero += mp.get(f"DC_CS_0_{a}", 0.0)
+        vec = [p_zero, 1.0 - p_zero]  # [No, Yes]
+
+    elif target == "y_AwayToScore":
+        p_zero = 0.0
+        for h in range(max_goals + 1):
+            p_zero += mp.get(f"DC_CS_{h}_0", 0.0)
+        vec = [p_zero, 1.0 - p_zero]
+
+    # Clean Sheet / Win to Nil markets
+    elif target == "y_HomeCS":
+        # P(Away scores 0)
+        p_cs = 0.0
+        for h in range(max_goals + 1):
+            p_cs += mp.get(f"DC_CS_{h}_0", 0.0)
+        vec = [1.0 - p_cs, p_cs]
+
+    elif target == "y_AwayCS":
+        p_cs = 0.0
+        for a in range(max_goals + 1):
+            p_cs += mp.get(f"DC_CS_0_{a}", 0.0)
+        vec = [1.0 - p_cs, p_cs]
+
+    elif target == "y_HomeWTN":
+        # P(Home wins AND Away scores 0)
+        p_wtn = 0.0
+        for h in range(1, max_goals + 1):
+            p_wtn += mp.get(f"DC_CS_{h}_0", 0.0)
+        vec = [1.0 - p_wtn, p_wtn]
+
+    elif target == "y_AwayWTN":
+        p_wtn = 0.0
+        for a in range(1, max_goals + 1):
+            p_wtn += mp.get(f"DC_CS_0_{a}", 0.0)
+        vec = [1.0 - p_wtn, p_wtn]
+
+    elif target == "y_NoGoal":
+        p_00 = mp.get("DC_CS_0_0", 0.0)
+        vec = [1.0 - p_00, p_00]
+
+    # Multi-goal markets
+    elif target == "y_Match2+Goals":
+        p_over = mp.get("DC_OU_1_5_O", 0.0)  # 2+ goals = Over 1.5
+        vec = [1.0 - p_over, p_over]
+
+    elif target == "y_Match3+Goals":
+        p_over = mp.get("DC_OU_2_5_O", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    elif target == "y_Match4+Goals":
+        p_over = mp.get("DC_OU_3_5_O", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    elif target == "y_Match5+Goals":
+        p_over = mp.get("DC_OU_4_5_O", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    return vec
+
+
+def _vecs_to_matrix(out: list, n_rows: int) -> np.ndarray:
+    """Assemble per-row vectors (None allowed) into a normalised matrix."""
+    first = next((v for v in out if v is not None), None)
+    if first is None:
+        return np.zeros((n_rows, 1))
+
+    W = len(first)
+    arr = np.zeros((n_rows, W))
+    for i, v in enumerate(out):
+        if v is not None:
+            arr[i, :] = v
+
+    # Renormalize for safety
+    s = arr.sum(axis=1, keepdims=True)
+    s[s == 0] = 1.0
+    return arr / s
+
+
 # --------------------------------------------------------------------------------------
 # DC probabilities helper (for OOF & inference)
 # --------------------------------------------------------------------------------------
@@ -881,202 +1118,62 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
         mp = {}
         if lg in params:
             mp = dc_price_match(params[lg], ht, at, max_goals=max_goals)
+        out.append(_market_vec_from_prices(mp, target, max_goals))
 
-        vec = None
+    return _vecs_to_matrix(out, len(rows_df))
 
-        # Core markets
-        if target == "y_1X2":
-            vec = [mp.get("DC_1X2_H", 0.0), mp.get("DC_1X2_D", 0.0), mp.get("DC_1X2_A", 0.0)]
 
-        elif target == "y_BTTS":
-            vec = [mp.get("DC_BTTS_N", 0.0), mp.get("DC_BTTS_Y", 0.0)]
 
-        elif target == "y_GOAL_RANGE":
-            labs = ["0", "1", "2", "3", "4", "5+"]
-            vec = [mp.get(f"DC_GR_{k}", 0.0) for k in labs]
 
-        elif target == "y_CS":
-            vec = [mp.get(f"DC_CS_{a}_{b}", 0.0) for a in range(6) for b in range(6)] + [mp.get("DC_CS_Other", 0.0)]
+# --------------------------------------------------------------------------------------
+# Pseudo-base registry — model families that are not sklearn-style classifiers.
+# Each prices markets from its own fitted structure; the stacking meta-learner
+# decides per market how much weight each deserves. All are fit ONLY on the
+# training rows passed in (walk-forward safe) and cache fits per date-window.
+# Disable any of them with USE_GEM=0 / USE_DYN=0 / USE_NB=0.
+# --------------------------------------------------------------------------------------
 
-        # Over/Under total goals
-        elif target.startswith("y_OU_"):
-            l = target.split("_")[-1]
-            vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
+def _gem_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str,
+                        max_goals: int = 8) -> np.ndarray:
+    """Goal Expectation Model: Poisson-loss GBM lambdas -> DC score grid."""
+    from models_goal import gem_prices_for_rows
+    mps = gem_prices_for_rows(train_df, rows_df, max_goals=max_goals)
+    vecs = [_market_vec_from_prices(mp, target, max_goals) for mp in mps]
+    return _vecs_to_matrix(vecs, len(rows_df))
 
-        # Asian Handicap
-        elif target.startswith("y_AH_"):
-            l = target.split("_", 2)[2]
-            vec = [mp.get(f"DC_AH_{l}_A", 0.0), mp.get(f"DC_AH_{l}_P", 0.0), mp.get(f"DC_AH_{l}_H", 0.0)]
 
-        # Team Goals Over/Under - derive from score grid
-        elif target.startswith("y_HomeTG_"):
-            line = float(target.split("_")[-1].replace("_", "."))
-            # Calculate P(HomeGoals > line) from score grid
-            p_over = 0.0
-            for h in range(max_goals + 1):
-                if h > line:
-                    for a in range(max_goals + 1):
-                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_over, p_over]  # [Under, Over]
+def _dyn_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str,
+                        max_goals: int = 8) -> np.ndarray:
+    """Dynamic state-space team strengths -> DC score grid."""
+    from models_dyn import dyn_prices_for_rows
+    mps = dyn_prices_for_rows(train_df, rows_df, max_goals=max_goals)
+    vecs = [_market_vec_from_prices(mp, target, max_goals) for mp in mps]
+    return _vecs_to_matrix(vecs, len(rows_df))
 
-        elif target.startswith("y_AwayTG_"):
-            line = float(target.split("_")[-1].replace("_", "."))
-            p_over = 0.0
-            for a in range(max_goals + 1):
-                if a > line:
-                    for h in range(max_goals + 1):
-                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_over, p_over]
 
-        # Double Chance - derive from 1X2
-        elif target == "y_DC_1X":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_d = mp.get("DC_1X2_D", 0.0)
-            vec = [1.0 - (p_h + p_d), p_h + p_d]  # [No, Yes]
+def _nb_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str,
+                       max_goals: int = 8) -> np.ndarray:
+    """Negative-binomial count models for corners/cards lines."""
+    from models_counts import nb_probs_for_rows
+    return nb_probs_for_rows(train_df, rows_df, target)
 
-        elif target == "y_DC_X2":
-            p_d = mp.get("DC_1X2_D", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            vec = [1.0 - (p_d + p_a), p_d + p_a]
 
-        elif target == "y_DC_12":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            vec = [1.0 - (p_h + p_a), p_h + p_a]
+def _nb_target_supported(t: str) -> bool:
+    from models_counts import nb_supported
+    return nb_supported(t)
 
-        # Draw No Bet - derive from 1X2 (excluding draws)
-        elif target == "y_DNB_H":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            total = p_h + p_a
-            if total > 0:
-                vec = [p_a / total, p_h / total]  # [No (Away wins), Yes (Home wins)]
-            else:
-                vec = [0.5, 0.5]
 
-        elif target == "y_DNB_A":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            total = p_h + p_a
-            if total > 0:
-                vec = [p_h / total, p_a / total]
-            else:
-                vec = [0.5, 0.5]
+def _pseudo_enabled(name: str) -> bool:
+    return os.environ.get(f"USE_{name.upper()}", "1") == "1"
 
-        # Exact Total Goals - derive from goal range
-        elif target.startswith("y_ExactTotal_"):
-            n = target.split("_")[-1]
-            if n == "6+":
-                p_exact = mp.get("DC_GR_5+", 0.0)  # 5+ includes 6+
-            else:
-                p_exact = mp.get(f"DC_GR_{n}", 0.0)
-            vec = [1.0 - p_exact, p_exact]
 
-        # Exact Team Goals - derive from score grid
-        elif target.startswith("y_HomeExact_"):
-            n = target.split("_")[-1]
-            p_exact = 0.0
-            if n == "3+":
-                for h in range(3, max_goals + 1):
-                    for a in range(max_goals + 1):
-                        p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            else:
-                h = int(n)
-                for a in range(max_goals + 1):
-                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_exact, p_exact]
-
-        elif target.startswith("y_AwayExact_"):
-            n = target.split("_")[-1]
-            p_exact = 0.0
-            if n == "3+":
-                for a in range(3, max_goals + 1):
-                    for h in range(max_goals + 1):
-                        p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            else:
-                a = int(n)
-                for h in range(max_goals + 1):
-                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_exact, p_exact]
-
-        # To Score markets
-        elif target == "y_HomeToScore":
-            # P(Home scores at least 1) = 1 - P(Home scores 0)
-            p_zero = 0.0
-            for a in range(max_goals + 1):
-                p_zero += mp.get(f"DC_CS_0_{a}", 0.0)
-            vec = [p_zero, 1.0 - p_zero]  # [No, Yes]
-
-        elif target == "y_AwayToScore":
-            p_zero = 0.0
-            for h in range(max_goals + 1):
-                p_zero += mp.get(f"DC_CS_{h}_0", 0.0)
-            vec = [p_zero, 1.0 - p_zero]
-
-        # Clean Sheet / Win to Nil markets
-        elif target == "y_HomeCS":
-            # P(Away scores 0)
-            p_cs = 0.0
-            for h in range(max_goals + 1):
-                p_cs += mp.get(f"DC_CS_{h}_0", 0.0)
-            vec = [1.0 - p_cs, p_cs]
-
-        elif target == "y_AwayCS":
-            p_cs = 0.0
-            for a in range(max_goals + 1):
-                p_cs += mp.get(f"DC_CS_0_{a}", 0.0)
-            vec = [1.0 - p_cs, p_cs]
-
-        elif target == "y_HomeWTN":
-            # P(Home wins AND Away scores 0)
-            p_wtn = 0.0
-            for h in range(1, max_goals + 1):
-                p_wtn += mp.get(f"DC_CS_{h}_0", 0.0)
-            vec = [1.0 - p_wtn, p_wtn]
-
-        elif target == "y_AwayWTN":
-            p_wtn = 0.0
-            for a in range(1, max_goals + 1):
-                p_wtn += mp.get(f"DC_CS_0_{a}", 0.0)
-            vec = [1.0 - p_wtn, p_wtn]
-
-        elif target == "y_NoGoal":
-            p_00 = mp.get("DC_CS_0_0", 0.0)
-            vec = [1.0 - p_00, p_00]
-
-        # Multi-goal markets
-        elif target == "y_Match2+Goals":
-            p_over = mp.get("DC_OU_1_5_O", 0.0)  # 2+ goals = Over 1.5
-            vec = [1.0 - p_over, p_over]
-
-        elif target == "y_Match3+Goals":
-            p_over = mp.get("DC_OU_2_5_O", 0.0)
-            vec = [1.0 - p_over, p_over]
-
-        elif target == "y_Match4+Goals":
-            p_over = mp.get("DC_OU_3_5_O", 0.0)
-            vec = [1.0 - p_over, p_over]
-
-        elif target == "y_Match5+Goals":
-            p_over = mp.get("DC_OU_4_5_O", 0.0)
-            vec = [1.0 - p_over, p_over]
-
-        out.append(vec)
-
-    first = next((v for v in out if v is not None), None)
-    if first is None:
-        return np.zeros((len(rows_df), 1))
-
-    W = len(first)
-    arr = np.zeros((len(rows_df), W))
-    for i, v in enumerate(out):
-        if v is not None:
-            arr[i, :] = v
-
-    # Renormalize for safety
-    s = arr.sum(axis=1, keepdims=True)
-    s[s == 0] = 1.0
-    return arr / s
+# name -> (target-supported predicate, probs function)
+_PSEUDO_BASES = {
+    "dc":  (_dc_supported,       _dc_probs_for_rows),
+    "gem": (_dc_supported,       _gem_probs_for_rows),   # same grid-derived target set as DC
+    "dyn": (_dc_supported,       _dyn_probs_for_rows),
+    "nb":  (_nb_target_supported, _nb_probs_for_rows),
+}
 
 
 # --------------------------------------------------------------------------------------
@@ -1253,28 +1350,51 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         elif name != "xgb":  # Skip XGBoost if it failed during tuning
             base_models[name] = _build_base_model(name, n_classes=len(classes), feature_names=feature_names, market_type=market_type_str)
 
-    # Add DC pseudo-base if supported
-    supports_dc = _dc_supported(target_col)
-    if supports_dc:
-        base_models["dc"] = "__DC__"
+    # Add pseudo-bases (DC, GEM goal model, dynamic strengths, NB counts).
+    # Each is a genuinely different model family; the meta-learner weights
+    # them per market. Guarded by USE_<NAME> env flags (default on).
+    for _pname, (_support_fn, _probs_fn) in _PSEUDO_BASES.items():
+        try:
+            if _pseudo_enabled(_pname) and _support_fn(target_col):
+                base_models[_pname] = f"__{_pname.upper()}__"
+        except Exception as _pe:
+            print(f"[WARN]  Pseudo-base {_pname} unavailable: {_pe}")
 
-    # Walk-forward OOF with speed-aware fold count
+    # Walk-forward OOF with speed-aware fold count.
+    # Rows are globally date-sorted (see _load_features), so fold i is strictly
+    # earlier in time than fold i+1. Each fold's models are trained ONLY on
+    # earlier folds — training on "all other folds" would let middle folds see
+    # the future, biasing the meta-learner and calibrator optimistic.
     if _HAS_SPEED_CONFIG:
         n_folds = get_n_folds()
     else:
         n_folds = 5
+    n_folds = max(2, n_folds)
     ps = make_time_split(len(y_int), n_folds=n_folds)
+    fold_ids = np.unique(ps.test_fold)
+    K = len(classes)
     oof_blocks = []
-    for fold in np.unique(ps.test_fold):
-        tr = ps.test_fold != fold
+    oof_valid = np.zeros(len(y_int), dtype=bool)
+    for fold in fold_ids:
+        if fold == fold_ids[0]:
+            continue  # earliest fold has no past data to train on
+        tr = ps.test_fold < fold
         va = ps.test_fold == fold
         Xt = X_all[tr]; yt = y_int[tr]
         Xv = X_all[va]; yv = y_int[va]
+        if len(np.unique(yt)) < 2:
+            print(f"[WARN]  Fold {fold}: training window has <2 classes, skipping fold")
+            continue
         fold_stack = []
         for name, model in base_models.items():
             try:
-                if name == "dc":
-                    proba = _dc_probs_for_rows(sub.iloc[tr], sub.iloc[va], target_col)
+                if name in _PSEUDO_BASES:
+                    proba = _PSEUDO_BASES[name][1](sub.iloc[tr], sub.iloc[va], target_col)
+                    if proba.shape[1] != K:
+                        P2 = np.zeros((len(Xv), K))
+                        P2[:, :min(K, proba.shape[1])] = proba[:, :min(K, proba.shape[1])]
+                        s = P2.sum(axis=1, keepdims=True); s[s == 0] = 1.0
+                        proba = P2 / s
                 else:
                     m = model
                     # Fit fresh copy per fold to keep OOF strict
@@ -1286,36 +1406,35 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                         m = CORALOrdinal(C=1.0, max_iter=2000)
                     elif name == "bnn" and _HAS_TORCH:
                         m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
-                    if name != "dc":
-                        m.fit(Xt, yt)
-                        proba = m.predict_proba(Xv)
+                    m.fit(Xt, yt)
+                    # Align columns by the model's own classes_, not position —
+                    # a fold's training window can be missing a middle class.
+                    raw = m.predict_proba(Xv)
+                    model_classes = getattr(m, "classes_", np.arange(raw.shape[1]))
+                    proba = _align_proba_by_classes(raw, model_classes, K)
             except Exception as e:
-                # If XGBoost (or any model) fails during CV, skip it and continue
-                if name == "xgb":
-                    print(f"[WARN]  XGBoost failed in fold {fold}: {e}. Continuing without XGBoost.")
-                    continue
-                else:
-                    print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Continuing without this model.")
-                    continue
-            # align width
-            if proba.shape[1] != len(classes):
-                P2 = np.zeros((len(Xv), len(classes)))
-                P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-                s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-                proba = P2 / s
+                # Keep block widths consistent across folds: substitute uniform
+                # probabilities for a failed model instead of dropping columns.
+                print(f"[WARN]  Model {name} failed in fold {fold}: {e}. Using uniform probs for this fold.")
+                proba = np.full((len(Xv), K), 1.0 / K)
             fold_stack.append(proba)
         # concat base probs horizontally
         fold_oof = np.hstack(fold_stack)
         oof_blocks.append((va, fold_oof))
+        oof_valid[va] = True
+
+    if not oof_blocks:
+        print(f"[WARN] Skipping {target_col} - no valid OOF folds")
+        return None
 
     # assemble full OOF in original order
-    oof_pred = np.zeros((len(y_int), sum([len(classes) for _ in base_models])))
+    oof_pred = np.zeros((len(y_int), K * len(base_models)))
     for va_idx, block in oof_blocks:
         oof_pred[va_idx] = block
 
-    # meta-learner on OOF
+    # meta-learner on genuinely out-of-sample rows only
     meta = LogisticRegression(max_iter=2000, n_jobs=-1)
-    meta.fit(oof_pred, y_int)
+    meta.fit(oof_pred[oof_valid], y_int[oof_valid])
 
     # Calibration: use last temporal fold only (true holdout) to avoid in-sample overconfidence.
     # The last fold contains the most recent ~1/n_folds of data — models trained on earlier
@@ -1323,16 +1442,20 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     # confidence distribution to fit against.
     last_fold_id = np.unique(ps.test_fold)[-1]
     cal_mask = ps.test_fold == last_fold_id
-    use_holdout_cal = cal_mask.sum() >= 100  # Fallback to all OOF if too few holdout samples
+    # Require enough samples AND genuine OOF predictions for the whole fold
+    # (a skipped fold leaves zero-filled placeholder rows).
+    use_holdout_cal = cal_mask.sum() >= 100 and bool(oof_valid[cal_mask].all())
 
     if use_holdout_cal:
         cal_oof = oof_pred[cal_mask]
         cal_y = y_int[cal_mask]
         print(f"  [CAL] Holdout calibration on last fold: {cal_mask.sum()} samples")
     else:
-        cal_oof = oof_pred
-        cal_y = y_int
-        print(f"  [CAL] Falling back to full OOF calibration ({len(y_int)} samples, too few holdout)")
+        # Only rows with genuine OOF predictions — fold 0 has zero-filled
+        # placeholders and must not be used to fit a calibrator.
+        cal_oof = oof_pred[oof_valid]
+        cal_y = y_int[oof_valid]
+        print(f"  [CAL] Falling back to full OOF calibration ({oof_valid.sum()} samples, too few holdout)")
 
     if hasattr(meta, "decision_function"):
         decision_scores = meta.decision_function(cal_oof)
@@ -1364,14 +1487,18 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         logits = np.log(np.clip(P_meta_cal, 1e-12, 1-1e-12))
         calibrator = TemperatureScaler().fit(logits, cal_y)
 
-    # Fit base models on FULL data for inference
-    full_stack = []
+    # Fit base models on FULL data for inference.
+    # IMPORTANT: the meta-learner is NOT refit here. Refitting it on the base
+    # models' in-sample predictions (near-perfect for large tree ensembles)
+    # teaches it that base outputs are almost always right, producing extreme
+    # overconfidence at inference — and invalidates the calibrator, which was
+    # fitted against the OOF meta's output distribution. The meta stays as
+    # fitted on genuinely out-of-sample stacked predictions above.
     fitted_bases: Dict[str, object] = {}
     for name, model in base_models.items():
         try:
-            if name == "dc":
-                proba = _dc_probs_for_rows(sub, sub, target_col)
-                fitted_bases[name] = "__DC__"
+            if name in _PSEUDO_BASES:
+                fitted_bases[name] = f"__{name.upper()}__"
             else:
                 m = model
                 if isinstance(model, (RandomForestClassifier, ExtraTreesClassifier, LogisticRegression)):
@@ -1383,25 +1510,12 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 elif name == "bnn" and _HAS_TORCH:
                     m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
                 m.fit(X_all, y_int)
-                proba = m.predict_proba(X_all)
                 fitted_bases[name] = m
         except Exception as e:
-            # If XGBoost (or any model) fails during final fit, skip it and continue
-            if name == "xgb":
-                print(f"[WARN]  XGBoost failed during final fit: {e}. Continuing without XGBoost.")
-                continue
-            else:
-                print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
-                continue
-        # align width
-        if proba.shape[1] != len(classes):
-            P2 = np.zeros((len(X_all), len(classes)))
-            P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-            s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-            proba = P2 / s
-        full_stack.append(proba)
-    full_stack = np.hstack(full_stack)
-    meta.fit(full_stack, y_int)  # refit meta on full stacked features
+            print(f"[WARN]  Model {name} failed during final fit: {e}. Continuing without this model.")
+            # Keep the slot so the stacked-feature width matches the meta:
+            # predict_proba() substitutes uniform probs for missing models.
+            fitted_bases[name] = None
 
     # pack
     return TrainedTarget(
@@ -1426,6 +1540,21 @@ def train_all_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Train
         print_speed_info()
 
     df = _load_features()
+
+    # Optional anti-leakage cutoff for honest backtesting: set TRAIN_CUTOFF_DATE
+    # (YYYY-MM-DD) to exclude all matches on/after that date from training.
+    # To evaluate a period honestly, train with the cutoff at the start of the
+    # test period, then run market_backtest over that period.
+    _cutoff = os.environ.get("TRAIN_CUTOFF_DATE", "").strip()
+    if _cutoff:
+        try:
+            _cut_ts = pd.Timestamp(_cutoff)
+            n_before = len(df)
+            df = df[df["Date"] < _cut_ts].reset_index(drop=True)
+            print(f"[CUTOFF] TRAIN_CUTOFF_DATE={_cutoff}: training on {len(df):,}/{n_before:,} rows before cutoff")
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid TRAIN_CUTOFF_DATE '{_cutoff}': {e}")
+
     models: Dict[str, TrainedTarget] = {}
     models_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1485,6 +1614,7 @@ def load_trained_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Tr
 def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> Dict[str, np.ndarray]:
     out: Dict[str, np.ndarray] = {}
     skipped = []
+    _hist_cache = None  # lazily loaded, shared by all pseudo-bases/targets
     for t, trg in models.items():
         try:
             # preprocess — may fail if model was trained on different features
@@ -1498,19 +1628,36 @@ def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> 
 
         try:
             # stacked base predictions
+            K = len(trg.classes_)
             stack_blocks = []
             for name, base in trg.base_models.items():
-                if name == "dc":
-                    hist = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
-                    proba = _dc_probs_for_rows(hist, df_future, t)
+                if base is None:
+                    # Base model failed during final training fit — keep the
+                    # stacked-feature width consistent with uniform probs.
+                    proba = np.full((len(df_future), K), 1.0 / K)
+                elif name in _PSEUDO_BASES:
+                    if _hist_cache is None:
+                        _hist_cache = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
+                        # Only use matches strictly before the fixtures being
+                        # predicted. Harmless for live use (all history is in
+                        # the past) but essential for backtests on historical
+                        # fixtures — otherwise the pseudo-bases are fitted on
+                        # the very matches being "predicted" and on matches
+                        # played after them.
+                        if "Date" in df_future.columns:
+                            _cut = pd.to_datetime(df_future["Date"]).min()
+                            if pd.notna(_cut):
+                                _hist_cache = _hist_cache[_hist_cache["Date"] < _cut]
+                    proba = _PSEUDO_BASES[name][1](_hist_cache, df_future, t)
+                    if proba.shape[1] != K:
+                        P2 = np.zeros((len(df_future), K))
+                        P2[:, :min(K, proba.shape[1])] = proba[:, :min(K, proba.shape[1])]
+                        s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
+                        proba = P2 / s
                 else:
-                    proba = base.predict_proba(Xf)
-                # align width
-                if proba.shape[1] != len(trg.classes_):
-                    P2 = np.zeros((len(df_future), len(trg.classes_)))
-                    P2[:, :min(P2.shape[1], proba.shape[1])] = proba[:, :min(P2.shape[1], proba.shape[1])]
-                    s = P2.sum(axis=1, keepdims=True); s[s==0]=1.0
-                    proba = P2 / s
+                    raw = base.predict_proba(Xf)
+                    model_classes = getattr(base, "classes_", np.arange(raw.shape[1]))
+                    proba = _align_proba_by_classes(raw, model_classes, K)
                 stack_blocks.append(proba)
             S = np.hstack(stack_blocks)
             # meta + calibration

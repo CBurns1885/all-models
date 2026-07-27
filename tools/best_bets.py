@@ -14,8 +14,26 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+# This file lives in tools/ — outputs/ is at the repo root, one level up.
+ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
+
+# Home-prior fallback sentinel (19/21): emitted for fixtures where neither
+# ML nor DC had any training data for the teams (e.g. European qualifiers).
+# These predictions are pure prior — they must NEVER reach the betting layer,
+# where their fake 90% confidence would look like a huge edge.
+FALLBACK_1X2_H = 19.0 / 21.0
+_FALLBACK_TOL = 1e-4
+
+
+def _is_fallback_row(match) -> bool:
+    """True if this fixture's 1X2 probabilities are the no-data fallback prior."""
+    for col in ("P_1X2_H", "BLEND_1X2_H"):
+        if col in match.index:
+            v = match[col]
+            if v == v and abs(float(v) - FALLBACK_1X2_H) < _FALLBACK_TOL:
+                return True
+    return False
 
 # (market_name_in_breakdown) -> [list of prediction columns to consider]
 # For each market we take the column with the highest probability as the predicted bet.
@@ -70,11 +88,26 @@ def _outcome_label(col: str) -> str:
     return suffix
 
 
+def _rd_too_high(match, max_rd: float) -> bool:
+    """True when either team's Glicko rating deviation says 'we barely know
+    this team' — the principled unknown-team gate (RD 350 = brand new)."""
+    worst = 0.0
+    found = False
+    for col in ("Home_GlickoRD", "Away_GlickoRD"):
+        if col in match.index:
+            v = match[col]
+            if v == v:
+                worst = max(worst, float(v))
+                found = True
+    return found and worst > max_rd
+
+
 def generate_best_bets(
     top_n: int = 200,
     min_confidence: float = 0.70,
     min_hist_preds: int = 20,
     min_hist_accuracy: float = 0.55,
+    max_rd: float = 200.0,
 ):
     # --- Load league breakdown ---
     breakdown_path = OUTPUTS / "league_breakdown.csv"
@@ -102,11 +135,18 @@ def generate_best_bets(
 
     # --- Build bet rows ---
     rows = []
+    fallback_skipped = 0
     for _, match in preds.iterrows():
         league = str(match.get("League", ""))
         date   = str(match.get("Date", ""))[:10]
         home   = str(match.get("HomeTeam", ""))
         away   = str(match.get("AwayTeam", ""))
+        time_  = str(match.get("Time", "")) if "Time" in match.index else ""
+
+        # Never bet on no-data fallback predictions or barely-known teams
+        if _is_fallback_row(match) or _rd_too_high(match, max_rd):
+            fallback_skipped += 1
+            continue
 
         for market, cols in MARKET_COLS.items():
             # Filter to columns that exist
@@ -140,10 +180,12 @@ def generate_best_bets(
             rows.append({
                 "Score":      round(score, 4),
                 "Confidence": f"{confidence:.1%}",
+                "Prob":       round(confidence, 6),   # raw probability for the placer
                 "Market":     market,
                 "Bet":        _outcome_label(best_col),
                 "League":     league,
                 "Date":       date,
+                "Time":       time_,
                 "Home":       home,
                 "Away":       away,
                 "Hist_Acc":   f"{hist_acc:.1%}",
@@ -151,6 +193,9 @@ def generate_best_bets(
                 "Hist_n":     hist_preds,
                 "_score_raw": score,
             })
+
+    if fallback_skipped:
+        print(f"[GUARD] Skipped {fallback_skipped} fixture(s) with no-data fallback predictions")
 
     if not rows:
         print("[WARN] No qualifying bets found — try lowering min_confidence or min_hist_accuracy")
@@ -247,6 +292,8 @@ if __name__ == "__main__":
     parser.add_argument("--min-confidence", type=float, default=0.70)
     parser.add_argument("--min-hist-preds", type=int, default=20, help="Min historical predictions for a league/market pair")
     parser.add_argument("--min-hist-accuracy", type=float, default=0.55, help="Min historical accuracy (0-1)")
+    parser.add_argument("--max-rd", type=float, default=200.0,
+                        help="Skip fixtures where either team's Glicko RD exceeds this (350 = unknown team)")
     args = parser.parse_args()
 
     generate_best_bets(
@@ -254,4 +301,5 @@ if __name__ == "__main__":
         min_confidence=args.min_confidence,
         min_hist_preds=args.min_hist_preds,
         min_hist_accuracy=args.min_hist_accuracy,
+        max_rd=args.max_rd,
     )
