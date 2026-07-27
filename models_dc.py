@@ -397,36 +397,91 @@ def price_match(params: DCParams, home: str, away: str,
         lam *= form_mult_home_att * (1 / form_mult_away_def)
         mu *= form_mult_away_att * (1 / form_mult_home_def)
     
-    # Generate score probability grid
+    # Generate score probability grid and derive all markets from it
     P = _score_grid(lam, mu, params.rho, max_goals)
-    
+    return derive_markets_from_grid(P, lam, mu)
+
+
+def score_grid_fast(lam: float, mu: float, rho: float,
+                    max_goals: int = MAX_GOALS) -> np.ndarray:
+    """Vectorised score grid (outer product of Poisson pmfs + DC low-score
+    correction). ~10x faster than _score_grid's cell-by-cell loop; used by
+    the GEM/dynamic pseudo-bases which price tens of thousands of rows."""
+    i = np.arange(max_goals + 1)
+    log_ph = -lam + i * np.log(lam + 1e-12) - gammaln(i + 1)
+    log_pa = -mu + i * np.log(mu + 1e-12) - gammaln(i + 1)
+    P = np.outer(np.exp(log_ph), np.exp(log_pa))
+    P[0, 0] *= max(1 - lam * mu * rho, 1e-6)
+    P[0, 1] *= max(1 + lam * rho, 1e-6)
+    P[1, 0] *= max(1 + mu * rho, 1e-6)
+    P[1, 1] *= max(1 - rho, 1e-6)
+    total = P.sum()
+    if total > 1e-12 and np.isfinite(total):
+        P /= total
+    else:
+        P = np.ones_like(P) / P.size
+    return P
+
+
+from functools import lru_cache
+
+
+@lru_cache(maxsize=200_000)
+def _price_from_lambdas_cached(lam_r: float, mu_r: float, rho_r: float,
+                               max_goals: int) -> dict:
+    P = score_grid_fast(lam_r, mu_r, rho_r, max_goals)
+    return derive_markets_from_grid(P, lam_r, mu_r)
+
+
+def price_from_lambdas(lam: float, mu: float, rho: float = 0.0,
+                       max_goals: int = MAX_GOALS, precision: int = 2) -> dict:
+    """Market prices for given expected goals, memoised on rounded lambdas.
+
+    Rounding to `precision` decimals makes repeated pricing of similar
+    (lam, mu) pairs (backtests, OOF folds) near-free. The returned dict is
+    SHARED via the cache — treat it as read-only; copy before mutating.
+    """
+    return _price_from_lambdas_cached(
+        round(float(lam), precision), round(float(mu), precision),
+        round(float(rho), 3), max_goals)
+
+
+def derive_markets_from_grid(P: np.ndarray, lam: float = None, mu: float = None) -> Dict[str, float]:
+    """
+    Derive all DC_* market probabilities from a score probability grid.
+
+    Shared by the classic Dixon-Coles model (price_match), the ML goal-
+    expectation model (models_goal) and the dynamic-strength model
+    (models_dyn) so every grid-based source prices markets identically
+    and cross-market consistency comes from the grid by construction.
+    """
     out = {}
-    
+
     # 1X2 - Match result
     out['DC_1X2_H'] = np.tril(P, -1).sum()  # Home wins
     out['DC_1X2_D'] = np.trace(P)           # Draws
     out['DC_1X2_A'] = np.triu(P, 1).sum()   # Away wins
-    
+
     # BTTS - Both teams to score
     out['DC_BTTS_Y'] = P[1:, 1:].sum()
     out['DC_BTTS_N'] = 1 - out['DC_BTTS_Y']
-    
+
     # Over/Under lines (CRITICAL FOR O/U ACCURACY)
     S = np.add.outer(np.arange(P.shape[0]), np.arange(P.shape[1]))
-    
+
     for line in [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]:
         line_str = str(line).replace('.', '_')
-        
+
         over_prob = P[S > line].sum()
         under_prob = P[S < line].sum()
-        
+
         # Handle exactly on line (push in some markets)
         on_line_prob = P[S == line].sum()
-        
+
         # For X.5 lines, no push possible
         out[f'DC_OU_{line_str}_O'] = over_prob
         out[f'DC_OU_{line_str}_U'] = under_prob + on_line_prob
-    
+
     # Home/Away Team Goals O/U lines — derived from Poisson marginals
     # p_home[h] = P(home scores exactly h goals); p_away[a] = P(away scores exactly a goals)
     p_home = P.sum(axis=1)  # shape (max_goals+1,)
@@ -490,9 +545,10 @@ def price_match(params: DCParams, home: str, away: str,
     out['DC_CS_Other'] = other_prob
     
     # Additional O/U diagnostics (for analysis)
-    out['_expected_total_goals'] = lam + mu
-    out['_home_xG'] = lam
-    out['_away_xG'] = mu
+    if lam is not None and mu is not None:
+        out['_expected_total_goals'] = lam + mu
+        out['_home_xG'] = lam
+        out['_away_xG'] = mu
 
     # Safety: clip all probability values to [0, 1]
     for k, v in out.items():

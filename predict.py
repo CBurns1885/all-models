@@ -588,7 +588,7 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
              "fixture_id", "league_type"}
     # These are derived from BOTH teams and must be recomputed after merging home+away form.
     _opponent_cols = {
-        "Elo_Away", "Elo_Diff",
+        "Elo_Away", "Elo_Diff", "Glicko_Diff",
         "TablePosDiff", "SeasonPtsDiff",
         "BothTopSix", "RelegationClash",
     }
@@ -659,6 +659,8 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     # Recompute cross-team derived features now that both home and away form are merged
     if "Elo_Home" in result.columns and "Elo_Away" in result.columns:
         result["Elo_Diff"] = result["Elo_Home"] - result["Elo_Away"]
+    if "Home_Glicko" in result.columns and "Away_Glicko" in result.columns:
+        result["Glicko_Diff"] = result["Home_Glicko"] - result["Away_Glicko"]
     if "Home_TablePos" in result.columns and "Away_TablePos" in result.columns:
         result["TablePosDiff"] = result["Home_TablePos"] - result["Away_TablePos"]
     if "Home_SeasonPts" in result.columns and "Away_SeasonPts" in result.columns:
@@ -1975,6 +1977,15 @@ def predict_week(fixtures_csv: Path) -> Path:
             fx[ID_COLS + ["Time"]].drop_duplicates(subset=ID_COLS),
             on=ID_COLS, how="left",
         )
+    # Carry fixture_id (odds joins) and Glicko RDs (unknown-team bet gate)
+    if "fixture_id" in fx.columns:
+        df_out = df_out.merge(
+            fx[ID_COLS + ["fixture_id"]].drop_duplicates(subset=ID_COLS),
+            on=ID_COLS, how="left",
+        )
+    for _rd_col in ("Home_GlickoRD", "Away_GlickoRD"):
+        if _rd_col in df_future.columns:
+            df_out[_rd_col] = df_future[_rd_col].values[:len(df_out)]
     
     # Add DC predictions
     log_header("GENERATE DC PREDICTIONS")
@@ -2000,6 +2011,18 @@ def predict_week(fixtures_csv: Path) -> Path:
     # Apply enhanced blending
     log_header("APPLY DYNAMIC BLENDING")
     df_out = _apply_blend(df_out)
+
+    # Market anchoring: merge live odds where available, record EDGE_* columns
+    # (model minus market probability) and optionally shrink toward the market
+    # (TUNING_OVERRIDES['market_anchor_weight'], default 0 = diagnostics only).
+    log_header("APPLY MARKET ANCHOR")
+    try:
+        from odds_utils import merge_odds_into_df
+        from market_anchor import apply_market_anchor
+        df_out = merge_odds_into_df(df_out)
+        df_out = apply_market_anchor(df_out)
+    except Exception as e:
+        print(f"[WARN] Market anchor skipped: {e}")
 
     # Apply injury adjustments (if injury data available)
     log_header("APPLY INJURY ADJUSTMENTS")

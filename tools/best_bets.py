@@ -88,11 +88,26 @@ def _outcome_label(col: str) -> str:
     return suffix
 
 
+def _rd_too_high(match, max_rd: float) -> bool:
+    """True when either team's Glicko rating deviation says 'we barely know
+    this team' — the principled unknown-team gate (RD 350 = brand new)."""
+    worst = 0.0
+    found = False
+    for col in ("Home_GlickoRD", "Away_GlickoRD"):
+        if col in match.index:
+            v = match[col]
+            if v == v:
+                worst = max(worst, float(v))
+                found = True
+    return found and worst > max_rd
+
+
 def generate_best_bets(
     top_n: int = 200,
     min_confidence: float = 0.70,
     min_hist_preds: int = 20,
     min_hist_accuracy: float = 0.55,
+    max_rd: float = 200.0,
 ):
     # --- Load league breakdown ---
     breakdown_path = OUTPUTS / "league_breakdown.csv"
@@ -128,8 +143,8 @@ def generate_best_bets(
         away   = str(match.get("AwayTeam", ""))
         time_  = str(match.get("Time", "")) if "Time" in match.index else ""
 
-        # Never bet on no-data fallback predictions
-        if _is_fallback_row(match):
+        # Never bet on no-data fallback predictions or barely-known teams
+        if _is_fallback_row(match) or _rd_too_high(match, max_rd):
             fallback_skipped += 1
             continue
 
@@ -277,6 +292,8 @@ if __name__ == "__main__":
     parser.add_argument("--min-confidence", type=float, default=0.70)
     parser.add_argument("--min-hist-preds", type=int, default=20, help="Min historical predictions for a league/market pair")
     parser.add_argument("--min-hist-accuracy", type=float, default=0.55, help="Min historical accuracy (0-1)")
+    parser.add_argument("--max-rd", type=float, default=200.0,
+                        help="Skip fixtures where either team's Glicko RD exceeds this (350 = unknown team)")
     args = parser.parse_args()
 
     generate_best_bets(
@@ -284,4 +301,5 @@ if __name__ == "__main__":
         min_confidence=args.min_confidence,
         min_hist_preds=args.min_hist_preds,
         min_hist_accuracy=args.min_hist_accuracy,
+        max_rd=args.max_rd,
     )

@@ -433,23 +433,16 @@ def _importance_prune(
 # Preprocess
 # --------------------------------------------------------------------------------------
 def _feature_columns(df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-    id_cols = {"League","Date","HomeTeam","AwayTeam","Season","Referee","referee",
-               "fixture_id","Home_ID","Away_ID","League_ID"}
-    target_cols = set([c for c in df.columns if c.startswith("y_")])
-    # CRITICAL: Exclude ALL result columns — including half-time scores.
-    # HTHG/HTAG/HTR are outcomes, NOT features. Using them leaks the result.
-    result_cols = {"FTHG", "FTAG", "FTR", "HTHG", "HTAG", "HTR",
-                   "HomeGoals", "AwayGoals", "OU25"}
-    # Also exclude raw match stats that are from the CURRENT match (not rolling).
-    # These are the match's own shots/corners/cards — knowing them = knowing the match.
-    raw_match_stats = {"HS", "AS", "HST", "AST", "HC", "AC",
-                       "HY", "AY", "HR", "AR", "HF", "AF"}
-    # Exclude known-blank columns: bookmaker odds (not in API data) and raw xG/BigChances
-    # (fixture_statistics table is empty until API renewal — all zeros, zero variance).
-    blank_cols = {"B365H","B365D","B365A","PSCH","PSCD","PSCA",
-                  "B365_Impl_H","B365_Impl_D","B365_Impl_A","B365_Overround",
-                  "Home_xG","Away_xG","Home_BigChances","Away_BigChances"}
-    exclude = id_cols | target_cols | result_cols | raw_match_stats | blank_cols
+    # Exclusions live in feature_rules.py (shared with models_goal/models_counts
+    # and features.get_feature_columns so the lists cannot drift apart).
+    # CRITICAL: this includes the post-pivot current-match stats
+    # (Home_Corners, Away_CardsY, Home_Shots, ...) — the match's own stats
+    # under side-prefixed names. Training on them leaks the outcome: the old
+    # list only excluded the pre-pivot names (HC, AY, HS, ...), which is why
+    # cards/corners backtests showed impossible accuracies.
+    from feature_rules import feature_exclusions
+    target_cols = set(c for c in df.columns if c.startswith("y_"))
+    exclude = feature_exclusions() | target_cols
     cand = [c for c in df.columns if c not in exclude]
     cat = [c for c in cand if str(df[c].dtype) in ("object","string","category","bool")]
     num = [c for c in cand if c not in cat]
@@ -839,6 +832,227 @@ def _align_proba_by_classes(proba: np.ndarray, model_classes, K: int) -> np.ndar
     return P / s
 
 
+def _market_vec_from_prices(mp: dict, target: str, max_goals: int = 8):
+    """Map a DC_*-keyed market-price dict to a probability vector for `target`.
+
+    NOTE: column order is a FIXED per-target convention (H/D/A for 1X2,
+    U/O for O/U, N/Y for BTTS, ...), not sorted-category order. That is fine
+    for stacking — the meta-learner only needs the order to be identical
+    between OOF training and inference, which it is — but do NOT interpret
+    these columns as aligned with pandas categorical codes.
+    Shared by every grid-based pseudo-base (dc, gem, dyn) so they price
+    targets identically. Returns None when the target is not derivable."""
+    vec = None
+
+    # Core markets
+    if target == "y_1X2":
+        vec = [mp.get("DC_1X2_H", 0.0), mp.get("DC_1X2_D", 0.0), mp.get("DC_1X2_A", 0.0)]
+
+    elif target == "y_BTTS":
+        vec = [mp.get("DC_BTTS_N", 0.0), mp.get("DC_BTTS_Y", 0.0)]
+
+    elif target == "y_GOAL_RANGE":
+        labs = ["0", "1", "2", "3", "4", "5+"]
+        vec = [mp.get(f"DC_GR_{k}", 0.0) for k in labs]
+
+    elif target == "y_CS":
+        vec = [mp.get(f"DC_CS_{a}_{b}", 0.0) for a in range(6) for b in range(6)] + [mp.get("DC_CS_Other", 0.0)]
+
+    # Over/Under total goals
+    elif target.startswith("y_OU_"):
+        # "y_OU_2_5" -> "2_5" (split("_")[-1] gave "5" — a long-standing bug
+        # that made the DC pseudo-base return zeros for ALL O/U targets)
+        l = target.split("_", 2)[2]
+        vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
+
+    # Asian Handicap
+    elif target.startswith("y_AH_"):
+        l = target.split("_", 2)[2]
+        vec = [mp.get(f"DC_AH_{l}_A", 0.0), mp.get(f"DC_AH_{l}_P", 0.0), mp.get(f"DC_AH_{l}_H", 0.0)]
+
+    # Team Goals Over/Under — prefer the direct grid-derived DC_HomeTG_*
+    # keys; fall back to summing correct-score cells.
+    # NOTE: line parsing was broken here too ("y_HomeTG_1_5" -> 5.0).
+    elif target.startswith("y_HomeTG_"):
+        l = target.replace("y_HomeTG_", "")            # "1_5"
+        if f"DC_HomeTG_{l}_O" in mp:
+            p_over = mp[f"DC_HomeTG_{l}_O"]
+        else:
+            line = float(l.replace("_", "."))
+            p_over = 0.0
+            for h in range(max_goals + 1):
+                if h > line:
+                    for a in range(max_goals + 1):
+                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_over, p_over]  # [Under, Over]
+
+    elif target.startswith("y_AwayTG_"):
+        l = target.replace("y_AwayTG_", "")
+        if f"DC_AwayTG_{l}_O" in mp:
+            p_over = mp[f"DC_AwayTG_{l}_O"]
+        else:
+            line = float(l.replace("_", "."))
+            p_over = 0.0
+            for a in range(max_goals + 1):
+                if a > line:
+                    for h in range(max_goals + 1):
+                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    # Double Chance - derive from 1X2
+    elif target == "y_DC_1X":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_d = mp.get("DC_1X2_D", 0.0)
+        vec = [1.0 - (p_h + p_d), p_h + p_d]  # [No, Yes]
+
+    elif target == "y_DC_X2":
+        p_d = mp.get("DC_1X2_D", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        vec = [1.0 - (p_d + p_a), p_d + p_a]
+
+    elif target == "y_DC_12":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        vec = [1.0 - (p_h + p_a), p_h + p_a]
+
+    # Draw No Bet - derive from 1X2 (excluding draws)
+    elif target == "y_DNB_H":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        total = p_h + p_a
+        if total > 0:
+            vec = [p_a / total, p_h / total]  # [No (Away wins), Yes (Home wins)]
+        else:
+            vec = [0.5, 0.5]
+
+    elif target == "y_DNB_A":
+        p_h = mp.get("DC_1X2_H", 0.0)
+        p_a = mp.get("DC_1X2_A", 0.0)
+        total = p_h + p_a
+        if total > 0:
+            vec = [p_h / total, p_a / total]
+        else:
+            vec = [0.5, 0.5]
+
+    # Exact Total Goals - derive from goal range
+    elif target.startswith("y_ExactTotal_"):
+        n = target.split("_")[-1]
+        if n == "6+":
+            p_exact = mp.get("DC_GR_5+", 0.0)  # 5+ includes 6+
+        else:
+            p_exact = mp.get(f"DC_GR_{n}", 0.0)
+        vec = [1.0 - p_exact, p_exact]
+
+    # Exact Team Goals - derive from score grid
+    elif target.startswith("y_HomeExact_"):
+        n = target.split("_")[-1]
+        p_exact = 0.0
+        if n == "3+":
+            for h in range(3, max_goals + 1):
+                for a in range(max_goals + 1):
+                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        else:
+            h = int(n)
+            for a in range(max_goals + 1):
+                p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_exact, p_exact]
+
+    elif target.startswith("y_AwayExact_"):
+        n = target.split("_")[-1]
+        p_exact = 0.0
+        if n == "3+":
+            for a in range(3, max_goals + 1):
+                for h in range(max_goals + 1):
+                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        else:
+            a = int(n)
+            for h in range(max_goals + 1):
+                p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
+        vec = [1.0 - p_exact, p_exact]
+
+    # To Score markets
+    elif target == "y_HomeToScore":
+        # P(Home scores at least 1) = 1 - P(Home scores 0)
+        p_zero = 0.0
+        for a in range(max_goals + 1):
+            p_zero += mp.get(f"DC_CS_0_{a}", 0.0)
+        vec = [p_zero, 1.0 - p_zero]  # [No, Yes]
+
+    elif target == "y_AwayToScore":
+        p_zero = 0.0
+        for h in range(max_goals + 1):
+            p_zero += mp.get(f"DC_CS_{h}_0", 0.0)
+        vec = [p_zero, 1.0 - p_zero]
+
+    # Clean Sheet / Win to Nil markets
+    elif target == "y_HomeCS":
+        # P(Away scores 0)
+        p_cs = 0.0
+        for h in range(max_goals + 1):
+            p_cs += mp.get(f"DC_CS_{h}_0", 0.0)
+        vec = [1.0 - p_cs, p_cs]
+
+    elif target == "y_AwayCS":
+        p_cs = 0.0
+        for a in range(max_goals + 1):
+            p_cs += mp.get(f"DC_CS_0_{a}", 0.0)
+        vec = [1.0 - p_cs, p_cs]
+
+    elif target == "y_HomeWTN":
+        # P(Home wins AND Away scores 0)
+        p_wtn = 0.0
+        for h in range(1, max_goals + 1):
+            p_wtn += mp.get(f"DC_CS_{h}_0", 0.0)
+        vec = [1.0 - p_wtn, p_wtn]
+
+    elif target == "y_AwayWTN":
+        p_wtn = 0.0
+        for a in range(1, max_goals + 1):
+            p_wtn += mp.get(f"DC_CS_0_{a}", 0.0)
+        vec = [1.0 - p_wtn, p_wtn]
+
+    elif target == "y_NoGoal":
+        p_00 = mp.get("DC_CS_0_0", 0.0)
+        vec = [1.0 - p_00, p_00]
+
+    # Multi-goal markets
+    elif target == "y_Match2+Goals":
+        p_over = mp.get("DC_OU_1_5_O", 0.0)  # 2+ goals = Over 1.5
+        vec = [1.0 - p_over, p_over]
+
+    elif target == "y_Match3+Goals":
+        p_over = mp.get("DC_OU_2_5_O", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    elif target == "y_Match4+Goals":
+        p_over = mp.get("DC_OU_3_5_O", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    elif target == "y_Match5+Goals":
+        p_over = mp.get("DC_OU_4_5_O", 0.0)
+        vec = [1.0 - p_over, p_over]
+
+    return vec
+
+
+def _vecs_to_matrix(out: list, n_rows: int) -> np.ndarray:
+    """Assemble per-row vectors (None allowed) into a normalised matrix."""
+    first = next((v for v in out if v is not None), None)
+    if first is None:
+        return np.zeros((n_rows, 1))
+
+    W = len(first)
+    arr = np.zeros((n_rows, W))
+    for i, v in enumerate(out):
+        if v is not None:
+            arr[i, :] = v
+
+    # Renormalize for safety
+    s = arr.sum(axis=1, keepdims=True)
+    s[s == 0] = 1.0
+    return arr / s
+
+
 # --------------------------------------------------------------------------------------
 # DC probabilities helper (for OOF & inference)
 # --------------------------------------------------------------------------------------
@@ -888,202 +1102,62 @@ def _dc_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: st
         mp = {}
         if lg in params:
             mp = dc_price_match(params[lg], ht, at, max_goals=max_goals)
+        out.append(_market_vec_from_prices(mp, target, max_goals))
 
-        vec = None
+    return _vecs_to_matrix(out, len(rows_df))
 
-        # Core markets
-        if target == "y_1X2":
-            vec = [mp.get("DC_1X2_H", 0.0), mp.get("DC_1X2_D", 0.0), mp.get("DC_1X2_A", 0.0)]
 
-        elif target == "y_BTTS":
-            vec = [mp.get("DC_BTTS_N", 0.0), mp.get("DC_BTTS_Y", 0.0)]
 
-        elif target == "y_GOAL_RANGE":
-            labs = ["0", "1", "2", "3", "4", "5+"]
-            vec = [mp.get(f"DC_GR_{k}", 0.0) for k in labs]
 
-        elif target == "y_CS":
-            vec = [mp.get(f"DC_CS_{a}_{b}", 0.0) for a in range(6) for b in range(6)] + [mp.get("DC_CS_Other", 0.0)]
+# --------------------------------------------------------------------------------------
+# Pseudo-base registry — model families that are not sklearn-style classifiers.
+# Each prices markets from its own fitted structure; the stacking meta-learner
+# decides per market how much weight each deserves. All are fit ONLY on the
+# training rows passed in (walk-forward safe) and cache fits per date-window.
+# Disable any of them with USE_GEM=0 / USE_DYN=0 / USE_NB=0.
+# --------------------------------------------------------------------------------------
 
-        # Over/Under total goals
-        elif target.startswith("y_OU_"):
-            l = target.split("_")[-1]
-            vec = [mp.get(f"DC_OU_{l}_U", 0.0), mp.get(f"DC_OU_{l}_O", 0.0)]
+def _gem_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str,
+                        max_goals: int = 8) -> np.ndarray:
+    """Goal Expectation Model: Poisson-loss GBM lambdas -> DC score grid."""
+    from models_goal import gem_prices_for_rows
+    mps = gem_prices_for_rows(train_df, rows_df, max_goals=max_goals)
+    vecs = [_market_vec_from_prices(mp, target, max_goals) for mp in mps]
+    return _vecs_to_matrix(vecs, len(rows_df))
 
-        # Asian Handicap
-        elif target.startswith("y_AH_"):
-            l = target.split("_", 2)[2]
-            vec = [mp.get(f"DC_AH_{l}_A", 0.0), mp.get(f"DC_AH_{l}_P", 0.0), mp.get(f"DC_AH_{l}_H", 0.0)]
 
-        # Team Goals Over/Under - derive from score grid
-        elif target.startswith("y_HomeTG_"):
-            line = float(target.split("_")[-1].replace("_", "."))
-            # Calculate P(HomeGoals > line) from score grid
-            p_over = 0.0
-            for h in range(max_goals + 1):
-                if h > line:
-                    for a in range(max_goals + 1):
-                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_over, p_over]  # [Under, Over]
+def _dyn_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str,
+                        max_goals: int = 8) -> np.ndarray:
+    """Dynamic state-space team strengths -> DC score grid."""
+    from models_dyn import dyn_prices_for_rows
+    mps = dyn_prices_for_rows(train_df, rows_df, max_goals=max_goals)
+    vecs = [_market_vec_from_prices(mp, target, max_goals) for mp in mps]
+    return _vecs_to_matrix(vecs, len(rows_df))
 
-        elif target.startswith("y_AwayTG_"):
-            line = float(target.split("_")[-1].replace("_", "."))
-            p_over = 0.0
-            for a in range(max_goals + 1):
-                if a > line:
-                    for h in range(max_goals + 1):
-                        p_over += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_over, p_over]
 
-        # Double Chance - derive from 1X2
-        elif target == "y_DC_1X":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_d = mp.get("DC_1X2_D", 0.0)
-            vec = [1.0 - (p_h + p_d), p_h + p_d]  # [No, Yes]
+def _nb_probs_for_rows(train_df: pd.DataFrame, rows_df: pd.DataFrame, target: str,
+                       max_goals: int = 8) -> np.ndarray:
+    """Negative-binomial count models for corners/cards lines."""
+    from models_counts import nb_probs_for_rows
+    return nb_probs_for_rows(train_df, rows_df, target)
 
-        elif target == "y_DC_X2":
-            p_d = mp.get("DC_1X2_D", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            vec = [1.0 - (p_d + p_a), p_d + p_a]
 
-        elif target == "y_DC_12":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            vec = [1.0 - (p_h + p_a), p_h + p_a]
+def _nb_target_supported(t: str) -> bool:
+    from models_counts import nb_supported
+    return nb_supported(t)
 
-        # Draw No Bet - derive from 1X2 (excluding draws)
-        elif target == "y_DNB_H":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            total = p_h + p_a
-            if total > 0:
-                vec = [p_a / total, p_h / total]  # [No (Away wins), Yes (Home wins)]
-            else:
-                vec = [0.5, 0.5]
 
-        elif target == "y_DNB_A":
-            p_h = mp.get("DC_1X2_H", 0.0)
-            p_a = mp.get("DC_1X2_A", 0.0)
-            total = p_h + p_a
-            if total > 0:
-                vec = [p_h / total, p_a / total]
-            else:
-                vec = [0.5, 0.5]
+def _pseudo_enabled(name: str) -> bool:
+    return os.environ.get(f"USE_{name.upper()}", "1") == "1"
 
-        # Exact Total Goals - derive from goal range
-        elif target.startswith("y_ExactTotal_"):
-            n = target.split("_")[-1]
-            if n == "6+":
-                p_exact = mp.get("DC_GR_5+", 0.0)  # 5+ includes 6+
-            else:
-                p_exact = mp.get(f"DC_GR_{n}", 0.0)
-            vec = [1.0 - p_exact, p_exact]
 
-        # Exact Team Goals - derive from score grid
-        elif target.startswith("y_HomeExact_"):
-            n = target.split("_")[-1]
-            p_exact = 0.0
-            if n == "3+":
-                for h in range(3, max_goals + 1):
-                    for a in range(max_goals + 1):
-                        p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            else:
-                h = int(n)
-                for a in range(max_goals + 1):
-                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_exact, p_exact]
-
-        elif target.startswith("y_AwayExact_"):
-            n = target.split("_")[-1]
-            p_exact = 0.0
-            if n == "3+":
-                for a in range(3, max_goals + 1):
-                    for h in range(max_goals + 1):
-                        p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            else:
-                a = int(n)
-                for h in range(max_goals + 1):
-                    p_exact += mp.get(f"DC_CS_{h}_{a}", 0.0)
-            vec = [1.0 - p_exact, p_exact]
-
-        # To Score markets
-        elif target == "y_HomeToScore":
-            # P(Home scores at least 1) = 1 - P(Home scores 0)
-            p_zero = 0.0
-            for a in range(max_goals + 1):
-                p_zero += mp.get(f"DC_CS_0_{a}", 0.0)
-            vec = [p_zero, 1.0 - p_zero]  # [No, Yes]
-
-        elif target == "y_AwayToScore":
-            p_zero = 0.0
-            for h in range(max_goals + 1):
-                p_zero += mp.get(f"DC_CS_{h}_0", 0.0)
-            vec = [p_zero, 1.0 - p_zero]
-
-        # Clean Sheet / Win to Nil markets
-        elif target == "y_HomeCS":
-            # P(Away scores 0)
-            p_cs = 0.0
-            for h in range(max_goals + 1):
-                p_cs += mp.get(f"DC_CS_{h}_0", 0.0)
-            vec = [1.0 - p_cs, p_cs]
-
-        elif target == "y_AwayCS":
-            p_cs = 0.0
-            for a in range(max_goals + 1):
-                p_cs += mp.get(f"DC_CS_0_{a}", 0.0)
-            vec = [1.0 - p_cs, p_cs]
-
-        elif target == "y_HomeWTN":
-            # P(Home wins AND Away scores 0)
-            p_wtn = 0.0
-            for h in range(1, max_goals + 1):
-                p_wtn += mp.get(f"DC_CS_{h}_0", 0.0)
-            vec = [1.0 - p_wtn, p_wtn]
-
-        elif target == "y_AwayWTN":
-            p_wtn = 0.0
-            for a in range(1, max_goals + 1):
-                p_wtn += mp.get(f"DC_CS_0_{a}", 0.0)
-            vec = [1.0 - p_wtn, p_wtn]
-
-        elif target == "y_NoGoal":
-            p_00 = mp.get("DC_CS_0_0", 0.0)
-            vec = [1.0 - p_00, p_00]
-
-        # Multi-goal markets
-        elif target == "y_Match2+Goals":
-            p_over = mp.get("DC_OU_1_5_O", 0.0)  # 2+ goals = Over 1.5
-            vec = [1.0 - p_over, p_over]
-
-        elif target == "y_Match3+Goals":
-            p_over = mp.get("DC_OU_2_5_O", 0.0)
-            vec = [1.0 - p_over, p_over]
-
-        elif target == "y_Match4+Goals":
-            p_over = mp.get("DC_OU_3_5_O", 0.0)
-            vec = [1.0 - p_over, p_over]
-
-        elif target == "y_Match5+Goals":
-            p_over = mp.get("DC_OU_4_5_O", 0.0)
-            vec = [1.0 - p_over, p_over]
-
-        out.append(vec)
-
-    first = next((v for v in out if v is not None), None)
-    if first is None:
-        return np.zeros((len(rows_df), 1))
-
-    W = len(first)
-    arr = np.zeros((len(rows_df), W))
-    for i, v in enumerate(out):
-        if v is not None:
-            arr[i, :] = v
-
-    # Renormalize for safety
-    s = arr.sum(axis=1, keepdims=True)
-    s[s == 0] = 1.0
-    return arr / s
+# name -> (target-supported predicate, probs function)
+_PSEUDO_BASES = {
+    "dc":  (_dc_supported,       _dc_probs_for_rows),
+    "gem": (_dc_supported,       _gem_probs_for_rows),   # same grid-derived target set as DC
+    "dyn": (_dc_supported,       _dyn_probs_for_rows),
+    "nb":  (_nb_target_supported, _nb_probs_for_rows),
+}
 
 
 # --------------------------------------------------------------------------------------
@@ -1260,10 +1334,15 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         elif name != "xgb":  # Skip XGBoost if it failed during tuning
             base_models[name] = _build_base_model(name, n_classes=len(classes), feature_names=feature_names, market_type=market_type_str)
 
-    # Add DC pseudo-base if supported
-    supports_dc = _dc_supported(target_col)
-    if supports_dc:
-        base_models["dc"] = "__DC__"
+    # Add pseudo-bases (DC, GEM goal model, dynamic strengths, NB counts).
+    # Each is a genuinely different model family; the meta-learner weights
+    # them per market. Guarded by USE_<NAME> env flags (default on).
+    for _pname, (_support_fn, _probs_fn) in _PSEUDO_BASES.items():
+        try:
+            if _pseudo_enabled(_pname) and _support_fn(target_col):
+                base_models[_pname] = f"__{_pname.upper()}__"
+        except Exception as _pe:
+            print(f"[WARN]  Pseudo-base {_pname} unavailable: {_pe}")
 
     # Walk-forward OOF with speed-aware fold count.
     # Rows are globally date-sorted (see _load_features), so fold i is strictly
@@ -1293,8 +1372,8 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
         fold_stack = []
         for name, model in base_models.items():
             try:
-                if name == "dc":
-                    proba = _dc_probs_for_rows(sub.iloc[tr], sub.iloc[va], target_col)
+                if name in _PSEUDO_BASES:
+                    proba = _PSEUDO_BASES[name][1](sub.iloc[tr], sub.iloc[va], target_col)
                     if proba.shape[1] != K:
                         P2 = np.zeros((len(Xv), K))
                         P2[:, :min(K, proba.shape[1])] = proba[:, :min(K, proba.shape[1])]
@@ -1402,8 +1481,8 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
     fitted_bases: Dict[str, object] = {}
     for name, model in base_models.items():
         try:
-            if name == "dc":
-                fitted_bases[name] = "__DC__"
+            if name in _PSEUDO_BASES:
+                fitted_bases[name] = f"__{name.upper()}__"
             else:
                 m = model
                 if isinstance(model, (RandomForestClassifier, ExtraTreesClassifier, LogisticRegression)):
@@ -1519,6 +1598,7 @@ def load_trained_targets(models_dir: Path = MODEL_ARTIFACTS_DIR) -> Dict[str, Tr
 def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> Dict[str, np.ndarray]:
     out: Dict[str, np.ndarray] = {}
     skipped = []
+    _hist_cache = None  # lazily loaded, shared by all pseudo-bases/targets
     for t, trg in models.items():
         try:
             # preprocess — may fail if model was trained on different features
@@ -1539,18 +1619,20 @@ def predict_proba(models: Dict[str, TrainedTarget], df_future: pd.DataFrame) -> 
                     # Base model failed during final training fit — keep the
                     # stacked-feature width consistent with uniform probs.
                     proba = np.full((len(df_future), K), 1.0 / K)
-                elif name == "dc":
-                    hist = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
-                    # Only use matches strictly before the fixtures being
-                    # predicted. Harmless for live use (all history is in the
-                    # past) but essential for backtests on historical fixtures —
-                    # otherwise DC parameters are fitted on the very matches
-                    # being "predicted" and on matches after them.
-                    if "Date" in df_future.columns:
-                        _cut = pd.to_datetime(df_future["Date"]).min()
-                        if pd.notna(_cut):
-                            hist = hist[hist["Date"] < _cut]
-                    proba = _dc_probs_for_rows(hist, df_future, t)
+                elif name in _PSEUDO_BASES:
+                    if _hist_cache is None:
+                        _hist_cache = _load_features().dropna(subset=["FTHG","FTAG"]).copy()
+                        # Only use matches strictly before the fixtures being
+                        # predicted. Harmless for live use (all history is in
+                        # the past) but essential for backtests on historical
+                        # fixtures — otherwise the pseudo-bases are fitted on
+                        # the very matches being "predicted" and on matches
+                        # played after them.
+                        if "Date" in df_future.columns:
+                            _cut = pd.to_datetime(df_future["Date"]).min()
+                            if pd.notna(_cut):
+                                _hist_cache = _hist_cache[_hist_cache["Date"] < _cut]
+                    proba = _PSEUDO_BASES[name][1](_hist_cache, df_future, t)
                     if proba.shape[1] != K:
                         P2 = np.zeros((len(df_future), K))
                         P2[:, :min(K, proba.shape[1])] = proba[:, :min(K, proba.shape[1])]
