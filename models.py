@@ -69,7 +69,7 @@ except Exception:
 import joblib
 
 from config import (
-    DATA_DIR, OUTPUT_DIR, MODEL_ARTIFACTS_DIR, FEATURES_PARQUET, RANDOM_SEED, log_header
+    DATA_DIR, OUTPUT_DIR, MODEL_ARTIFACTS_DIR, FEATURES_PARQUET, RANDOM_SEED, log_header, USE_GPU
 )
 from progress_utils import Timer, heartbeat
 from tuning import make_time_split, objective_factory, CVData
@@ -549,6 +549,16 @@ class TrainedTarget:
     feature_names: List[str]
 
 
+def _xgb_gpu_params():
+    return {"device": "cuda"} if USE_GPU else {}
+
+def _lgb_gpu_params():
+    return {"device": "gpu"} if USE_GPU else {}
+
+def _cat_gpu_params():
+    return {"task_type": "GPU", "devices": "0"} if USE_GPU else {}
+
+
 # --------------------------------------------------------------------------------------
 # Build base model zoo
 # --------------------------------------------------------------------------------------
@@ -614,7 +624,8 @@ def _build_base_model(name: str, n_classes: int, feature_names: List[str], marke
             tree_method="hist",
             random_state=RANDOM_SEED,
             objective="multi:softprob" if n_classes > 2 else "binary:logistic",
-            n_jobs=-1
+            n_jobs=-1,
+            **_xgb_gpu_params()
         )
     if name == "lgb" and _HAS_LGB:
         return lgb.LGBMClassifier(
@@ -629,7 +640,8 @@ def _build_base_model(name: str, n_classes: int, feature_names: List[str], marke
             objective="multiclass" if n_classes > 2 else "binary",
             random_state=RANDOM_SEED,
             n_jobs=-1,
-            verbose=-1
+            verbose=-1,
+            **_lgb_gpu_params()
         )
     if name == "cat" and _HAS_CAT:
         return CatBoostClassifier(
@@ -639,7 +651,8 @@ def _build_base_model(name: str, n_classes: int, feature_names: List[str], marke
             l2_leaf_reg=params.get("l2_leaf_reg", 3.0),
             loss_function="MultiClass" if n_classes > 2 else "Logloss",
             verbose=False,
-            random_state=RANDOM_SEED
+            random_state=RANDOM_SEED,
+            **_cat_gpu_params()
         )
     if name == "bnn" and _HAS_TORCH:
         epochs = 10 if n_est < 200 else 25
@@ -764,6 +777,7 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
                     reg_lambda=best_params.get("reg_lambda", 1.0),
                     tree_method="hist", n_jobs=-1, random_state=RANDOM_SEED,
                     objective="multi:softprob" if len(classes_)>2 else "binary:logistic",
+                    **_xgb_gpu_params(),
                 )
                 model = xgb.XGBClassifier(**params)
             except Exception as e:
@@ -778,7 +792,8 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
                 colsample_bytree=best_params.get("colsample_bytree", 0.9),
                 min_child_samples=best_params.get("min_child_samples", 25),
                 objective="multiclass" if len(classes_)>2 else "binary",
-                random_state=RANDOM_SEED, n_jobs=-1
+                random_state=RANDOM_SEED, n_jobs=-1,
+                **_lgb_gpu_params()
             )
             model = lgb.LGBMClassifier(**params)
         elif alg == "cat" and _HAS_CAT:
@@ -788,7 +803,8 @@ def _tune_model(alg: str, X: np.ndarray, y: np.ndarray, classes_: np.ndarray, ta
                 learning_rate=best_params.get("learning_rate", 0.05),
                 l2_leaf_reg=best_params.get("l2_leaf_reg", 3.0),
                 loss_function="MultiClass" if len(classes_)>2 else "Logloss",
-                verbose=False, random_state=RANDOM_SEED
+                verbose=False, random_state=RANDOM_SEED,
+                **_cat_gpu_params()
             )
         elif alg == "lr":
             C = best_params.get("C", 1.0)

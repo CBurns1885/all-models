@@ -11,6 +11,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
 warnings.filterwarnings("ignore")
 
+try:
+    from config import USE_GPU
+except ImportError:
+    USE_GPU = False
+
 # Optional imports
 try:
     import optuna
@@ -130,7 +135,8 @@ def objective_factory(alg: str, cvd: CVData):
                 tree_method="hist", n_jobs=-1, random_state=42,
                 # FIX: Ensure consistent classes
                 enable_categorical=False,
-                use_label_encoder=False
+                use_label_encoder=False,
+                **({"device": "cuda"} if USE_GPU else {})
             )
         elif alg == "lgb" and _HAS_LGB:
             return lgb.LGBMClassifier(
@@ -141,7 +147,8 @@ def objective_factory(alg: str, cvd: CVData):
                 colsample_bytree=trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 min_child_samples=trial.suggest_int("min_child_samples", 10, 50),
                 objective="multiclass" if K>2 else "binary",
-                random_state=42, n_jobs=-1, verbose=-1
+                random_state=42, n_jobs=-1, verbose=-1,
+                **({"device": "gpu"} if USE_GPU else {})
             )
         elif alg == "cat" and _HAS_CAT:
             return CatBoostClassifier(
@@ -149,9 +156,10 @@ def objective_factory(alg: str, cvd: CVData):
                 depth=trial.suggest_int("depth", 4, 8),
                 learning_rate=trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
                 l2_leaf_reg=trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
-                random_state=42, 
+                random_state=42,
                 loss_function="MultiClass" if K>2 else "Logloss",
-                verbose=False
+                verbose=False,
+                **({"task_type": "GPU", "devices": "0"} if USE_GPU else {})
             )
         elif alg == "coral":
             from ordinal import CORALOrdinal

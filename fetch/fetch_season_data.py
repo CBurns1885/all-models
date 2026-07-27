@@ -25,8 +25,11 @@ from api_client import (
     _init_database,
     _get_headers,
     _make_request,
+    _get_league_type,
     RATE_LIMIT_DELAY,
 )
+
+_TIER_RANK = {"elite": 0, "high": 1, "medium": 2}
 
 SEASON = 2025
 
@@ -50,23 +53,41 @@ def fetch_all_fixtures():
 
 
 def fetch_missing_stats():
-    """Fetch match_stats for all FT fixtures that don't have stats yet."""
+    """Fetch match_stats for all FT fixtures that don't have stats yet.
+
+    Fixtures where the API confirms no stats exist (empty response, not a
+    request failure) are recorded in match_stats_unavailable so they aren't
+    re-fetched (and don't burn quota) on every future run.
+    """
     print("\n=== PHASE 2: Fetch match_stats for fixtures without stats ===")
 
     conn = sqlite3.connect(API_FOOTBALL_DB, timeout=60); conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS match_stats_unavailable (
+            fixture_id INTEGER PRIMARY KEY,
+            checked_at TEXT
+        )
+    """)
+    conn.commit()
     rows = conn.execute("""
-        SELECT f.fixture_id, f.date, f.league_code
+        SELECT f.fixture_id, f.date, f.league_code, f.league_id
         FROM fixtures f
         LEFT JOIN match_stats ms ON f.fixture_id = ms.fixture_id
-        WHERE f.status = 'FT' AND ms.fixture_id IS NULL
-        ORDER BY f.date ASC
+        LEFT JOIN match_stats_unavailable msu ON f.fixture_id = msu.fixture_id
+        WHERE f.status = 'FT' AND ms.fixture_id IS NULL AND msu.fixture_id IS NULL
     """).fetchall()
-    conn.close()
+
+    # Prioritize elite/high-tier leagues first, then most recent within each tier —
+    # top-league recent form matters most for the model and is most likely to have
+    # API stats coverage; minor/older fixtures often have none at all.
+    rows.sort(key=lambda r: r[1], reverse=True)  # newest first
+    rows.sort(key=lambda r: _TIER_RANK.get(_get_league_type(r[3]), 2))  # stable: tier wins ties
 
     total_needed = len(rows)
     print(f"  Fixtures needing stats: {total_needed}")
     if total_needed == 0:
-        print("[OK] All fixtures already have match_stats.")
+        conn.close()
+        print("[OK] All fixtures already have match_stats (or confirmed unavailable).")
         return 0
 
     # Estimate: ~0.5s/call
@@ -74,11 +95,19 @@ def fetch_missing_stats():
     print(f"  Estimated time: ~{est_min:.0f} minutes")
 
     success = 0
+    empty = 0
     failed = 0
-    for i, (fixture_id, date, league_code) in enumerate(rows):
-        ok = fetch_fixture_statistics(fixture_id)
-        if ok:
+    for i, (fixture_id, date, league_code, league_id) in enumerate(rows):
+        result = fetch_fixture_statistics(fixture_id)
+        if result > 0:
             success += 1
+        elif result == 0:
+            empty += 1
+            conn.execute(
+                "INSERT OR IGNORE INTO match_stats_unavailable (fixture_id, checked_at) VALUES (?, datetime('now'))",
+                (fixture_id,),
+            )
+            conn.commit()
         else:
             failed += 1
 
@@ -86,9 +115,10 @@ def fetch_missing_stats():
             pct = (i + 1) / total_needed * 100
             remaining = total_needed - (i + 1)
             eta = remaining * (RATE_LIMIT_DELAY + 0.05) / 60
-            print(f"  [{i+1}/{total_needed}] {pct:.1f}% | ok={success} fail={failed} | ETA ~{eta:.0f}m")
+            print(f"  [{i+1}/{total_needed}] {pct:.1f}% | ok={success} empty={empty} fail={failed} | ETA ~{eta:.0f}m")
 
-    print(f"\n[OK] Stats fetch complete: {success} OK, {failed} empty/failed")
+    conn.close()
+    print(f"\n[OK] Stats fetch complete: {success} OK, {empty} confirmed no-data, {failed} request failures")
     return success
 
 

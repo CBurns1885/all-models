@@ -37,6 +37,10 @@ MODELS_DIR = MODEL_ARTIFACTS_DIR  # Alias for compatibility
 API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "")
 API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
 
+# Set USE_GPU=1 in .env on machines with a working CUDA GPU (xgboost/lightgbm/catboost only —
+# scikit-learn RF/ET and LogisticRegression have no GPU path and stay on CPU regardless)
+USE_GPU = os.environ.get("USE_GPU", "0") == "1"
+
 # League ID Mapping (football-data.co.uk code -> API-Football ID)
 API_LEAGUE_MAP = {
     # ENGLAND

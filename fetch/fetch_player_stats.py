@@ -2,8 +2,10 @@
 fetch_player_stats.py — Populate player_fixture_stats from /fixtures/players endpoint.
 
 Fetches one API call per fixture (returns all players for both teams).
-Resumable: skips fixture_ids already in player_fixture_stats.
-Ordered by date DESC so most recent seasons are filled first.
+Resumable: skips fixture_ids already in player_fixture_stats, and fixtures
+confirmed to have no player data available (player_stats_unavailable table).
+Ordered by league tier (elite/high leagues first) then date DESC, so e.g.
+2025 Premier League fills before 2023 Swiss Cup.
 
 Priority filter: only fetches fixtures that also have match_stats
 (i.e. confirmed finished and useful for training).
@@ -30,9 +32,10 @@ except ImportError:
     pass
 
 from config import API_FOOTBALL_DB
-from api_client import _make_request, _get_headers, RATE_LIMIT_DELAY
+from api_client import _make_request, _get_headers, _get_league_type, RATE_LIMIT_DELAY
 
 API_QUOTA_BUFFER = 50  # stop when this many requests remain
+_TIER_RANK = {"elite": 0, "high": 1, "medium": 2}
 
 
 def _check_quota():
@@ -47,10 +50,12 @@ def _check_quota():
 
 
 def _fetch_fixture_players(fixture_id):
-    """Call /fixtures/players?fixture={id}. Returns list of player-stat dicts."""
+    """Call /fixtures/players?fixture={id}. Returns list of player-stat dicts, or
+    None if the request itself failed (transient — distinct from a confirmed-empty
+    response, which returns [])."""
     data = _make_request("fixtures/players", {"fixture": fixture_id})
     if not data or "response" not in data:
-        return []
+        return None
 
     rows = []
     for team_block in data["response"]:
@@ -147,6 +152,13 @@ def main():
 
     conn = sqlite3.connect(API_FOOTBALL_DB, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_stats_unavailable (
+            fixture_id INTEGER PRIMARY KEY,
+            checked_at TEXT
+        )
+    """)
+    conn.commit()
 
     # Find fixtures that have match_stats but no player_fixture_stats
     season_clause = ""
@@ -156,17 +168,25 @@ def main():
         params.append(args.season)
 
     query = f"""
-        SELECT DISTINCT f.fixture_id, f.date, f.league_code, f.season
+        SELECT DISTINCT f.fixture_id, f.date, f.league_code, f.season, f.league_id
         FROM fixtures f
         JOIN match_stats ms ON f.fixture_id = ms.fixture_id
         WHERE f.status = 'FT'
           AND f.fixture_id NOT IN (
               SELECT DISTINCT fixture_id FROM player_fixture_stats
           )
+          AND f.fixture_id NOT IN (
+              SELECT fixture_id FROM player_stats_unavailable
+          )
           {season_clause}
-        ORDER BY f.date DESC
     """
     rows = conn.execute(query, params).fetchall()
+
+    # Prioritize elite/high-tier leagues first, then most recent within each tier —
+    # e.g. 2025 Premier League ahead of 2023 Swiss Cup — since top-league recent
+    # form matters most for the model and is most likely to have API coverage.
+    rows.sort(key=lambda r: r[1], reverse=True)  # newest first
+    rows.sort(key=lambda r: _TIER_RANK.get(_get_league_type(r[4]), 2))  # stable: tier wins ties
 
     total_missing = len(rows)
     if args.limit:
@@ -208,22 +228,30 @@ def main():
 
     fetched = 0
     skipped = 0
+    failed = 0
     total_players = 0
 
-    for i, (fixture_id, date, league, season) in enumerate(rows):
+    for i, (fixture_id, date, league, season, league_id) in enumerate(rows):
         player_rows = _fetch_fixture_players(fixture_id)
 
-        if player_rows:
+        if player_rows is None:
+            failed += 1
+        elif player_rows:
             _insert_rows(conn, player_rows)
             total_players += len(player_rows)
             fetched += 1
         else:
             skipped += 1
+            conn.execute(
+                "INSERT OR IGNORE INTO player_stats_unavailable (fixture_id, checked_at) VALUES (?, datetime('now'))",
+                (fixture_id,),
+            )
+            conn.commit()
 
         if (i + 1) % 100 == 0 or (i + 1) == len(rows):
             pct = round((i + 1) / len(rows) * 100, 1)
             print(f"  [{i+1}/{len(rows)}] {pct}%  fetched={fetched}  players={total_players}  "
-                  f"no_data={skipped}  last={league} {date}")
+                  f"no_data={skipped}  failed={failed}  last={league} {date}")
 
         time.sleep(RATE_LIMIT_DELAY)
 

@@ -27,6 +27,7 @@ torchaudio>=2.0.0
 requests>=2.28.0
 openpyxl>=3.1.0
 beautifulsoup4>=4.11.0
+python-dotenv>=1.0.0
 
 # Visualization (OPTIONAL - for analysis reports)
 matplotlib>=3.5.0

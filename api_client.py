@@ -372,7 +372,7 @@ def fetch_fixtures_for_league(league_code: str, season: int, status: str = 'FT')
     return count
 
 
-def fetch_fixture_statistics(fixture_id: int) -> bool:
+def fetch_fixture_statistics(fixture_id: int) -> int:
     """
     Fetch detailed statistics for a fixture
 
@@ -380,12 +380,14 @@ def fetch_fixture_statistics(fixture_id: int) -> bool:
         fixture_id: API-Football fixture ID
 
     Returns:
-        True if successful
+        Number of team-stat rows written (0 means the API had no stats for
+        this fixture — a confirmed, permanent result, not a transient failure).
+        -1 means the request itself failed (transient — worth retrying later).
     """
     data = _make_request('fixtures/statistics', {'fixture': fixture_id})
 
     if not data or 'response' not in data:
-        return False
+        return -1
 
     stats = data['response']
 
@@ -445,7 +447,7 @@ def fetch_fixture_statistics(fixture_id: int) -> bool:
     conn.commit()
     conn.close()
 
-    return True
+    return len(stats)
 
 
 def download_upcoming_fixtures(leagues: List[str] = None, days_ahead: int = 7) -> pd.DataFrame:
