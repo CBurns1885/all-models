@@ -2,6 +2,39 @@
 
 ---
 
+## ⚡ SESSION STATE (2026-07-27, new PC — RTX 3080 Ti, GPU-accelerated) — READ THIS FIRST
+
+### What happened this session
+1. **New PC setup**: cloned repo, installed git, copied `football_api.db` (from Iver) into `data/`, installed deps (`python-dotenv` was missing from requirements — silently swallowed by a bare `except ImportError`, so `.env` never loaded; fixed).
+2. **Merged `claude/betting-models-review-9hgm6c` into `main` and pushed** — this branch fixed train-on-test leakage (all pre-2026-07-24 backtest numbers, incl. the 97-99% 1X2 and 100% cards/corners figures, were memorisation), live-money Betfair bugs (draw price never read, lay sizing ~3x overbet), the hardcoded API key, plus added 4 new model families (GEM/DYN/NB/Glicko-2) as pseudo-bases in the stacking ensemble.
+3. **GPU acceleration wired in** (`USE_GPU=1` in `.env`, this machine only): xgboost (`device=cuda`), lightgbm (`device=gpu`), catboost (`task_type=GPU`) in both `models.py` base model construction and `tuning.py` Optuna objectives. Full 41-market 5-model retrain: **~30-36 min** (was 261 min CPU-only). RF/ET/LR stay CPU (no GPU path in sklearn).
+4. **DB fixes**: added missing index on `match_stats(fixture_id)` and `player_fixture_stats(fixture_id)` (unindexed join was taking 3+ min, would only get worse). Added `match_stats_unavailable` / `player_stats_unavailable` tracking tables so fetch scripts stop re-checking fixtures the API has confirmed have no data (was wasting quota daily). Both fetch scripts now prioritize elite/high-tier leagues + recent dates first instead of oldest-first.
+5. **Honest baseline established — run twice independently, fully reproducible** (train with `TRAIN_CUTOFF_DATE=2025-06-21` → `learn_blend_weights_temporal('2025-06-21')` → `market_backtest.py --weeks 52 --min-confidence 0.01` → `tools/calibration_report.py`):
+   - **1X2: ~50.1-50.3% accuracy, well-calibrated (+2.4-2.8% overconf)**. Beats naive "always Home" (44.3%) by ~6pp — real but modest, nowhere near the old fake 97-99%.
+   - Goals markets (OU_0.5-4.5, Home/AwayTG, BTTS, HTFT): 30-96% accuracy, all well-calibrated. Trustworthy.
+   - **Cards/corners markets: still badly overconfident (+7% to +18% ECE)** — see "Open issue" below. Nominal accuracy 50-90% but don't trust it or any ROI figure on these markets yet.
+6. **auto_tune.py run on the live models**: best score 61.836 (`outputs/tuning_best_params.json`: style_boost_magnitude=0.1, time_half_life=150, calibration_scalar=0.15, ml_weight_cap=0.75). `threshold_analysis.py --by-league` re-run → `outputs/league_thresholds.json` regenerated on honest data.
+7. **Final live models restored** (no cutoff, all data through 2026-06-20) — this is what's currently deployed in `models/`. Blend weights are the non-temporal (all-data) version, correct for live use.
+8. **Player-stats API collection paused** at user request (mid-session, quota also ran out for the day regardless). State: `match_stats` 58,206 rows (85% FT coverage, cups/continental structurally capped — API just doesn't have that data), `match_stats_unavailable` 3,393 confirmed-empty, `player_fixture_stats` 2,642/34,725 fixtures (8%). **Resume manually** — user declined both cloud scheduling (can't reach local DB — cloud agents have no access to local files) and Windows Task Scheduler automation; just run `py fetch/fetch_season_data.py` then `py fetch/fetch_player_stats.py` when prompted.
+
+### ⚠️ Open issue — cards/corners calibration (in progress, not yet fixed)
+`predict.py:pair_cols_for_target()` (~line 1249) hardcodes `dc_cols = ml_cols` for all cards/corners targets ("Cards markets (ML only, no DC equivalent)" / "Corners markets (ML only)") — i.e. blend alpha is moot, these markets never get a DC/GEM/DYN/NB-blended, temperature-scaled probability, just the raw `P_*` ML output. That's why `calibration_report.py` shows them as `Src=P` (not `BLEND`) and badly overconfident, even after the leakage fix. The new `models_counts.py` (NB) pseudo-base exists and is registered in `_PSEUDO_BASES` in `models.py` (used during OOF stacking training), but `pair_cols_for_target` in predict.py was never updated to route these markets' *final prediction output* through NB instead of raw ML. **Next step**: wire `DC_*`/`NB_*` cols for cards/corners in `pair_cols_for_target` so they go through the same blend+calibration path as everything else, then re-run the honest backtest to confirm ECE drops.
+
+### Handy re-run commands (no API calls, all local)
+```bash
+# Honest backtest cycle (leak-free validation)
+$env:TRAIN_CUTOFF_DATE='2025-06-21'; py -c "from incremental_trainer import smart_train_or_load; import os; os.environ['FORCE_RETRAIN']='1'; smart_train_or_load()"
+py -c "from blending import learn_blend_weights_temporal; learn_blend_weights_temporal('2025-06-21')"
+py market_backtest.py --weeks 52 --min-confidence 0.01 --by-league
+py tools/calibration_report.py
+
+# Restore live production models afterward (IMPORTANT — don't leave cutoff-blinded models deployed)
+Remove-Item Env:\TRAIN_CUTOFF_DATE; $env:FORCE_RETRAIN='1'
+py -c "from incremental_trainer import smart_train_or_load; smart_train_or_load()"
+```
+
+---
+
 ## 🚨 SESSION STATE — FULL AUDIT + FIXES (2026-07-24, branch claude/betting-models-review-9hgm6c)
 
 ### ⚠️ ALL PREVIOUS BACKTEST NUMBERS ARE INVALID — read before betting anything
