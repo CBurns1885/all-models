@@ -2,6 +2,25 @@
 
 ---
 
+## ⚡ SESSION STATE (2026-07-28) — READ THIS FIRST
+
+### What happened this session
+1. **Data collection resumed**: `match_stats` backfill is now functionally complete (0 new stats found in the last 1,861 fixtures checked — that's the real ceiling, all recorded in `match_stats_unavailable`). `player_fixture_stats`: +5,548 fixtures fetched today at **100% success rate** (elite-tier + recent-date prioritization from yesterday's fix is working as intended) — 234,226 player rows added, 21,281 fixtures still remaining (~4 more days at current quota/success rate).
+2. **Fixed a real bug in `blending.py`**: `learn_blend_weights()` / `learn_blend_weights_temporal()` silently `continue`d past every non-DC-supported target (all cards/corners/HTFT/BookingPts markets) *before* ever adding them to the `weights` dict. Result: `blend_weights.json` never had entries for these markets, so `predict.py`'s blend loop never reached them and `calibration_report.py` silently fell back to raw, uncalibrated `P_*` columns for them. Fixed to record `alpha=1.0` (ML-only) so the `BLEND_*` passthrough actually runs.
+3. **Built full NB (negative-binomial) blending infrastructure** to try to fix cards/corners overconfidence (+7% to +18% ECE): new `nb_predict.py` (prices corners/cards fixtures with the NB count model at prediction time, mirroring `dc_predict.py`), wired into `predict.py`'s `pair_cols_for_target()` and `blending.py`'s alpha-learning (`_opt_alpha` against real NB probabilities instead of hardcoded 1.0).
+4. **Honest result: NB blending is NOT the fix.** Alpha converges to 1.0 (pure ML) for all 25 NB-eligible targets — verified directly (e.g. `y_TotalYC_O1_5`: ML-only logloss 0.239 vs NB-only logloss 0.304). The ML ensemble already outperforms standalone NB because NB is already one of the stacking pseudo-bases (`_PSEUDO_BASES` in `models.py`) baked into training. **This rules out "missing blend signal" as the cause — the miscalibration is inside the ML ensemble/calibrator itself** (the per-target Beta/Dirichlet calibrator fit in `models.py`, or the amount of calibration-holdout data for these noisy targets). The NB infrastructure is still committed/kept — it's a correct, harmless comparison that would kick in automatically if the ensemble ever regressed relative to NB — but the actual overconfidence fix needs a different investigation (see below).
+5. Full honest-cutoff validation cycle run twice more this session to test the above (train w/ `TRAIN_CUTOFF_DATE=2025-06-21` → temporal blend weights → backtest → calibration report), then live production models restored each time. Same commands as documented in the 2026-07-27 section below.
+6. All changes committed and pushed to `main` (`d7be326`).
+
+### ⚠️ Next investigation: cards/corners calibration (still open)
+Confirmed NOT caused by missing blend signal (see above). Next things to check, in rough priority order:
+1. **Calibration holdout size** — `models.py`'s `[CAL] Holdout calibration on last fold: N samples` — check if N is meaningfully smaller for cards/corners targets than for the well-calibrated markets (fewer usable rows due to `match_stats` gaps → weaker calibrator fit).
+2. **Calibration method choice** — logs show `Using BETA calibration` for most cards/corners targets vs `DIRICHLET` for others; worth checking if Beta calibration is systematically under-correcting for these specific label distributions.
+3. **`temperature_binary`** (`auto_tune.py`/`TUNING_OVERRIDES`) — CLAUDE.md's older history flags this as "scar tissue" from a pre-leak-fix overconfidence bug; verify it's still doing useful work post-fix rather than fighting the (now-correct) calibrator.
+4. Consider whether these targets just have irreducible noise (card/corner counts are noisier than goals) and the honest ceiling is simply lower — in which case the fix is tighter confidence thresholds for these markets in `league_thresholds.json`, not better calibration per se.
+
+---
+
 ## ⚡ SESSION STATE (2026-07-27, new PC — RTX 3080 Ti, GPU-accelerated) — READ THIS FIRST
 
 ### What happened this session
