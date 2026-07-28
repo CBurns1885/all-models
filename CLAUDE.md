@@ -2,6 +2,17 @@
 
 ---
 
+## ⚠️ Betfair — NOT going live yet (user directive, 2026-07-28)
+Betfair execution (`betfair/betfair_ltd.py`, `betfair/betfair_placer.py`) stays **off** until the user has
+enough capital set aside to fund it — this is a deliberate business decision, not a technical blocker.
+Do not wire it up, dry-run it as a precursor to going live, or suggest going live with it until the user
+explicitly raises it again. Current focus is picks-only: maximise honest accuracy at high confidence
+thresholds, with **BTTS and 1X2 called out as priority markets** (the user's rationale: these traditionally
+carry higher odds than the more heavily-bet goals/corners markets, so a smaller number of high-confidence,
+well-calibrated picks there matters more than volume).
+
+---
+
 ## ⚡ TOMORROW'S PLAN (set 2026-07-28 end of session)
 
 1. **Resume data collection** (manual — user declined automation): `py fetch/fetch_season_data.py` then `py fetch/fetch_player_stats.py`. ~21,281 player-stat fixtures still remaining.
