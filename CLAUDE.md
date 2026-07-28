@@ -2,6 +2,24 @@
 
 ---
 
+## ⚡ SESSION STATE (2026-07-28, continued) — cards/corners root-caused and gated
+
+### The finding
+Cards/corners overconfidence is a **season cold-start problem**, not a blend/calibrator bug:
+- Honest 52-week backtest, bucketed by `min(Home_SeasonGames, Away_SeasonGames)`: accuracy is ~43-50% when either team has played 0-3 games this season (vs ~90% stated confidence), climbing to ~85-91% accuracy by 4+ games.
+- 1X2/OU/BTTS show **no such pattern** — stable ±3% overconfidence all year. They lean on Elo/table position (persists through the close season); cards/corners lean on rolling-form discipline features (resets each season).
+
+### Two "fixes" were tried and rejected — document this so it isn't re-attempted blindly
+1. **Per-games-bucket BetaCalibrator** (6 independent fits on ~330-800 row samples each): fixed the worst bucket, broke several already-fine buckets via overfitting on small samples.
+2. **Single regularized logistic regression** on `(logit(confidence), games_played)`: the miscalibration direction is *inconsistent* across markets — some are overconfident in the cold-start zone, some are already underconfident (e.g. `TotalCorners_O10_5`+ at games<4: -21% to -30%, already too low). A single learned slope can't have the right sign for both groups at once; it systematically over-corrected the majority-share 4+ games region while fixing the minority-share 0-3 games region.
+
+### The fix that shipped
+`tools/best_bets.py`: `_season_too_thin()` — exclude cards/corners bets when either team has played **< 4 games this season** (`--min-games`, default 4). Applied per-market, not per-fixture, so 1X2/OU/etc. on the same fixture are unaffected. This can't make calibration worse for any market — it only removes bets, never adjusts a probability in a direction that might be wrong. `predict.py` now carries `Home_SeasonGames`/`Away_SeasonGames` through to `weekly_bets_full.csv` (same pattern as the existing Glicko RD carry-through) so the gate has data to work with.
+
+**Not yet done**: `market_backtest.py`/`calibration_report.py` don't know about this gate, so their aggregate cards/corners numbers will still show the old inflated overconfidence — the gate only affects `tools/best_bets.py`'s actual betting output. If re-measuring calibration honestly post-gate matters, the backtest scripts would need the same `min_games` filter applied before scoring.
+
+---
+
 ## ⚡ SESSION STATE (2026-07-28) — READ THIS FIRST
 
 ### What happened this session
