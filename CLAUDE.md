@@ -2,6 +2,14 @@
 
 ---
 
+## ⚡ TOMORROW'S PLAN (set 2026-07-28 end of session)
+
+1. **Resume data collection** (manual — user declined automation): `py fetch/fetch_season_data.py` then `py fetch/fetch_player_stats.py`. ~21,281 player-stat fixtures still remaining.
+2. **Generate real picks — NOT a live bet, just predictions**: no upcoming-fixture data exists locally (DB only has historical results; the 258 `NS` rows are all stale/past). Need to fetch this week's fixture list via API (~40 calls, small — separate from the bulk historical backfill) then run `predict.py:predict_week()` → `tools/best_bets.py` (now with the `--min-games 4` season cold-start gate). User explicitly said picks-only for now — **do not** touch the Betfair placer or place any bets without a fresh, explicit go-ahead.
+3. Quota was at 7,450/7,500 by end of 2026-07-28 session — check fresh quota before doing anything.
+
+---
+
 ## ⚡ SESSION STATE (2026-07-28, continued) — cards/corners root-caused and gated
 
 ### The finding
