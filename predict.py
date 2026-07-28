@@ -1997,6 +1997,12 @@ def predict_week(fixtures_csv: Path) -> Path:
     for _rd_col in ("Home_GlickoRD", "Away_GlickoRD"):
         if _rd_col in df_future.columns:
             df_out[_rd_col] = df_future[_rd_col].values[:len(df_out)]
+
+    # Games played this season (season cold-start gate for cards/corners — see
+    # tools/best_bets.py's _season_too_thin)
+    for _sg_col in ("Home_SeasonGames", "Away_SeasonGames"):
+        if _sg_col in df_future.columns:
+            df_out[_sg_col] = df_future[_sg_col].values[:len(df_out)]
     
     # Add DC predictions
     log_header("GENERATE DC PREDICTIONS")

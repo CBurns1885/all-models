@@ -88,6 +88,46 @@ def _outcome_label(col: str) -> str:
     return suffix
 
 
+# Cards/corners markets suffer a season cold-start problem: rolling-form
+# discipline features reset each season, and the model stays confidently
+# wrong for each team's first ~4 matches of a new season (honest 52-week
+# backtest: e.g. TotalYC_O1_5 accuracy 43% at 91% stated confidence for
+# min(Home_SeasonGames, Away_SeasonGames) < 4, vs 85% accuracy at 92%
+# confidence once both teams have played 4+ games — see CLAUDE.md
+# 2026-07-28 session notes). Attempted probability corrections (bucketed
+# recalibration, linear log-odds regression) were tested and found unsafe —
+# the miscalibration direction is inconsistent across markets (some
+# overconfident, some underconfident) so a blind correction makes roughly
+# half of them worse. Excluding the bet entirely is the only fix validated
+# not to backfire.
+_SEASON_COLD_START_MARKETS = {
+    m for m in [
+        "TotalYC_O1_5", "TotalYC_O2_5", "TotalYC_O3_5", "TotalYC_O4_5", "TotalYC_O5_5", "TotalYC_O6_5",
+        "BookingPts_O20_5", "BookingPts_O30_5", "BookingPts_O40_5",
+        "HomeTeam_Card", "AwayTeam_Card",
+        "TotalCorners_O6_5", "TotalCorners_O7_5", "TotalCorners_O8_5", "TotalCorners_O9_5",
+        "TotalCorners_O10_5", "TotalCorners_O11_5", "TotalCorners_O12_5",
+        "HomeCorners_O4_5", "HomeCorners_O5_5", "AwayCorners_O4_5", "AwayCorners_O5_5",
+        "HomeCorners_Win",
+    ]
+}
+
+
+def _season_too_thin(match, market: str, min_games: float) -> bool:
+    """True when this is a cold-start cards/corners market and either team
+    hasn't played enough games yet this season for its rolling-form
+    discipline features to be reliable."""
+    if market not in _SEASON_COLD_START_MARKETS:
+        return False
+    worst = None
+    for col in ("Home_SeasonGames", "Away_SeasonGames"):
+        if col in match.index:
+            v = match[col]
+            if v == v:
+                worst = float(v) if worst is None else min(worst, float(v))
+    return worst is not None and worst < min_games
+
+
 def _rd_too_high(match, max_rd: float) -> bool:
     """True when either team's Glicko rating deviation says 'we barely know
     this team' — the principled unknown-team gate (RD 350 = brand new)."""
@@ -108,6 +148,7 @@ def generate_best_bets(
     min_hist_preds: int = 20,
     min_hist_accuracy: float = 0.55,
     max_rd: float = 200.0,
+    min_games: float = 4.0,
 ):
     # --- Load league breakdown ---
     breakdown_path = OUTPUTS / "league_breakdown.csv"
@@ -136,6 +177,7 @@ def generate_best_bets(
     # --- Build bet rows ---
     rows = []
     fallback_skipped = 0
+    season_thin_skipped = 0
     for _, match in preds.iterrows():
         league = str(match.get("League", ""))
         date   = str(match.get("Date", ""))[:10]
@@ -149,6 +191,10 @@ def generate_best_bets(
             continue
 
         for market, cols in MARKET_COLS.items():
+            if _season_too_thin(match, market, min_games):
+                season_thin_skipped += 1
+                continue
+
             # Filter to columns that exist
             avail = [c for c in cols if c in match.index]
             if not avail:
@@ -196,6 +242,9 @@ def generate_best_bets(
 
     if fallback_skipped:
         print(f"[GUARD] Skipped {fallback_skipped} fixture(s) with no-data fallback predictions")
+    if season_thin_skipped:
+        print(f"[GUARD] Skipped {season_thin_skipped} cards/corners bet(s) — a team has played "
+              f"< {min_games:.0f} games this season (cold-start miscalibration)")
 
     if not rows:
         print("[WARN] No qualifying bets found — try lowering min_confidence or min_hist_accuracy")
@@ -294,6 +343,9 @@ if __name__ == "__main__":
     parser.add_argument("--min-hist-accuracy", type=float, default=0.55, help="Min historical accuracy (0-1)")
     parser.add_argument("--max-rd", type=float, default=200.0,
                         help="Skip fixtures where either team's Glicko RD exceeds this (350 = unknown team)")
+    parser.add_argument("--min-games", type=float, default=4.0,
+                        help="Skip cards/corners bets where either team has played fewer than this "
+                             "many games this season (season cold-start guard)")
     args = parser.parse_args()
 
     generate_best_bets(
@@ -302,4 +354,5 @@ if __name__ == "__main__":
         min_hist_preds=args.min_hist_preds,
         min_hist_accuracy=args.min_hist_accuracy,
         max_rd=args.max_rd,
+        min_games=args.min_games,
     )
