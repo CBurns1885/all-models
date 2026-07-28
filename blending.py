@@ -9,6 +9,7 @@ from pathlib import Path
 
 from models_dc import fit_all as dc_fit_all, price_match as dc_price_match
 from models import load_trained_targets, predict_proba as ml_predict
+from models_counts import nb_probs_for_rows, nb_supported
 
 def _load_features():
     from config import FEATURES_PARQUET
@@ -169,8 +170,29 @@ def learn_blend_weights() -> Dict[str, float]:
         p_ml = _align_probs_to_labels(p_ml_full, ml_labels, desired_labels)
         y_int = sub_cat.cat.codes.values
 
+        # NB probs (corners/cards count families) — genuine second signal,
+        # tried before falling back to the ML-only passthrough.
+        if nb_supported(target):
+            try:
+                p_nb_raw = nb_probs_for_rows(df_train, sub, target)  # (n,2) = [N,Y]
+                p_nb = _align_probs_to_labels(p_nb_raw, ["N", "Y"], desired_labels)
+                nb_valid = p_nb.sum(axis=1) > 0
+                if nb_valid.sum() >= 50:
+                    weights[target] = _opt_alpha(y_int[nb_valid], p_ml[nb_valid], p_nb[nb_valid])
+                    continue
+            except Exception as e:
+                print(f"  [WARN] NB pricing failed for {target}: {e}")
+            weights[target] = 1.0
+            continue
+
         # DC probs (skip if target not supported)
         if not _dc_supported(target):
+            # ML-only market (HTFT/BookingPts): no DC or NB signal to blend
+            # against, but still record alpha=1.0 so predict.py's blend loop
+            # reaches this target and writes the BLEND_* passthrough —
+            # otherwise it's silently never blended and calibration_report
+            # falls back to raw, uncalibrated P_* columns for these markets.
+            weights[target] = 1.0
             continue
 
         # Build DC probs per row for this target using cached prices
@@ -323,8 +345,26 @@ def learn_blend_weights_temporal(val_end_date: str) -> Dict[str, float]:
         p_ml = _align_probs_to_labels(p_ml_full, ml_labels, desired_labels)
         y_int = sub[target].astype("category").cat.codes.values
 
+        # -- NB probs (corners/cards count families) ---
+        if nb_supported(target):
+            try:
+                p_nb_raw = nb_probs_for_rows(train_part, sub, target)  # (n,2) = [N,Y]
+                p_nb = _align_probs_to_labels(p_nb_raw, ["N", "Y"], desired_labels)
+                nb_valid = p_nb.sum(axis=1) > 0
+                if nb_valid.sum() >= 50:
+                    weights[target] = _opt_alpha(y_int[nb_valid], p_ml[nb_valid], p_nb[nb_valid])
+                    continue
+            except Exception as e:
+                print(f"  [WARN] NB pricing failed for {target}: {e}")
+            weights[target] = 1.0
+            continue
+
         # -- DC probs (skip unsupported targets) ---
         if not _dc_supported(target):
+            # ML-only market: no DC or NB signal, but still record alpha=1.0
+            # so predict.py's blend loop writes the BLEND_* passthrough (see
+            # matching comment in learn_blend_weights()).
+            weights[target] = 1.0
             continue
 
         dc_rows = []

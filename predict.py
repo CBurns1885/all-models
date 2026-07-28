@@ -23,6 +23,8 @@ from datetime import datetime, timedelta
 from config import FEATURES_PARQUET, OUTPUT_DIR, MODEL_ARTIFACTS_DIR, ALL_CUPS, EUROPEAN_CUPS, log_header
 from models import load_trained_targets, predict_proba as model_predict
 from dc_predict import build_dc_for_fixtures
+from nb_predict import build_nb_for_frame
+from models_counts import nb_supported
 from progress_utils import heartbeat
 from blending import BLEND_WEIGHTS_JSON
 
@@ -1246,32 +1248,36 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             line_part = t.replace("y_AwayTG_", "")
             ml_cols = [f"P_AwayTG_{line_part}_U", f"P_AwayTG_{line_part}_O"]
             dc_cols = [f"DC_AwayTG_{line_part}_U", f"DC_AwayTG_{line_part}_O"]
-        # Cards markets (ML only, no DC equivalent)
+        # Cards/corners markets: blend against the NB (negative-binomial count
+        # model) prediction when available — a genuine second signal, unlike
+        # DC which has no notion of cards/corners. Falls back to ML-only
+        # (dc_cols == ml_cols) if NB predictions weren't generated for some
+        # reason (e.g. insufficient training data for that count family).
         elif t.startswith("y_TotalYC_"):
             sfx = t.replace("y_TotalYC_", "")
             ml_cols = [f"P_TotalYC_{sfx}_Y", f"P_TotalYC_{sfx}_N"]
-            dc_cols = ml_cols  # no DC, blend uses ML only (alpha=1.0)
+            nb_cols = [f"NB_TotalYC_{sfx}_Y", f"NB_TotalYC_{sfx}_N"]
+            dc_cols = nb_cols
         elif t.startswith("y_BookingPts_"):
             sfx = t.replace("y_BookingPts_", "")
             ml_cols = [f"P_BookingPts_{sfx}_Y", f"P_BookingPts_{sfx}_N"]
-            dc_cols = ml_cols
+            dc_cols = ml_cols  # no NB support (booking points, not a raw count family)
         elif t in ("y_HomeTeam_Card", "y_AwayTeam_Card"):
             name = t.replace("y_", "")
             ml_cols = [f"P_{name}_Y", f"P_{name}_N"]
-            dc_cols = ml_cols
-        # Corners markets (ML only)
+            dc_cols = [f"NB_{name}_Y", f"NB_{name}_N"]
         elif t.startswith("y_TotalCorners_"):
             sfx = t.replace("y_TotalCorners_", "")
             ml_cols = [f"P_TotalCorners_{sfx}_Y", f"P_TotalCorners_{sfx}_N"]
-            dc_cols = ml_cols
+            dc_cols = [f"NB_TotalCorners_{sfx}_Y", f"NB_TotalCorners_{sfx}_N"]
         elif t.startswith("y_HomeCorners_"):
             sfx = t.replace("y_HomeCorners_", "")
             ml_cols = [f"P_HomeCorners_{sfx}_Y", f"P_HomeCorners_{sfx}_N"]
-            dc_cols = ml_cols
+            dc_cols = [f"NB_HomeCorners_{sfx}_Y", f"NB_HomeCorners_{sfx}_N"]
         elif t.startswith("y_AwayCorners_"):
             sfx = t.replace("y_AwayCorners_", "")
             ml_cols = [f"P_AwayCorners_{sfx}_Y", f"P_AwayCorners_{sfx}_N"]
-            dc_cols = ml_cols
+            dc_cols = [f"NB_AwayCorners_{sfx}_Y", f"NB_AwayCorners_{sfx}_N"]
         elif t == "y_HTFT":
             ml_cols = [f"P_HTFT_{a}_{b}" for a in ["H","D","A"] for b in ["H","D","A"]]
             dc_cols = ml_cols  # no DC model for HTFT
@@ -1307,8 +1313,13 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             missing_ml = [c for c in ml_cols if c not in out.columns]
             missing_dc = [c for c in dc_cols if c not in out.columns]
 
-            if missing_ml or missing_dc:
+            if missing_ml:
                 continue
+            if missing_dc:
+                # Second signal (DC/NB) unavailable for this target — fall back
+                # to the ML-only passthrough rather than dropping the market
+                # from BLEND_* entirely.
+                dc_cols = ml_cols
 
             # ML-only markets (cards/corners/HTFT) have dc_cols == ml_cols:
             # there is nothing to blend, and applying dc_temperature to the ML
@@ -2007,7 +2018,20 @@ def predict_week(fixtures_csv: Path) -> Path:
         print(f"[OK] Merged {len(dc_cols)} DC predictions")
     except Exception as e:
         print(f"[WARN] DC predictions failed: {e}")
-    
+
+    # Add NB (negative-binomial count model) predictions for corners/cards —
+    # the genuine second signal for these markets, replacing the old alpha=1.0
+    # ML-only passthrough.
+    log_header("GENERATE NB PREDICTIONS")
+    try:
+        nb_targets = [t for t in models.keys() if nb_supported(t)]
+        nb_df = build_nb_for_frame(df_future, nb_targets)
+        for col in nb_df.columns:
+            df_out[col] = nb_df[col].values[:len(df_out)]
+        print(f"[OK] Merged {len(nb_df.columns)} NB predictions")
+    except Exception as e:
+        print(f"[WARN] NB predictions failed: {e}")
+
     # Apply enhanced blending
     log_header("APPLY DYNAMIC BLENDING")
     df_out = _apply_blend(df_out)
