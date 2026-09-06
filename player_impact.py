@@ -82,6 +82,54 @@ def load_player_match_stats(db_path=None) -> pd.DataFrame:
     return df.dropna(subset=["Date"])
 
 
+def resolve_team_ids(db_path=None) -> Dict[str, int]:
+    """team name -> team_id, from the fixtures table.
+
+    Fixture files that come from a manual download or the CSV fallback have
+    no team ids, so availability would otherwise be unresolvable for them.
+    Uses the most recent appearance of each name.
+    """
+    import sqlite3
+    from config import API_FOOTBALL_DB
+    try:
+        conn = sqlite3.connect(db_path or API_FOOTBALL_DB)
+        df = pd.read_sql_query("""
+            SELECT home_team AS name, home_team_id AS team_id, date FROM fixtures
+            WHERE home_team_id IS NOT NULL
+            UNION ALL
+            SELECT away_team AS name, away_team_id AS team_id, date FROM fixtures
+            WHERE away_team_id IS NOT NULL
+        """, conn)
+        conn.close()
+    except Exception:
+        return {}
+    if df.empty:
+        return {}
+    df = df.sort_values("date").drop_duplicates(subset=["name"], keep="last")
+    return {_norm_name(n): int(t) for n, t in zip(df["name"], df["team_id"])}
+
+
+# API-Football reports availability as a `player.type`. "Missing Fixture" is a
+# confirmed absence; "Questionable"/"Doubtful" players often start. Treating
+# both as definitely-out overstates the adjustment, so doubts are half-weighted.
+_AVAILABILITY_WEIGHT = {
+    "missing fixture": 1.0,
+    "out": 1.0,
+    "suspended": 1.0,
+    "questionable": 0.5,
+    "doubtful": 0.5,
+}
+DEFAULT_AVAILABILITY_WEIGHT = 1.0
+
+
+def injury_weight(player_type) -> float:
+    """How certain is this absence? 1.0 = definitely out, 0.5 = doubtful."""
+    if not player_type:
+        return DEFAULT_AVAILABILITY_WEIGHT
+    return _AVAILABILITY_WEIGHT.get(str(player_type).strip().lower(),
+                                    DEFAULT_AVAILABILITY_WEIGHT)
+
+
 def team_attack_shares(
     stats: pd.DataFrame,
     team_id: int,
@@ -218,39 +266,76 @@ def availability_report(
     before_date,
     out_player_ids: Optional[Iterable] = None,
     out_player_names: Optional[Iterable] = None,
+    out_records: Optional[List[dict]] = None,
     window_matches: int = DEFAULT_WINDOW_MATCHES,
+    key_threshold: float = 0.20,
 ) -> dict:
     """Everything the pipeline needs about one team's attacking availability.
 
-    missing_share  : 0-1 fraction of recent goal involvement unavailable
-    top_out        : the unavailable players that carry that share
+    `out_records` is the natural shape from the injuries feed —
+    [{player_id, player_name, player_type}, ...] — and lets doubtful players
+    be half-weighted. `out_player_ids`/`out_player_names` remain for callers
+    that only have the flat lists.
+
+    missing_share  : 0-1 fraction of recent goal involvement unavailable,
+                     weighted by how certain each absence is
+    top_out        : the unavailable players carrying that share
     top_scorers    : the team's leading contributors (available or not)
-    key_player_out : True when a single absentee carries >=20% of output
+    key_player_out : True when one absentee carries >= key_threshold of output
     """
     shares = team_attack_shares(stats, team_id, before_date, window_matches)
     if shares.empty:
         return {"missing_share": 0.0, "top_out": [], "top_scorers": [],
                 "key_player_out": False, "has_data": False}
 
-    by_id = missing_attack_share(shares, out_player_ids=out_player_ids)
-    by_name = match_missing_by_name(shares, out_player_names or [])
-    missing = max(by_id, by_name)
-
-    out_mask = pd.Series(False, index=shares.index)
+    # Normalise every input shape into records carrying an availability weight
+    records: List[dict] = list(out_records or [])
     if out_player_ids:
-        ids = {int(i) for i in out_player_ids if pd.notna(i)}
-        out_mask |= shares["player_id"].isin(ids)
+        known = {r.get("player_id") for r in records}
+        records += [{"player_id": i} for i in out_player_ids
+                    if pd.notna(i) and i not in known]
     if out_player_names:
-        full = {_norm_name(n) for n in out_player_names if n}
-        surs = {surname_key(n) for n in out_player_names if surname_key(n)}
-        out_mask |= (shares["player_name"].map(_norm_name).isin(full)
-                     | shares["player_name"].map(surname_key).isin(surs))
+        known_n = {_norm_name(r.get("player_name", "")) for r in records}
+        records += [{"player_name": n} for n in out_player_names
+                    if n and _norm_name(n) not in known_n]
 
-    out_rows = shares[out_mask].sort_values("share", ascending=False)
+    if not records:
+        return {"missing_share": 0.0, "top_out": [],
+                "top_scorers": top_scorers(shares, 3),
+                "key_player_out": False, "has_data": True}
+
+    norm = shares["player_name"].map(_norm_name)
+    sur = shares["player_name"].map(surname_key)
+
+    # weight per squad row = strongest weight among the absences matching it
+    weights = pd.Series(0.0, index=shares.index)
+    for rec in records:
+        w = injury_weight(rec.get("player_type"))
+        m = pd.Series(False, index=shares.index)
+        pid = rec.get("player_id")
+        if pid is not None and pd.notna(pid):
+            try:
+                m |= shares["player_id"] == int(pid)
+            except (TypeError, ValueError):
+                pass
+        nm = rec.get("player_name")
+        if nm:
+            m |= norm == _norm_name(nm)
+            sk = surname_key(nm)
+            if sk:
+                m |= sur == sk
+        weights = weights.where(~m, weights.combine(pd.Series(w, index=shares.index), max))
+
+    effective = shares["share"] * weights
+    missing = float(effective.sum())
+
+    out_rows = (shares.assign(share=effective)[weights > 0]
+                .sort_values("share", ascending=False))
     return {
         "missing_share": round(float(min(missing, 1.0)), 4),
         "top_out": top_scorers(out_rows, 3),
         "top_scorers": top_scorers(shares, 3),
-        "key_player_out": bool((out_rows["share"] >= 0.20).any()) if not out_rows.empty else False,
+        "key_player_out": bool((out_rows["share"] >= key_threshold).any())
+                          if not out_rows.empty else False,
         "has_data": True,
     }

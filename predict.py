@@ -2091,47 +2091,78 @@ def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
     and Home/Away_KeyOutNames (display string). Degrades to no-op when player
     stats or team ids are unavailable.
     """
-    from player_impact import load_player_match_stats, availability_report
+    from player_impact import (load_player_match_stats, availability_report,
+                               resolve_team_ids, _norm_name)
 
     stats = load_player_match_stats()
     if stats.empty:
         print("[PLAYER] No player_fixture_stats yet — injury impact stays headcount-based")
         return fx
 
-    id_cols = {"home_team_id", "away_team_id"}
-    if not id_cols.issubset(fx.columns):
-        print("[PLAYER] Fixtures lack team ids — cannot match players to teams")
-        return fx
+    # Team ids are the join key to player stats. API-downloaded fixtures carry
+    # them; manually-supplied or CSV-fallback fixture files do not, so resolve
+    # those by name against the fixtures table.
+    name_to_id = {}
+    if not {"home_team_id", "away_team_id"}.issubset(fx.columns):
+        name_to_id = resolve_team_ids()
+        if not name_to_id:
+            print("[PLAYER] No team ids in fixtures and none resolvable from DB — skipping")
+            return fx
+        print(f"[PLAYER] Resolved team ids by name for {len(name_to_id)} teams")
 
-    def _ids(val):
+    def _split(val, sep=","):
         if not val or str(val) in ("nan", "None"):
             return []
-        return [int(x) for x in str(val).split(",") if x.strip().isdigit()]
+        return [x.strip() for x in str(val).split(sep) if x.strip()]
 
-    def _names(val):
-        if not val or str(val) in ("nan", "None"):
-            return []
-        return [n.strip() for n in str(val).split(",") if n.strip()]
+    def _records(r, id_col, name_col, type_col):
+        """Injury records: ids, names and availability types are stored as
+        parallel delimited strings on the fixture row."""
+        ids = _split(r.get(id_col))
+        names = _split(r.get(name_col))
+        types = _split(r.get(type_col), "|")
+        n = max(len(ids), len(names))
+        recs = []
+        for i in range(n):
+            recs.append({
+                "player_id": int(ids[i]) if i < len(ids) and ids[i].isdigit() else None,
+                "player_name": names[i] if i < len(names) else None,
+                "player_type": types[i] if i < len(types) else None,
+            })
+        return recs
+
+    def _team_id(r, tid_col, name_col):
+        tid = r.get(tid_col)
+        if tid is not None and tid == tid:
+            try:
+                return int(tid)
+            except (TypeError, ValueError):
+                pass
+        return name_to_id.get(_norm_name(r.get(name_col, "")))
 
     out = {c: [] for c in ("Home_MissingAttackShare", "Away_MissingAttackShare",
                            "Home_KeyPlayerOut", "Away_KeyPlayerOut",
                            "Home_KeyOutNames", "Away_KeyOutNames")}
+    resolved = 0
     for _, r in fx.iterrows():
-        for side, tid_col, id_col, name_col in (
-            ("Home", "home_team_id", "home_injury_ids", "home_injury_players"),
-            ("Away", "away_team_id", "away_injury_ids", "away_injury_players"),
+        for side, tid_col, team_col, id_col, name_col, type_col in (
+            ("Home", "home_team_id", "HomeTeam", "home_injury_ids",
+             "home_injury_players", "home_injury_types"),
+            ("Away", "away_team_id", "AwayTeam", "away_injury_ids",
+             "away_injury_players", "away_injury_types"),
         ):
-            tid = r.get(tid_col)
-            if tid is None or tid != tid:
+            tid = _team_id(r, tid_col, team_col)
+            if tid is None:
                 out[f"{side}_MissingAttackShare"].append(0.0)
                 out[f"{side}_KeyPlayerOut"].append(False)
                 out[f"{side}_KeyOutNames"].append("")
                 continue
             rep = availability_report(
-                stats, int(tid), r["Date"],
-                out_player_ids=_ids(r.get(id_col)),
-                out_player_names=_names(r.get(name_col)),
+                stats, tid, r["Date"],
+                out_records=_records(r, id_col, name_col, type_col),
             )
+            if rep["has_data"]:
+                resolved += 1
             out[f"{side}_MissingAttackShare"].append(rep["missing_share"])
             out[f"{side}_KeyPlayerOut"].append(rep["key_player_out"])
             out[f"{side}_KeyOutNames"].append(
@@ -2139,6 +2170,8 @@ def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
 
     for col, vals in out.items():
         fx[col] = vals
+
+    print(f"[PLAYER] Squad data resolved for {resolved}/{len(fx)*2} team-fixtures")
 
     n_key = int(sum(fx["Home_KeyPlayerOut"]) + sum(fx["Away_KeyPlayerOut"]))
     print(f"[PLAYER] Attacking availability computed — {n_key} team(s) missing a key contributor")

@@ -105,6 +105,31 @@ are all derived from `BLEND_*`. The page you actually read was therefore showing
 probabilities from the ones the thresholds were validated against. `_pct()` now prefers `BLEND_*`
 and falls back to `P_*` for markets that have no blend (cards/corners, where alpha is 1.0 anyway).
 
+### Follow-up same session — the chain was broken, now closed
+The first pass would have **silently no-opped**: `download_upcoming_fixtures()` never wrote
+`home_team_id`/`away_team_id`, which is the join key from injuries to player stats, so
+`_add_missing_attack_share` would have hit its guard and printed "Fixtures lack team ids" every run.
+Fixed by emitting team ids, plus a **name→team_id fallback** resolved from the `fixtures` table for
+manually-supplied or CSV-fallback fixture files.
+
+Also added **availability weighting by injury type**: API-Football reports `player.type` as
+"Missing Fixture" (confirmed out) or "Questionable"/"Doubtful" (often starts). Treating both as
+definitely-out overstated the adjustment; doubts now count half. Types flow through as
+`home_injury_types`/`away_injury_types`. Duplicate id+name records for the same player no longer
+double-count.
+
+Verified end to end on synthetic data: striker with 67% of goal involvement ruled out →
+`Home_MissingAttackShare` 0.667, `KeyPlayerOut` True, `KeyOutNames` "Bukayo Saka (67%)", home win
+probability and Over 2.5 both move down. Doubtful player → exactly half weight.
+
+### ⚠️ The magnitude is a judgement call, the ranking is not
+*Which* players matter is now derived from data (goal involvement share). *How much* a given
+absence should move the price is `injury_share_impact` (default 0.15, capped at ±0.10 on 1X2) —
+an untuned constant, contrary to the usual no-hardcoded-values rule. It cannot be tuned yet:
+auto_tune scores against the backtest cache, and historical injury data does not exist, so there is
+nothing to fit it against. It is exposed in `TUNING_OVERRIDES` so it can be changed without a code
+edit, and becomes tunable once injuries accumulate.
+
 ### Not yet possible / next
 - **Injury history does not exist** (table was never populated), so availability cannot be a *trained*
   feature yet — it is a prediction-time adjustment and a picks-page signal. Backfilling would cost

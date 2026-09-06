@@ -533,6 +533,10 @@ def download_upcoming_fixtures(leagues: List[str] = None, days_ahead: int = 7) -
                     'League': league_code,
                     'HomeTeam': teams.get('home', {}).get('name'),
                     'AwayTeam': teams.get('away', {}).get('name'),
+                    # Team ids are the join key from injuries -> player stats;
+                    # without them player-level availability cannot be resolved.
+                    'home_team_id': teams.get('home', {}).get('id'),
+                    'away_team_id': teams.get('away', {}).get('id'),
                     'fixture_id': fixture_data.get('id'),
                     'venue': fixture_data.get('venue', {}).get('name'),
                     'referee': fixture_data.get('referee')
@@ -858,6 +862,10 @@ def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
     # injuries and player-stats endpoints); previously only names survived.
     df['home_injury_ids'] = ''
     df['away_injury_ids'] = ''
+    # Availability type ('Missing Fixture' vs 'Questionable') — doubtful
+    # players often start, so they are half-weighted downstream.
+    df['home_injury_types'] = ''
+    df['away_injury_types'] = ''
     df['home_formation'] = ''
     df['away_formation'] = ''
     df['lineups_confirmed'] = False
@@ -884,6 +892,10 @@ def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
                 str(i['player_id']) for i in home_inj if i.get('player_id'))
             df.at[idx, 'away_injury_ids'] = ','.join(
                 str(i['player_id']) for i in away_inj if i.get('player_id'))
+            df.at[idx, 'home_injury_types'] = '|'.join(
+                str(i.get('player_type') or '') for i in home_inj)
+            df.at[idx, 'away_injury_types'] = '|'.join(
+                str(i.get('player_type') or '') for i in away_inj)
 
             # Persist so injury history accumulates — the table existed but
             # nothing ever wrote to it, so features.py's injury lookup always
