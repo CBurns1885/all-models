@@ -2092,7 +2092,7 @@ def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
     stats or team ids are unavailable.
     """
     from player_impact import (load_player_match_stats, availability_report,
-                               resolve_team_ids, _norm_name)
+                               resolve_team_ids, load_confirmed_lineup, _norm_name)
 
     stats = load_player_match_stats()
     if stats.empty:
@@ -2144,6 +2144,7 @@ def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
                            "Home_KeyPlayerOut", "Away_KeyPlayerOut",
                            "Home_KeyOutNames", "Away_KeyOutNames")}
     resolved = 0
+    from_lineup = [0]
     for _, r in fx.iterrows():
         for side, tid_col, team_col, id_col, name_col, type_col in (
             ("Home", "home_team_id", "HomeTeam", "home_injury_ids",
@@ -2157,12 +2158,21 @@ def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
                 out[f"{side}_KeyPlayerOut"].append(False)
                 out[f"{side}_KeyOutNames"].append("")
                 continue
+            # A confirmed XI (published ~1h before kickoff) beats the injury
+            # list — it captures rotation and late calls that injuries miss.
+            starters = None
+            _fid = r.get("fixture_id")
+            if _fid is not None and _fid == _fid:
+                starters = load_confirmed_lineup(int(_fid), tid)
             rep = availability_report(
                 stats, tid, r["Date"],
                 out_records=_records(r, id_col, name_col, type_col),
+                starter_ids=starters,
             )
             if rep["has_data"]:
                 resolved += 1
+            if rep.get("source") == "lineup":
+                from_lineup[0] += 1
             out[f"{side}_MissingAttackShare"].append(rep["missing_share"])
             out[f"{side}_KeyPlayerOut"].append(rep["key_player_out"])
             out[f"{side}_KeyOutNames"].append(
@@ -2171,7 +2181,8 @@ def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
     for col, vals in out.items():
         fx[col] = vals
 
-    print(f"[PLAYER] Squad data resolved for {resolved}/{len(fx)*2} team-fixtures")
+    print(f"[PLAYER] Squad data resolved for {resolved}/{len(fx)*2} team-fixtures"
+          + (f" ({from_lineup[0]} from confirmed lineups)" if from_lineup[0] else ""))
 
     n_key = int(sum(fx["Home_KeyPlayerOut"]) + sum(fx["Away_KeyPlayerOut"]))
     print(f"[PLAYER] Attacking availability computed — {n_key} team(s) missing a key contributor")

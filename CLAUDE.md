@@ -130,6 +130,40 @@ auto_tune scores against the backtest cache, and historical injury data does not
 nothing to fit it against. It is exposed in `TUNING_OVERRIDES` so it can be changed without a code
 edit, and becomes tunable once injuries accumulate.
 
+### 🔍 FULL DATA/FEATURE USAGE AUDIT (2026-09-06) — everything checked against a consumer
+
+| Source | Status |
+|--------|--------|
+| `fixtures`, `match_stats`, `fixture_odds` | ✅ used |
+| `player_fixture_stats` | ✅ now used (goals/assists) — **but the table was never CREATEd by any code**; it only existed because it had been made by hand. First run on a fresh DB crashed on INSERT. Now created + indexed in `fetch_player_stats.py`. |
+| `injuries` | ✅ now written + read |
+| `lineups` | ✅ now written **and read** — `load_confirmed_lineup()`; a confirmed XI overrides the injury list entirely (it captures rotation/suspension/late calls injuries miss). Falls back to injuries when no XI is published. |
+| `standings` | ⚠️ **partly used** — `features.py` reads it for *previous*-season standings only. `get_standings_from_db()` (live rank, PPG, and the `LeagueForm` "WWDLW" string) has **0 callers**. |
+| `get_injuries_from_db()`, `get_odds_coverage()` | ⚠️ 0 callers (superseded / helper) |
+
+**Feature columns silently dropped — third recurrence of the same bug.** `_pivot_back` keeps only its
+own `base_cols`, so everything built in steps 1/1a/1b/1c must be listed in a preserve prefix list.
+That list had again fallen behind: **`BothTopSix`, `RelegationClash`, `Home_NumTeams`** were computed
+and thrown away. Worse, `predict.py` *recomputes* BothTopSix/RelegationClash at serve time, so the
+model was being handed two columns it had never trained on. Fixed **structurally**: the column set is
+snapshotted before the pivot and anything the pivot drops is re-attached automatically, so a new
+feature can no longer be lost by forgetting to register it. Row count is asserted across the merge.
+
+That fix newly preserves `league_type` (a raw string) into the parquet, which `predict.py` cannot
+produce at serve time — the fitted preprocessor would then demand a missing column and
+`predict_proba` would skip **every** model with "preprocessor incompatible". Added to
+`feature_rules` exclusions along with the prediction-time-only availability/injury annotation
+columns.
+
+**Still unused, ranked by value** (all present in `player_fixture_stats`, none wired):
+1. per-player **yellow_cards / red_cards / fouls_committed** — a far sharper cards model than the
+   current team rolling averages, and cards markets are the weakest area.
+2. per-player **rating** — squad quality / strength-of-XI once lineups accumulate.
+3. **shots_on_target, passes_key** — attacking process metrics, less noisy than goals.
+4. live `standings` **form string** and current rank/PPG.
+Not wired because coverage is still thin (`player_fixture_stats` was ~24% of fixtures at last count)
+and each needs a feature rebuild + retrain to evaluate honestly. Do these once the backfill completes.
+
 ### Not yet possible / next
 - **Injury history does not exist** (table was never populated), so availability cannot be a *trained*
   feature yet — it is a prediction-time adjustment and a picks-page signal. Backfilling would cost

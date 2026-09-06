@@ -1310,35 +1310,40 @@ def build_features(force: bool = False) -> Path:
     # 2. Rolling form/stats
     print("2. Calculating rolling form...")
     if USE_ROLLING_FORM:
-        # Store columns that get dropped by _pivot_back
-        preserve_cols = [c for c in df.columns
-                         if c.startswith('Elo_')
-                         or c.startswith(('Home_Glicko', 'Away_Glicko', 'Glicko_'))]
-        # 'Season' is already preserved by _pivot_back's base_cols — exclude it here to avoid
-        # Season_x/Season_y collision when merging preserve_data back.
-        meta_cols = [c for c in ['referee', 'venue_name', 'fixture_id'] if c in df.columns]
-        # Table position (step 1b) and prev-season standings (step 1c) get dropped by _pivot_back
-        # (only base_cols survive the pivot); preserve them here so they survive.
-        extra_pfx = ('Home_SeasonPts', 'Away_SeasonPts', 'Home_SeasonGF', 'Away_SeasonGF',
-                     'Home_SeasonGA', 'Away_SeasonGA', 'Home_SeasonGD', 'Away_SeasonGD',
-                     'Home_SeasonGames', 'Away_SeasonGames', 'Home_PPG_Season', 'Away_PPG_Season',
-                     'Home_TablePos', 'Away_TablePos', 'IsTopSix_Home', 'IsTopSix_Away',
-                     'IsBottom3_Home', 'IsBottom3_Away', 'TablePosDiff', 'SeasonPtsDiff',
-                     'Home_PrevSeasonRank', 'Away_PrevSeasonRank', 'Home_PrevSeasonPts',
-                     'Away_PrevSeasonPts', 'Home_PrevSeasonGD', 'Away_PrevSeasonGD',
-                     'Home_PrevSeasonRankPct', 'Away_PrevSeasonRankPct',
-                     'PrevSeasonRankDiff', 'PrevSeasonPtsDiff', 'PrevSeasonGDDiff')
-        extra_cols = [c for c in df.columns if c.startswith(extra_pfx)]
-        preserve_cols += meta_cols + extra_cols
-        if preserve_cols:
-            preserve_data = df[['League', 'Date', 'HomeTeam', 'AwayTeam'] + preserve_cols].copy()
+        # _pivot_back keeps only its own base_cols, so EVERY column built in
+        # steps 1/1a/1b/1c would otherwise be silently dropped. Preserving by
+        # an explicit prefix list has now failed three times (the 31-feature
+        # loss of 2026-07-13, then Glicko, then BothTopSix/RelegationClash/
+        # Home_NumTeams) because each new feature has to remember to add
+        # itself. Snapshot the column set instead and re-attach whatever the
+        # pivot drops — new features are then preserved automatically.
+        _keys = ['League', 'Date', 'HomeTeam', 'AwayTeam']
+        _pre_pivot_cols = list(df.columns)
+        preserve_data = df[_pre_pivot_cols].copy()
 
         side_feats = _build_side_features(df)
         df = _pivot_back(df, side_feats)
 
+        # Anything present before the pivot but absent after it, minus the
+        # join keys. 'Season' survives the pivot via base_cols, so excluding
+        # it here avoids the Season_x/Season_y collision.
+        preserve_cols = [c for c in _pre_pivot_cols
+                         if c not in df.columns and c not in _keys]
+        if preserve_cols:
+            preserve_data = preserve_data[_keys + preserve_cols]
+            print(f"   Re-attaching {len(preserve_cols)} pre-pivot column(s) dropped by the pivot")
+        else:
+            preserve_data = None
+
         # Re-merge preserved columns
         if preserve_cols:
-            df = df.merge(preserve_data, on=['League', 'Date', 'HomeTeam', 'AwayTeam'], how='left')
+            _n = len(df)
+            df = df.merge(preserve_data.drop_duplicates(subset=_keys),
+                          on=_keys, how='left')
+            if len(df) != _n:
+                raise RuntimeError(
+                    f"Preserve-merge changed row count ({_n} -> {len(df)}) — "
+                    "duplicate fixture keys in the feature frame")
         # _pivot_back already keeps Season; if a collision created Season_x/Season_y, clean it up
         if 'Season_x' in df.columns:
             df = df.rename(columns={'Season_x': 'Season'})

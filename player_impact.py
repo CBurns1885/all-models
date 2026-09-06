@@ -130,6 +130,42 @@ def injury_weight(player_type) -> float:
                                     DEFAULT_AVAILABILITY_WEIGHT)
 
 
+def load_confirmed_lineup(fixture_id: int, team_id: int, db_path=None) -> Optional[set]:
+    """player_ids in the confirmed starting XI, or None if not available.
+
+    A confirmed lineup is strictly stronger evidence than an injury list:
+    injuries are advisory (doubtful players start, unlisted players are
+    rested/dropped/suspended), whereas the XI is who is actually on the pitch.
+    Usually published ~1h before kickoff, so it is absent for a weekly run and
+    present for a late refresh — callers fall back to injuries when None.
+    """
+    import sqlite3
+    from config import API_FOOTBALL_DB
+    try:
+        conn = sqlite3.connect(db_path or API_FOOTBALL_DB)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lineups'")
+        if not cur.fetchone():
+            conn.close()
+            return None
+        rows = cur.execute(
+            "SELECT player_id FROM lineups WHERE fixture_id=? AND team_id=? AND is_starter=1",
+            (int(fixture_id), int(team_id))).fetchall()
+        conn.close()
+    except Exception:
+        return None
+    ids = {int(r[0]) for r in rows if r[0] is not None}
+    return ids or None
+
+
+def missing_from_lineup(shares: pd.DataFrame, starter_ids: set) -> float:
+    """Share of recent goal involvement belonging to players NOT starting."""
+    if shares is None or shares.empty or not starter_ids:
+        return 0.0
+    absent = ~shares["player_id"].isin(starter_ids)
+    return float(shares.loc[absent, "share"].sum())
+
+
 def team_attack_shares(
     stats: pd.DataFrame,
     team_id: int,
@@ -267,6 +303,7 @@ def availability_report(
     out_player_ids: Optional[Iterable] = None,
     out_player_names: Optional[Iterable] = None,
     out_records: Optional[List[dict]] = None,
+    starter_ids: Optional[set] = None,
     window_matches: int = DEFAULT_WINDOW_MATCHES,
     key_threshold: float = 0.20,
 ) -> dict:
@@ -286,7 +323,24 @@ def availability_report(
     shares = team_attack_shares(stats, team_id, before_date, window_matches)
     if shares.empty:
         return {"missing_share": 0.0, "top_out": [], "top_scorers": [],
-                "key_player_out": False, "has_data": False}
+                "key_player_out": False, "has_data": False, "source": "none"}
+
+    # A confirmed starting XI supersedes the injury list entirely: it already
+    # accounts for rotation, suspension and late fitness calls that injuries
+    # never capture, and it needs no name matching.
+    if starter_ids:
+        absent = ~shares["player_id"].isin(starter_ids)
+        out_rows = shares[absent].sort_values("share", ascending=False)
+        missing = float(out_rows["share"].sum())
+        return {
+            "missing_share": round(min(missing, 1.0), 4),
+            "top_out": top_scorers(out_rows, 3),
+            "top_scorers": top_scorers(shares, 3),
+            "key_player_out": bool((out_rows["share"] >= key_threshold).any())
+                              if not out_rows.empty else False,
+            "has_data": True,
+            "source": "lineup",
+        }
 
     # Normalise every input shape into records carrying an availability weight
     records: List[dict] = list(out_records or [])
@@ -302,7 +356,7 @@ def availability_report(
     if not records:
         return {"missing_share": 0.0, "top_out": [],
                 "top_scorers": top_scorers(shares, 3),
-                "key_player_out": False, "has_data": True}
+                "key_player_out": False, "has_data": True, "source": "none"}
 
     norm = shares["player_name"].map(_norm_name)
     sur = shares["player_name"].map(surname_key)
@@ -338,4 +392,5 @@ def availability_report(
         "key_player_out": bool((out_rows["share"] >= key_threshold).any())
                           if not out_rows.empty else False,
         "has_data": True,
+        "source": "injuries",
     }

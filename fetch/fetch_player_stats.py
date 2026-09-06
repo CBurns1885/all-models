@@ -152,6 +152,40 @@ def main():
 
     conn = sqlite3.connect(API_FOOTBALL_DB, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")
+    # player_fixture_stats was never created by any code in this repo — it
+    # only existed because it had been made by hand on the original machine,
+    # so the very first run on a fresh DB crashed on the INSERT.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS player_fixture_stats (
+            fixture_id INTEGER,
+            team_id INTEGER,
+            player_id INTEGER,
+            player_name TEXT,
+            position TEXT,
+            minutes_played INTEGER,
+            rating REAL,
+            goals INTEGER,
+            assists INTEGER,
+            shots_total INTEGER,
+            shots_on_target INTEGER,
+            passes_total INTEGER,
+            passes_accurate INTEGER,
+            passes_key INTEGER,
+            tackles INTEGER,
+            interceptions INTEGER,
+            duels_total INTEGER,
+            duels_won INTEGER,
+            dribbles_attempts INTEGER,
+            dribbles_success INTEGER,
+            yellow_cards INTEGER,
+            red_cards INTEGER,
+            fouls_committed INTEGER,
+            fouls_drawn INTEGER,
+            PRIMARY KEY (fixture_id, player_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pfs_fixture ON player_fixture_stats(fixture_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pfs_team ON player_fixture_stats(team_id)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS player_stats_unavailable (
             fixture_id INTEGER PRIMARY KEY,
