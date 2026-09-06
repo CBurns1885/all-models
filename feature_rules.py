@@ -21,6 +21,24 @@ ID_COLS = {
     "League", "Date", "HomeTeam", "AwayTeam", "Season", "Referee", "referee",
     "fixture_id", "Home_ID", "Away_ID", "League_ID", "venue_name", "Time",
     "Season_x", "Season_y",  # merge-collision artifacts
+    # league_type ("League"/"Cup") is a raw string that predict.py's future
+    # frame cannot reproduce — it is metadata, not a per-team feature, and
+    # is_cup/is_european already encode the same information numerically.
+    # Leaving it in would make the fitted preprocessor demand a column that
+    # never exists at prediction time, and predict_proba would then skip
+    # every model with "preprocessor incompatible".
+    "league_type",
+    # Availability/annotation columns written for the picks page and the
+    # injury adjustment — prediction-time only, no historical equivalent.
+    "Home_KeyPlayerOut", "Away_KeyPlayerOut",
+    "Home_KeyOutNames", "Away_KeyOutNames",
+    "Home_MissingAttackShare", "Away_MissingAttackShare",
+    "home_injuries", "away_injuries",
+    "home_injury_players", "away_injury_players",
+    "home_injury_ids", "away_injury_ids",
+    "home_injury_types", "away_injury_types",
+    "home_formation", "away_formation", "lineups_confirmed",
+    "home_team_id", "away_team_id",
 }
 
 # Full-time / half-time results — outcomes, never features
@@ -44,6 +62,12 @@ _SIDE_STAT_BASES = [
     "xG", "Possession", "ShotsInBox", "BigChances", "PassAcc",
     "GoalsFor", "GoalsAgainst", "Win", "Draw", "Loss",
     "CleanSheet", "FailedToScore", "BTTS",
+    # Player-derived aggregates (player_impact.PLAYER_ONLY_FEATURES). These
+    # are THIS match's values — the team's rating, key passes and duels from
+    # the game being predicted — so they leak the result exactly like shots
+    # or cards would. Only the rolling/EWM versions are legitimate.
+    "PlayerRating", "PlayerRatingTop", "KeyPasses", "Tackles",
+    "Interceptions", "DuelWinPct", "DribbleSuccess",
 ]
 SIDE_RAW_MATCH_STATS = {f"{side}_{base}" for side in ("Home", "Away")
                         for base in _SIDE_STAT_BASES}

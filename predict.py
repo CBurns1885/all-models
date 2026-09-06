@@ -552,6 +552,51 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
 _FUTURE_FRAME_CACHE_DIR = Path(__file__).parent / "outputs" / "future_frame_cache"
 
 
+def _season_start(date: pd.Timestamp, league: str) -> pd.Timestamp:
+    """First day of the season that `date` falls in, for this league.
+
+    European leagues run Aug-May (season starts 1 July); NOR/SWE run
+    spring-autumn within one calendar year (season starts 1 January).
+    """
+    from config import season_for_league
+    year = season_for_league(league, date)
+    from config import CALENDAR_YEAR_LEAGUES
+    if league in CALENDAR_YEAR_LEAGUES:
+        return pd.Timestamp(year=year, month=1, day=1)
+    return pd.Timestamp(year=year, month=7, day=1)
+
+
+def _add_season_games(result: pd.DataFrame, base: pd.DataFrame) -> pd.DataFrame:
+    """Set Home_SeasonGames / Away_SeasonGames to the exact number of matches
+    each team has completed this season before kickoff."""
+    if base.empty:
+        return result
+
+    appearances = pd.concat([
+        base[["Date", "HomeTeam"]].rename(columns={"HomeTeam": "Team"}),
+        base[["Date", "AwayTeam"]].rename(columns={"AwayTeam": "Team"}),
+    ], ignore_index=True)
+    appearances["Date"] = pd.to_datetime(appearances["Date"])
+
+    # Team -> sorted array of appearance dates, for vectorised counting
+    by_team = {t: np.sort(g["Date"].values)
+               for t, g in appearances.groupby("Team", sort=False)}
+
+    for side, col in (("HomeTeam", "Home_SeasonGames"), ("AwayTeam", "Away_SeasonGames")):
+        counts = []
+        for lg, dt, team in zip(result["League"], result["Date"], result[side]):
+            dates = by_team.get(team)
+            if dates is None:
+                counts.append(0.0)
+                continue
+            start = np.datetime64(_season_start(pd.Timestamp(dt), lg))
+            end = np.datetime64(pd.Timestamp(dt))
+            counts.append(float(np.searchsorted(dates, end, side="left")
+                                - np.searchsorted(dates, start, side="left")))
+        result[col] = counts
+    return result
+
+
 def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     """Enhanced feature building with time weighting.
 
@@ -606,13 +651,42 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     if "Elo_Away" in base.columns:
         away_feat_cols.append("Elo_Away")
 
+    # Split into FORM columns (rolling/EWM averages — a time-weighted mean over
+    # the last few matches is the right summary) and STATE columns (ratings,
+    # league position, season counters — these are point-in-time levels where
+    # the correct pre-match value is the LATEST one, not an average of the
+    # last five).
+    #
+    # Averaging state was actively wrong: Home_SeasonGames became the mean of
+    # the team's last five games-played counts, so mid-season a team on 7 real
+    # games reported ~4, and at a season boundary the window still contained
+    # last season's rows (~30 games) so a team in match 2 of a new season
+    # reported ~25 — which silently disabled best_bets' cold-start gate in
+    # exactly the situation it exists for. It also created train/serve skew:
+    # models are trained on exact pre-match Elo/Glicko/table position but were
+    # served a smoothed, lagged version of each.
+    def _is_state_col(c: str) -> bool:
+        base_name = c[5:] if c.startswith(("Home_", "Away_")) else c
+        if base_name.startswith(("Glicko", "PrevSeason", "Season", "TablePos",
+                                 "PPG_Season", "NumTeams")):
+            return True
+        if c.startswith("Elo_"):
+            return True
+        if c.startswith(("IsTopSix", "IsBottom3")):
+            return True
+        return False
+
+    home_state_cols = [c for c in home_feat_cols if _is_state_col(c)]
+    home_form_cols  = [c for c in home_feat_cols if c not in home_state_cols]
+    away_state_cols = [c for c in away_feat_cols if _is_state_col(c)]
+    away_form_cols  = [c for c in away_feat_cols if c not in away_state_cols]
+
     # ----------------------------------------------------------------
-    # Vectorized time-weighted form: last-5 appearances per fixture team
+    # Vectorized per-team lookup over the last N appearances before kickoff
     # ----------------------------------------------------------------
-    def _weighted_form(fx_df, base_df, team_col, feat_cols, n_games=5):
-        """Return one time-weighted-average row per (League, Date, team_col).
-        All feat_cols must be numeric.
-        """
+    def _team_history(fx_df, base_df, team_col, feat_cols, n_games=5):
+        """Rows for each fixture team's last n_games appearances before kickoff,
+        ranked most-recent-first in `_rank`, with time weights in `_w`."""
         hist = base_df[["League", "Date", team_col] + feat_cols].rename(
             columns={"Date": "HistDate"})
 
@@ -630,18 +704,41 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         # Time weights
         merged["_days"] = (merged["Date"] - merged["HistDate"]).dt.days.clip(lower=0)
         merged["_w"]    = np.exp(-merged["_days"] / thl)
+        return merged
 
+    def _weighted_form(merged, team_col, feat_cols):
+        """Time-weighted average of feat_cols over the team's recent matches."""
         grp_keys = ["League", "Date", team_col]
-        wsum = merged.groupby(grp_keys)["_w"].sum()
-
-        # Multiply each col by weight then sum, then divide by wsum
+        if not feat_cols:
+            return merged[grp_keys].drop_duplicates()
+        m = merged.copy()
+        wsum = m.groupby(grp_keys)["_w"].sum()
         for col in feat_cols:
-            merged[col] = merged[col].fillna(0) * merged["_w"]
-        return (merged.groupby(grp_keys)[feat_cols].sum()
+            m[col] = m[col].fillna(0) * m["_w"]
+        return (m.groupby(grp_keys)[feat_cols].sum()
                 .div(wsum, axis=0).reset_index())
 
-    home_form = _weighted_form(fx, base, "HomeTeam", home_feat_cols)
-    away_form  = _weighted_form(fx, base, "AwayTeam",  away_feat_cols)
+    def _latest_state(merged, team_col, feat_cols):
+        """Most recent pre-fixture value of each state column."""
+        grp_keys = ["League", "Date", team_col]
+        if not feat_cols:
+            return merged[grp_keys].drop_duplicates()
+        latest = merged[merged["_rank"] == 1]
+        return latest[grp_keys + feat_cols].drop_duplicates(subset=grp_keys)
+
+    def _team_features(fx_df, base_df, team_col, form_cols, state_cols):
+        merged = _team_history(fx_df, base_df, team_col, form_cols + state_cols)
+        grp_keys = ["League", "Date", team_col]
+        form = _weighted_form(merged, team_col, form_cols)
+        state = _latest_state(merged, team_col, state_cols)
+        if not form_cols:
+            return state
+        if not state_cols:
+            return form
+        return form.merge(state, on=grp_keys, how="outer")
+
+    home_form = _team_features(fx, base, "HomeTeam", home_form_cols, home_state_cols)
+    away_form = _team_features(fx, base, "AwayTeam", away_form_cols, away_state_cols)
 
     # Merge into fixture frame
     result = fx[["League", "Date", "HomeTeam", "AwayTeam"]].copy()
@@ -657,6 +754,14 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     # (home_form/away_form may carry is_cup/is_european from base rolling stats)
     result["is_cup"] = result["League"].isin(ALL_CUPS).astype(int)
     result["is_european"] = result["League"].isin(EUROPEAN_CUPS).astype(int)
+
+    # Season games played: count directly rather than inheriting the stored
+    # counter. features.parquet stores the PRE-match count, so the latest
+    # historical row is always one behind, and if a team has not played yet
+    # this season the latest row belongs to the previous season and the stored
+    # value is meaningless (~34). best_bets' cards/corners cold-start gate
+    # keys off this, so it has to be exact.
+    result = _add_season_games(result, base)
 
     # Recompute cross-team derived features now that both home and away form are merged
     if "Elo_Home" in result.columns and "Elo_Away" in result.columns:
@@ -1135,22 +1240,50 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
     df = df.copy()
 
     # Maximum injury impact (per player out)
+    # Fallback weights, used only when no player-level data is available.
+    # A headcount treats a fringe defender and a 20-goal striker identically,
+    # so where player_fixture_stats can tell them apart we scale by the share
+    # of recent goal involvement that is actually missing instead (below).
     INJURY_IMPACT_PER_PLAYER = 0.02  # 2% adjustment per injury
     MAX_INJURY_IMPACT = 0.10  # Maximum 10% total adjustment
+
+    # Importance-weighted impact: missing_share is 0-1, so this converts
+    # "60% of the team's goal threat is out" into a 0.6 * scale adjustment.
+    IMPACT_PER_UNIT_SHARE = float(TUNING_OVERRIDES.get('injury_share_impact', 0.15))
+    share_cols_present = ('Home_MissingAttackShare' in fixtures_df.columns
+                          and 'Away_MissingAttackShare' in fixtures_df.columns)
+    if share_cols_present:
+        print("[INJURY] Using importance-weighted impact (share of goal involvement missing)")
 
     for idx in range(len(df)):
         if idx >= len(fixtures_df):
             break
 
-        home_inj = fixtures_df.iloc[idx].get('home_injuries', 0)
-        away_inj = fixtures_df.iloc[idx].get('away_injuries', 0)
+        fx_row = fixtures_df.iloc[idx]
+        home_inj = fx_row.get('home_injuries', 0)
+        away_inj = fx_row.get('away_injuries', 0)
 
-        if home_inj == 0 and away_inj == 0:
+        home_share = away_share = 0.0
+        if share_cols_present:
+            _hs = fx_row.get('Home_MissingAttackShare', 0.0)
+            _as = fx_row.get('Away_MissingAttackShare', 0.0)
+            home_share = float(_hs) if _hs == _hs else 0.0
+            away_share = float(_as) if _as == _as else 0.0
+
+        if home_inj == 0 and away_inj == 0 and home_share == 0.0 and away_share == 0.0:
             continue
 
-        # Calculate injury impact (capped)
-        home_impact = min(home_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
-        away_impact = min(away_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
+        # Prefer the importance-weighted signal; fall back to the headcount
+        # only for teams with no player-level data (missing_share is exactly
+        # 0.0 when player stats could not resolve the squad).
+        if home_share > 0:
+            home_impact = min(home_share * IMPACT_PER_UNIT_SHARE, MAX_INJURY_IMPACT)
+        else:
+            home_impact = min(home_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
+        if away_share > 0:
+            away_impact = min(away_share * IMPACT_PER_UNIT_SHARE, MAX_INJURY_IMPACT)
+        else:
+            away_impact = min(away_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
 
         # Adjust 1X2 probabilities
         # More home injuries = reduce home win, increase away win
@@ -1175,11 +1308,16 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
                     df.at[idx, d_col] /= total
                     df.at[idx, a_col] /= total
 
-        # Adjust over/under based on total injuries (more injuries typically = fewer goals)
+        # Adjust over/under: missing attackers mean fewer expected goals.
+        # Scaled by the combined share of goal involvement that is absent
+        # where known, rather than by a headcount of any absent player.
+        total_share = home_share + away_share
         total_inj = home_inj + away_inj
-        if total_inj > 0:
-            goal_reduction = min(total_inj * 0.01, 0.05)  # Max 5% reduction in over probability
-
+        if total_share > 0:
+            goal_reduction = min(total_share * 0.05, 0.05)
+        else:
+            goal_reduction = min(total_inj * 0.01, 0.05)
+        if goal_reduction > 0:
             for line in ['0_5', '1_5', '2_5', '3_5', '4_5']:
                 for prefix in ['P_', 'BLEND_']:
                     o_col = f'{prefix}OU_{line}_O'
@@ -1191,6 +1329,13 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
 
     adjusted_count = len(fixtures_df[(fixtures_df['home_injuries'] > 0) | (fixtures_df['away_injuries'] > 0)])
     print(f"[INJURY] Adjusted {adjusted_count} fixtures based on injury data")
+    if share_cols_present:
+        _shares = pd.concat([
+            pd.to_numeric(fixtures_df['Home_MissingAttackShare'], errors='coerce'),
+            pd.to_numeric(fixtures_df['Away_MissingAttackShare'], errors='coerce'),
+        ]).fillna(0.0)
+        _key = int((_shares >= 0.20).sum())
+        print(f"[INJURY] Importance-weighted: {_key} team(s) missing >=20% of recent goal involvement")
 
     return df
 
@@ -1341,9 +1486,16 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             D = out.loc[idx, dc_cols].values.astype(np.float64)
 
             # Apply DC temperature scaling to reduce overconfidence (T > 1 softens, T < 1 sharpens)
-            # Per-market overrides take precedence over the global dc_temperature
-            global_temp = float(TUNING_OVERRIDES.get('dc_temperature', 1.0))
-            market_temp_key = f'dc_temperature_{target.replace("y_", "").lower()}'
+            # Per-market overrides take precedence over the global temperature.
+            # The second signal is DC for goals markets and NB for
+            # cards/corners; they get separate temperatures because
+            # `dc_temperature` was tuned against Dixon-Coles output and has no
+            # meaning for a negative-binomial count model. `nb_temperature`
+            # defaults to 1.0 (no scaling) until it is tuned in its own right.
+            is_nb = any(c.startswith("NB_") for c in dc_cols)
+            temp_prefix = 'nb_temperature' if is_nb else 'dc_temperature'
+            global_temp = float(TUNING_OVERRIDES.get(temp_prefix, 1.0))
+            market_temp_key = f'{temp_prefix}_{target.replace("y_", "").lower()}'
             dc_temp = float(TUNING_OVERRIDES.get(market_temp_key, global_temp))
             if dc_temp != 1.0 and len(D) > 0 and D.sum() > 0:
                 log_D = np.log(np.clip(D, 1e-10, None)) / dc_temp
@@ -1931,6 +2083,112 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
         secondary_out.write_text(html, encoding="utf-8")
         print(f"[OK] Wrote ULTIMATE HTML (copy) -> {secondary_out}")
 
+def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
+    """Annotate fixtures with how much of each side's recent goal involvement
+    is unavailable, plus who is missing, using player_fixture_stats.
+
+    Adds Home/Away_MissingAttackShare (0-1), Home/Away_KeyPlayerOut (bool)
+    and Home/Away_KeyOutNames (display string). Degrades to no-op when player
+    stats or team ids are unavailable.
+    """
+    from player_impact import (load_player_match_stats, availability_report,
+                               resolve_team_ids, load_confirmed_lineup, _norm_name)
+
+    stats = load_player_match_stats()
+    if stats.empty:
+        print("[PLAYER] No player_fixture_stats yet — injury impact stays headcount-based")
+        return fx
+
+    # Team ids are the join key to player stats. API-downloaded fixtures carry
+    # them; manually-supplied or CSV-fallback fixture files do not, so resolve
+    # those by name against the fixtures table.
+    name_to_id = {}
+    if not {"home_team_id", "away_team_id"}.issubset(fx.columns):
+        name_to_id = resolve_team_ids()
+        if not name_to_id:
+            print("[PLAYER] No team ids in fixtures and none resolvable from DB — skipping")
+            return fx
+        print(f"[PLAYER] Resolved team ids by name for {len(name_to_id)} teams")
+
+    def _split(val, sep=","):
+        if not val or str(val) in ("nan", "None"):
+            return []
+        return [x.strip() for x in str(val).split(sep) if x.strip()]
+
+    def _records(r, id_col, name_col, type_col):
+        """Injury records: ids, names and availability types are stored as
+        parallel delimited strings on the fixture row."""
+        ids = _split(r.get(id_col))
+        names = _split(r.get(name_col))
+        types = _split(r.get(type_col), "|")
+        n = max(len(ids), len(names))
+        recs = []
+        for i in range(n):
+            recs.append({
+                "player_id": int(ids[i]) if i < len(ids) and ids[i].isdigit() else None,
+                "player_name": names[i] if i < len(names) else None,
+                "player_type": types[i] if i < len(types) else None,
+            })
+        return recs
+
+    def _team_id(r, tid_col, name_col):
+        tid = r.get(tid_col)
+        if tid is not None and tid == tid:
+            try:
+                return int(tid)
+            except (TypeError, ValueError):
+                pass
+        return name_to_id.get(_norm_name(r.get(name_col, "")))
+
+    out = {c: [] for c in ("Home_MissingAttackShare", "Away_MissingAttackShare",
+                           "Home_KeyPlayerOut", "Away_KeyPlayerOut",
+                           "Home_KeyOutNames", "Away_KeyOutNames")}
+    resolved = 0
+    from_lineup = [0]
+    for _, r in fx.iterrows():
+        for side, tid_col, team_col, id_col, name_col, type_col in (
+            ("Home", "home_team_id", "HomeTeam", "home_injury_ids",
+             "home_injury_players", "home_injury_types"),
+            ("Away", "away_team_id", "AwayTeam", "away_injury_ids",
+             "away_injury_players", "away_injury_types"),
+        ):
+            tid = _team_id(r, tid_col, team_col)
+            if tid is None:
+                out[f"{side}_MissingAttackShare"].append(0.0)
+                out[f"{side}_KeyPlayerOut"].append(False)
+                out[f"{side}_KeyOutNames"].append("")
+                continue
+            # A confirmed XI (published ~1h before kickoff) beats the injury
+            # list — it captures rotation and late calls that injuries miss.
+            starters = None
+            _fid = r.get("fixture_id")
+            if _fid is not None and _fid == _fid:
+                starters = load_confirmed_lineup(int(_fid), tid)
+            rep = availability_report(
+                stats, tid, r["Date"],
+                out_records=_records(r, id_col, name_col, type_col),
+                starter_ids=starters,
+            )
+            if rep["has_data"]:
+                resolved += 1
+            if rep.get("source") == "lineup":
+                from_lineup[0] += 1
+            out[f"{side}_MissingAttackShare"].append(rep["missing_share"])
+            out[f"{side}_KeyPlayerOut"].append(rep["key_player_out"])
+            out[f"{side}_KeyOutNames"].append(
+                ", ".join(f"{p['name']} ({p['share']:.0%})" for p in rep["top_out"]))
+
+    for col, vals in out.items():
+        fx[col] = vals
+
+    print(f"[PLAYER] Squad data resolved for {resolved}/{len(fx)*2} team-fixtures"
+          + (f" ({from_lineup[0]} from confirmed lineups)" if from_lineup[0] else ""))
+
+    n_key = int(sum(fx["Home_KeyPlayerOut"]) + sum(fx["Away_KeyPlayerOut"]))
+    print(f"[PLAYER] Attacking availability computed — {n_key} team(s) missing a key contributor")
+    return fx
+
+
 def predict_week(fixtures_csv: Path) -> Path:
     """ULTIMATE prediction pipeline"""
 
@@ -1953,11 +2211,20 @@ def predict_week(fixtures_csv: Path) -> Path:
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
 
+    # Duplicate fixtures would multiply rows on the DC/NB merges below and
+    # silently misalign every positionally-assigned column after them
+    # (Glicko RD, season games, NB prices).
+    _dupes = fx.duplicated(subset=ID_COLS).sum()
+    if _dupes:
+        print(f"[WARN] {_dupes} duplicate fixture row(s) in {fixtures_csv} — keeping first of each")
+        fx = fx.drop_duplicates(subset=ID_COLS).reset_index(drop=True)
+
     # Check for injury data
     has_injury_data = 'home_injuries' in fx.columns and 'away_injuries' in fx.columns
     if has_injury_data:
         total_injuries = fx['home_injuries'].sum() + fx['away_injuries'].sum()
         print(f"[LIVE] Injury data available: {total_injuries} total injuries across fixtures")
+        fx = _add_missing_attack_share(fx)
     else:
         print("[INFO] No injury data - run closer to match time for live data")
     
@@ -2003,6 +2270,18 @@ def predict_week(fixtures_csv: Path) -> Path:
     for _sg_col in ("Home_SeasonGames", "Away_SeasonGames"):
         if _sg_col in df_future.columns:
             df_out[_sg_col] = df_future[_sg_col].values[:len(df_out)]
+
+    # Attacking availability (who is out, and how much of the goal threat
+    # goes with them) — surfaced on the picks page and used by the injury
+    # adjustment. Merged on fixture keys since fx may be ordered differently.
+    _avail_cols = [c for c in ("Home_MissingAttackShare", "Away_MissingAttackShare",
+                               "Home_KeyPlayerOut", "Away_KeyPlayerOut",
+                               "Home_KeyOutNames", "Away_KeyOutNames")
+                   if c in fx.columns]
+    if _avail_cols:
+        df_out = df_out.merge(
+            fx[ID_COLS + _avail_cols].drop_duplicates(subset=ID_COLS),
+            on=ID_COLS, how="left")
     
     # Add DC predictions
     log_header("GENERATE DC PREDICTIONS")
@@ -2018,9 +2297,17 @@ def predict_week(fixtures_csv: Path) -> Path:
         dc_cols = [c for c in dc_df.columns if c.startswith("DC_")]
         merge_keys = [k for k in ["League", "Date", "HomeTeam", "AwayTeam"] if k in dc_df.columns]
         df_out["Date"] = pd.to_datetime(df_out["Date"])
+        _n_before = len(df_out)
         df_out = df_out.merge(
-            dc_df[merge_keys + dc_cols], on=merge_keys, how="left", suffixes=("", "_dc")
+            dc_df[merge_keys + dc_cols].drop_duplicates(subset=merge_keys),
+            on=merge_keys, how="left", suffixes=("", "_dc")
         )
+        # Row count must be preserved: NB prices and the Glicko/season-games
+        # columns are assigned positionally against df_future further down.
+        if len(df_out) != _n_before:
+            raise RuntimeError(
+                f"DC merge changed row count ({_n_before} -> {len(df_out)}); "
+                "duplicate fixture keys would misalign downstream columns")
         print(f"[OK] Merged {len(dc_cols)} DC predictions")
     except Exception as e:
         print(f"[WARN] DC predictions failed: {e}")

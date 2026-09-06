@@ -17,6 +17,35 @@ from pathlib import Path
 # This file lives in tools/ — outputs/ is at the repo root, one level up.
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUTS = ROOT / "outputs"
+sys.path.insert(0, str(ROOT))
+
+from staking import (size_bet, break_even_odds, DEFAULT_COMMISSION,
+                     DEFAULT_KELLY, DEFAULT_MIN_EDGE, DEFAULT_MAX_FRACTION,
+                     DEFAULT_MIN_STAKE)
+
+
+def _load_odds(out_dir: Path, odds_file: str | None):
+    """Betfair price snapshot keyed by (Date, Home, Away, Market, Bet).
+
+    Produced by betfair/betfair_odds.py (read-only price fetch). Missing file
+    is not an error — picks still get a break-even price, just no stake.
+    """
+    path = Path(odds_file) if odds_file else out_dir / "betfair_odds.csv"
+    if not path.exists():
+        return {}, path
+    try:
+        odds = pd.read_csv(path)
+    except Exception as e:
+        print(f"[WARN] Could not read odds file {path}: {e}")
+        return {}, path
+    lookup = {}
+    for _, r in odds.iterrows():
+        key = (str(r.get("Date", ""))[:10], str(r.get("Home", "")),
+               str(r.get("Away", "")), str(r.get("Market", "")), str(r.get("Bet", "")))
+        price = r.get("BackPrice")
+        if price == price and price is not None:
+            lookup[key] = float(price)
+    return lookup, path
 
 # Home-prior fallback sentinel (19/21): emitted for fixtures where neither
 # ML nor DC had any training data for the teams (e.g. European qualifiers).
@@ -149,6 +178,15 @@ def generate_best_bets(
     min_hist_accuracy: float = 0.55,
     max_rd: float = 200.0,
     min_games: float = 4.0,
+    bank: float = 0.0,
+    kelly: float = DEFAULT_KELLY,
+    commission: float = DEFAULT_COMMISSION,
+    min_edge: float = DEFAULT_MIN_EDGE,
+    max_fraction: float = DEFAULT_MAX_FRACTION,
+    max_stake: float = None,
+    min_stake: float = DEFAULT_MIN_STAKE,
+    prob_shrink: float = 0.0,
+    odds_file: str = None,
 ):
     # --- Load league breakdown ---
     breakdown_path = OUTPUTS / "league_breakdown.csv"
@@ -173,6 +211,16 @@ def generate_best_bets(
     print(f"Loading predictions: {preds_file}")
     preds = pd.read_csv(preds_file)
     print(f"  {len(preds)} matches")
+
+    # --- Betfair price snapshot (optional; enables stake sizing) ---
+    odds_lookup, odds_path = _load_odds(out_dir, odds_file)
+    if bank > 0:
+        if odds_lookup:
+            print(f"Staking: bank £{bank:,.2f}, {kelly:g}x Kelly, {commission:.0%} commission, "
+                  f"cap {max_fraction:.0%} of bank  ({len(odds_lookup)} prices from {odds_path.name})")
+        else:
+            print(f"[WARN] No Betfair prices at {odds_path} — showing MinOdds (break-even) "
+                  f"but no stakes.\n       Fetch prices first: py betfair/betfair_odds.py")
 
     # --- Build bet rows ---
     rows = []
@@ -223,22 +271,43 @@ def generate_best_bets(
             # Score: confidence × accuracy × upside factor
             score = confidence * hist_acc * (1 + max(hist_roi, 0) / 100)
 
-            rows.append({
+            outcome = _outcome_label(best_col)
+
+            # --- Stake sizing (half Kelly by default) ---
+            # MinOdds is the break-even price and is always shown; Odds/Stake
+            # need a Betfair price snapshot (betfair/betfair_odds.py).
+            min_odds = break_even_odds(confidence, commission)
+            price = odds_lookup.get((date, home, away, market, outcome))
+            advice = size_bet(
+                confidence, price, bank,
+                fraction=kelly, commission=commission, min_edge=min_edge,
+                max_fraction=max_fraction, max_stake=max_stake,
+                min_stake=min_stake, prob_shrink=prob_shrink,
+            ) if bank > 0 else None
+
+            row = {
                 "Score":      round(score, 4),
                 "Confidence": f"{confidence:.1%}",
-                "Prob":       round(confidence, 6),   # raw probability for the placer
+                "Prob":       round(confidence, 6),   # raw probability
                 "Market":     market,
-                "Bet":        _outcome_label(best_col),
+                "Bet":        outcome,
                 "League":     league,
                 "Date":       date,
                 "Time":       time_,
                 "Home":       home,
                 "Away":       away,
+                "MinOdds":    round(min_odds, 3) if min_odds else "",
+                "Odds":       round(price, 2) if price else "",
+                "Edge":       f"{advice.edge:+.1%}" if advice and advice.edge is not None else "",
+                "EV":         f"{advice.ev_per_unit:+.3f}" if advice and advice.ev_per_unit is not None else "",
+                "Stake":      round(advice.stake, 2) if advice else "",
+                "StakeNote":  advice.reason if advice else "",
                 "Hist_Acc":   f"{hist_acc:.1%}",
                 "Hist_ROI":   f"{hist_roi:+.1f}%",
                 "Hist_n":     hist_preds,
                 "_score_raw": score,
-            })
+            }
+            rows.append(row)
 
     if fallback_skipped:
         print(f"[GUARD] Skipped {fallback_skipped} fixture(s) with no-data fallback predictions")
@@ -268,12 +337,35 @@ def generate_best_bets(
     print(f"[OK] Saved HTML -> {html_path}")
 
     # --- Print top 30 ---
-    print(f"\n{'Rk':>3}  {'Score':>6}  {'Conf':>6}  {'Hist%':>6}  {'ROI':>7}  {'n':>5}  {'Market':<22}  {'Bet':<6}  {'League':<6}  {'Date':<11}  Match")
-    print("-" * 130)
+    print(f"\n{'Rk':>3}  {'Score':>6}  {'Conf':>6}  {'MinOdd':>6}  {'Odds':>6}  {'Edge':>6}  {'Stake':>7}  "
+          f"{'Hist%':>6}  {'ROI':>7}  {'n':>5}  {'Market':<20}  {'Bet':<6}  {'League':<6}  {'Date':<11}  Match")
+    print("-" * 165)
     for rank, row in df.head(30).iterrows():
-        print(f"{rank:>3}  {row['Score']:>6}  {row['Confidence']:>6}  {row['Hist_Acc']:>6}  "
-              f"{row['Hist_ROI']:>7}  {row['Hist_n']:>5}  {row['Market']:<22}  {row['Bet']:<6}  "
-              f"{row['League']:<6}  {row['Date']:<11}  {row['Home']} v {row['Away']}")
+        print(f"{rank:>3}  {row['Score']:>6}  {row['Confidence']:>6}  {str(row['MinOdds']):>6}  "
+              f"{str(row['Odds']):>6}  {str(row['Edge']):>6}  {str(row['Stake']):>7}  "
+              f"{row['Hist_Acc']:>6}  {row['Hist_ROI']:>7}  {row['Hist_n']:>5}  {row['Market']:<20}  "
+              f"{row['Bet']:<6}  {row['League']:<6}  {row['Date']:<11}  {row['Home']} v {row['Away']}")
+
+    # --- Staking summary ---
+    if bank > 0:
+        stakes = pd.to_numeric(df["Stake"], errors="coerce").fillna(0.0)
+        backed = df[stakes > 0]
+        total = float(stakes.sum())
+        print(f"\n{'='*60}")
+        print(f"STAKING SUMMARY ({kelly:g}x Kelly on £{bank:,.2f} bank)")
+        print(f"{'='*60}")
+        print(f"  Picks with a positive-edge price : {len(backed)} / {len(df)}")
+        print(f"  Total staked                     : £{total:,.2f} ({total/bank:.1%} of bank)")
+        if len(backed):
+            print(f"  Largest single stake             : £{stakes.max():,.2f}")
+            print(f"  Median stake                     : £{stakes[stakes > 0].median():,.2f}")
+        no_price = (df["Odds"].astype(str) == "").sum()
+        if no_price:
+            print(f"  No Betfair price available       : {no_price} (fetch with betfair/betfair_odds.py)")
+        skipped_reasons = df.loc[stakes == 0, "StakeNote"].value_counts()
+        for reason, n in skipped_reasons.items():
+            if reason and reason != "ok":
+                print(f"  Not staked — {reason:<28}: {n}")
 
     return df
 
@@ -281,6 +373,8 @@ def generate_best_bets(
 def _write_html(df: pd.DataFrame, path: Path):
     rows_html = ""
     for rank, row in df.iterrows():
+        stake_val = row.get("Stake", "")
+        stake_cell = f"<b>£{stake_val}</b>" if stake_val not in ("", 0, 0.0) else "—"
         rows_html += (
             f"<tr><td>{rank}</td>"
             f"<td>{row['Score']}</td>"
@@ -291,6 +385,10 @@ def _write_html(df: pd.DataFrame, path: Path):
             f"<td>{row['Date']}</td>"
             f"<td>{row['Home']}</td>"
             f"<td>{row['Away']}</td>"
+            f"<td>{row.get('MinOdds','')}</td>"
+            f"<td>{row.get('Odds','')}</td>"
+            f"<td>{row.get('Edge','')}</td>"
+            f"<td class='stake'>{stake_cell}</td>"
             f"<td>{row['Hist_Acc']}</td>"
             f"<td>{row['Hist_ROI']}</td>"
             f"<td>{row['Hist_n']}</td>"
@@ -311,18 +409,22 @@ def _write_html(df: pd.DataFrame, path: Path):
   tr:hover {{ background: #1e1e2e; }}
   .score-high {{ color: #4caf50; font-weight: bold; }}
   .score-med  {{ color: #ff9800; }}
+  .stake {{ color: #4caf50; }}
   caption {{ caption-side: top; text-align: left; color: #888; margin-bottom: 8px; font-size: 12px; }}
 </style>
 </head>
 <body>
 <h1>Best Bets — Ranked by Score</h1>
 <p style="color:#aaa">Score = Confidence × Historical Accuracy × (1 + Historical ROI). All markets and leagues unified.</p>
+<p style="color:#aaa">Min Odds = break-even price for the model's probability (after commission). Stake = half-Kelly
+recommendation against the Betfair back price; blank means no price was available or the price offered no edge.</p>
 <table>
 <caption>{len(df)} bets shown, ranked highest score first</caption>
 <thead>
 <tr>
   <th>#</th><th>Score</th><th>Confidence</th><th>Market</th><th>Bet</th>
   <th>League</th><th>Date</th><th>Home</th><th>Away</th>
+  <th>Min Odds</th><th>Odds</th><th>Edge</th><th>Stake</th>
   <th>Hist Acc</th><th>Hist ROI</th><th>Hist n</th>
 </tr>
 </thead>
@@ -346,7 +448,31 @@ if __name__ == "__main__":
     parser.add_argument("--min-games", type=float, default=4.0,
                         help="Skip cards/corners bets where either team has played fewer than this "
                              "many games this season (season cold-start guard)")
+
+    stake_group = parser.add_argument_group("stake sizing (picks only — nothing is placed)")
+    stake_group.add_argument("--bank", type=float, default=0.0,
+                             help="Bankroll for Kelly sizing. 0 (default) = no stakes, show break-even odds only")
+    stake_group.add_argument("--kelly", type=float, default=DEFAULT_KELLY,
+                             help=f"Kelly fraction (default {DEFAULT_KELLY} = half Kelly)")
+    stake_group.add_argument("--commission", type=float, default=DEFAULT_COMMISSION,
+                             help=f"Exchange commission on net winnings (default {DEFAULT_COMMISSION})")
+    stake_group.add_argument("--min-edge", type=float, default=DEFAULT_MIN_EDGE,
+                             help=f"Minimum model-vs-market edge to stake (default {DEFAULT_MIN_EDGE})")
+    stake_group.add_argument("--max-fraction", type=float, default=DEFAULT_MAX_FRACTION,
+                             help=f"Cap any single stake at this fraction of bank (default {DEFAULT_MAX_FRACTION})")
+    stake_group.add_argument("--max-stake", type=float, default=None,
+                             help="Absolute cap on a single stake")
+    stake_group.add_argument("--min-stake", type=float, default=DEFAULT_MIN_STAKE,
+                             help=f"Exchange minimum stake (default {DEFAULT_MIN_STAKE})")
+    stake_group.add_argument("--prob-shrink", type=float, default=0.0,
+                             help="Shrink model probability toward market implied before sizing "
+                                  "(0 = trust model, 0.3 = a defensive hedge against overconfidence)")
+    stake_group.add_argument("--odds-file", type=str, default=None,
+                             help="Betfair price CSV (default: betfair_odds.csv in the same dated folder)")
     args = parser.parse_args()
+
+    if not (0 < args.kelly <= 1):
+        parser.error("--kelly must be in (0, 1]; >1 is super-Kelly and is not supported")
 
     generate_best_bets(
         top_n=args.top,
@@ -355,4 +481,13 @@ if __name__ == "__main__":
         min_hist_accuracy=args.min_hist_accuracy,
         max_rd=args.max_rd,
         min_games=args.min_games,
+        bank=args.bank,
+        kelly=args.kelly,
+        commission=args.commission,
+        min_edge=args.min_edge,
+        max_fraction=args.max_fraction,
+        max_stake=args.max_stake,
+        min_stake=args.min_stake,
+        prob_shrink=args.prob_shrink,
+        odds_file=args.odds_file,
     )

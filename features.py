@@ -151,6 +151,15 @@ def _elo_by_league(df: pd.DataFrame, cfg: EloConfig) -> pd.DataFrame:
 # Rolling team form & stats (enhanced)
 # -----------------------------
 
+# Player-derived per-match stats (see player_impact.PLAYER_ONLY_FEATURES).
+# Kept as a module-level list so the side-mapping, long-format column list and
+# rolling/EWM loops below all stay in step automatically.
+try:
+    from player_impact import PLAYER_ONLY_FEATURES as _PLAYER_FEATS
+except Exception:
+    _PLAYER_FEATS = []
+
+
 def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
     """Create unified columns for home/away perspective"""
     out = df.copy()
@@ -172,6 +181,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["HY"]
         out["CardsR"] = out["HR"]
         out["Fouls"] = out.get("Home_Fouls", np.nan)
+        for _pf in _PLAYER_FEATS:
+            out[_pf] = out.get(f"Home_{_pf}", np.nan)
 
         # Advanced stats (from API-Football)
         out = _ensure_cols(out, ["Home_xG", "Home_Possession", "Home_Shots_Inside_Box",
@@ -198,6 +209,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["AY"]
         out["CardsR"] = out["AR"]
         out["Fouls"] = out.get("Away_Fouls", np.nan)
+        for _pf in _PLAYER_FEATS:
+            out[_pf] = out.get(f"Away_{_pf}", np.nan)
 
         out = _ensure_cols(out, ["Away_xG", "Away_Possession", "Away_Shots_Inside_Box",
                                   "Away_Big_Chances", "Away_Pass_Accuracy"])
@@ -215,7 +228,7 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
     cols = ["League","Date","Team","Opp","Side","GoalsFor","GoalsAgainst",
             "Win","Draw","Loss","Shots","ShotsT","Corners","CardsY","CardsR","Fouls",
             "CleanSheet","FailedToScore","BTTS",
-            "xG","Possession","ShotsInBox","BigChances","PassAcc"]
+            "xG","Possession","ShotsInBox","BigChances","PassAcc"] + _PLAYER_FEATS
 
     return out[[c for c in cols if c in out.columns]]
 
@@ -250,7 +263,7 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         team_df[f"BTTS_rate{w}"] = rolled["BTTS"].mean()
 
         # Advanced stats (if available)
-        for col in ["xG", "Possession", "ShotsInBox", "BigChances", "PassAcc"]:
+        for col in ["xG", "Possession", "ShotsInBox", "BigChances", "PassAcc"] + _PLAYER_FEATS:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
     
@@ -264,7 +277,7 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         team_df[f"CleanSheet_rate_{tag}"] = ew["CleanSheet"].mean()
         team_df[f"FTS_rate_{tag}"]        = ew["FailedToScore"].mean()
         team_df[f"BTTS_rate_{tag}"]       = ew["BTTS"].mean()
-        for col in ["Shots", "ShotsT", "Corners", "CardsY", "CardsR", "Fouls", "xG"]:
+        for col in ["Shots", "ShotsT", "Corners", "CardsY", "CardsR", "Fouls", "xG"] + _PLAYER_FEATS:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_{tag}"] = ew[col].mean()
 
@@ -1307,38 +1320,71 @@ def build_features(force: bool = False) -> Path:
     print("1c. Adding previous-season standings features...")
     df = _add_prev_season_standings(df)
 
+    # 1d. Player-derived team stats (rating, key passes, tackles, duels...)
+    # These are the fields match_stats does NOT carry, so they add signal
+    # rather than duplicating team aggregates. Merged as raw current-match
+    # values; the rolling machinery below turns them into pre-match features
+    # and feature_rules excludes the raw columns.
+    print("1d. Adding player-derived team stats...")
+    if 'fixture_id' in df.columns:
+        try:
+            from player_impact import build_team_match_features, PLAYER_ONLY_FEATURES
+            pl = build_team_match_features()
+            if not pl.empty:
+                n_before = len(df)
+                df = df.merge(pl, on='fixture_id', how='left')
+                if len(df) != n_before:
+                    raise RuntimeError(
+                        f"player feature merge changed row count "
+                        f"({n_before} -> {len(df)})")
+                df['Has_PlayerStats'] = df['Has_PlayerStats'].fillna(0.0)
+                cov = df['Has_PlayerStats'].mean()
+                print(f"   Added {2*len(PLAYER_ONLY_FEATURES)} player-derived cols "
+                      f"({cov:.1%} fixture coverage)")
+            else:
+                print("   [PLAYER] No player stats yet — skipping")
+        except Exception as e:
+            print(f"   [PLAYER] Skipping player-derived stats: {e}")
+    else:
+        print("   [PLAYER] No fixture_id column — skipping")
+
     # 2. Rolling form/stats
     print("2. Calculating rolling form...")
     if USE_ROLLING_FORM:
-        # Store columns that get dropped by _pivot_back
-        preserve_cols = [c for c in df.columns
-                         if c.startswith('Elo_')
-                         or c.startswith(('Home_Glicko', 'Away_Glicko', 'Glicko_'))]
-        # 'Season' is already preserved by _pivot_back's base_cols — exclude it here to avoid
-        # Season_x/Season_y collision when merging preserve_data back.
-        meta_cols = [c for c in ['referee', 'venue_name', 'fixture_id'] if c in df.columns]
-        # Table position (step 1b) and prev-season standings (step 1c) get dropped by _pivot_back
-        # (only base_cols survive the pivot); preserve them here so they survive.
-        extra_pfx = ('Home_SeasonPts', 'Away_SeasonPts', 'Home_SeasonGF', 'Away_SeasonGF',
-                     'Home_SeasonGA', 'Away_SeasonGA', 'Home_SeasonGD', 'Away_SeasonGD',
-                     'Home_SeasonGames', 'Away_SeasonGames', 'Home_PPG_Season', 'Away_PPG_Season',
-                     'Home_TablePos', 'Away_TablePos', 'IsTopSix_Home', 'IsTopSix_Away',
-                     'IsBottom3_Home', 'IsBottom3_Away', 'TablePosDiff', 'SeasonPtsDiff',
-                     'Home_PrevSeasonRank', 'Away_PrevSeasonRank', 'Home_PrevSeasonPts',
-                     'Away_PrevSeasonPts', 'Home_PrevSeasonGD', 'Away_PrevSeasonGD',
-                     'Home_PrevSeasonRankPct', 'Away_PrevSeasonRankPct',
-                     'PrevSeasonRankDiff', 'PrevSeasonPtsDiff', 'PrevSeasonGDDiff')
-        extra_cols = [c for c in df.columns if c.startswith(extra_pfx)]
-        preserve_cols += meta_cols + extra_cols
-        if preserve_cols:
-            preserve_data = df[['League', 'Date', 'HomeTeam', 'AwayTeam'] + preserve_cols].copy()
+        # _pivot_back keeps only its own base_cols, so EVERY column built in
+        # steps 1/1a/1b/1c would otherwise be silently dropped. Preserving by
+        # an explicit prefix list has now failed three times (the 31-feature
+        # loss of 2026-07-13, then Glicko, then BothTopSix/RelegationClash/
+        # Home_NumTeams) because each new feature has to remember to add
+        # itself. Snapshot the column set instead and re-attach whatever the
+        # pivot drops — new features are then preserved automatically.
+        _keys = ['League', 'Date', 'HomeTeam', 'AwayTeam']
+        _pre_pivot_cols = list(df.columns)
+        preserve_data = df[_pre_pivot_cols].copy()
 
         side_feats = _build_side_features(df)
         df = _pivot_back(df, side_feats)
 
+        # Anything present before the pivot but absent after it, minus the
+        # join keys. 'Season' survives the pivot via base_cols, so excluding
+        # it here avoids the Season_x/Season_y collision.
+        preserve_cols = [c for c in _pre_pivot_cols
+                         if c not in df.columns and c not in _keys]
+        if preserve_cols:
+            preserve_data = preserve_data[_keys + preserve_cols]
+            print(f"   Re-attaching {len(preserve_cols)} pre-pivot column(s) dropped by the pivot")
+        else:
+            preserve_data = None
+
         # Re-merge preserved columns
         if preserve_cols:
-            df = df.merge(preserve_data, on=['League', 'Date', 'HomeTeam', 'AwayTeam'], how='left')
+            _n = len(df)
+            df = df.merge(preserve_data.drop_duplicates(subset=_keys),
+                          on=_keys, how='left')
+            if len(df) != _n:
+                raise RuntimeError(
+                    f"Preserve-merge changed row count ({_n} -> {len(df)}) — "
+                    "duplicate fixture keys in the feature frame")
         # _pivot_back already keeps Season; if a collision created Season_x/Season_y, clean it up
         if 'Season_x' in df.columns:
             df = df.rename(columns={'Season_x': 'Season'})

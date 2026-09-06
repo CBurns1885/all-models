@@ -2,14 +2,203 @@
 
 ---
 
-## ⚠️ Betfair — NOT going live yet (user directive, 2026-07-28)
-Betfair execution (`betfair/betfair_ltd.py`, `betfair/betfair_placer.py`) stays **off** until the user has
-enough capital set aside to fund it — this is a deliberate business decision, not a technical blocker.
+## ⚠️ Betfair — execution still OFF; prices are READ-ONLY (updated 2026-09-06)
+Betfair **execution** (`betfair/betfair_ltd.py`, `betfair/betfair_placer.py`) stays **off** until the user has
+enough capital set aside to fund it — a deliberate business decision, not a technical blocker.
 Do not wire it up, dry-run it as a precursor to going live, or suggest going live with it until the user
 explicitly raises it again. Current focus is picks-only: maximise honest accuracy at high confidence
 thresholds, with **BTTS and 1X2 called out as priority markets** (the user's rationale: these traditionally
 carry higher odds than the more heavily-bet goals/corners markets, so a smaller number of high-confidence,
 well-calibrated picks there matters more than volume).
+
+**In scope since 2026-09-06 (user asked for Kelly stakes per row):** `betfair/betfair_odds.py` fetches
+**prices only**, defaults to the DELAYED app key (which cannot place bets), and contains no order-placement
+code. Stakes are printed as recommendations in `best_bets.csv`/`.html`. Sizing the bet is not placing it —
+the execution scripts remain untouched and unused.
+
+---
+
+## ⚡ SESSION STATE (2026-09-06) — review + Kelly staking
+
+### Added: half-Kelly stake per pick
+- **`staking.py`** — exchange Kelly maths. Net odds `b=(o-1)(1-commission)`, `f*=(p·b-(1-p))/b`;
+  half Kelly by default. Guards: min edge 2%, **stake capped at 5% of bank**, max/min stake,
+  optional `prob_shrink` toward market implied. `break_even_odds(p)` = price to beat.
+- **`betfair/betfair_odds.py`** — READ-ONLY price snapshot for the current `best_bets.csv`
+  → `betfair_odds.csv` (best back + lay). Delayed key by default; no placement code.
+- **`tools/best_bets.py`** — new columns `MinOdds` (always), `Odds`/`Edge`/`EV`/`Stake`/`StakeNote`
+  (when a price snapshot exists), plus a staking summary. New flags: `--bank` (0 = no stakes,
+  just break-even odds), `--kelly` (default 0.5), `--commission`, `--min-edge`, `--max-fraction`,
+  `--max-stake`, `--min-stake`, `--prob-shrink`, `--odds-file`.
+- Workflow: `py tools/best_bets.py` → `py betfair/betfair_odds.py` → `py tools/best_bets.py --bank 500`.
+- ⚠️ Kelly assumes the probability is *honest*. Until the calibration report is clean per market,
+  prefer `--prob-shrink 0.2–0.4` and keep the 5% cap. Overconfident p is the one input that makes
+  Kelly dangerous, and cards/corners are known to still be overconfident pre-gate.
+
+### Bugs found and fixed this session
+1. **State features were averaged instead of read (`predict.py:_build_future_frame`)** — HIGH.
+   Every numeric column went through the 5-match time-weighted mean, including point-in-time
+   *state*: `Elo_*`, `Home_Glicko*`, `Home_TablePos`, `Home_Season*`. Two consequences:
+   (a) **the new cards/corners cold-start gate never fired at a season boundary** — a team in match 2
+   of a new season had its last-5 window filled with *last* season's rows, so `Home_SeasonGames`
+   read ~25 instead of 2; mid-season it read ~4 when the true count was 7, so the gate was also
+   too strict; (b) **train/serve skew** — models are trained on exact pre-match Elo/Glicko/table
+   position but were served a lagged, smoothed version. Fixed: columns split into form (still
+   time-weighted averaged) vs state (**latest** pre-fixture value).
+2. **Season games now counted exactly** (`_add_season_games`) rather than inherited from the stored
+   counter, which is a *pre-match* value (always one behind) and stale across a season boundary.
+   Season start is league-aware (NOR/SWE calendar-year).
+3. **GPU flag had no actual fallback** — `USE_GPU=1` passed `device="gpu"`/`task_type="GPU"` blindly.
+   The standard pip lightgbm wheel has no GPU support and raises at fit time; the fold loop catches
+   base-model failures and substitutes **uniform probabilities**, so an unusable GPU config would
+   have silently dropped LGB/CatBoost from the ensemble on every fold while still producing
+   confident output. New **`gpu_utils.py`** probes each library once with a tiny fit and only passes
+   GPU params if it actually works.
+4. **NB probabilities were being scaled by the DC-tuned temperature** — `dc_temperature` (tuned to
+   1.25 against Dixon-Coles goals output) was applied to negative-binomial cards/corners output once
+   NB became the second blend signal. Split into `nb_temperature` (default 1.0 = no scaling).
+   Currently inert because alpha≈1.0 for these markets, but it would have bitten on re-tune.
+5. **Duplicate-fixture guard** — DC/NB prices and Glicko/season-games are assigned *positionally*
+   after a merge; a duplicated fixture key would multiply rows and silently misalign every one of
+   them. Now de-duplicated on input and the DC merge asserts the row count is unchanged.
+
+### Reviewed and found correct
+NB blending wiring (`nb_predict.py`, `blending.py` alpha=1.0 passthrough fix), the season cold-start
+gate logic itself, fetch resilience/unavailable tables, and the new DB indexes.
+
+---
+
+## ⚡ INJURIES / LINEUPS / PLAYER DATA — audit + what changed (2026-09-06)
+
+### What we had vs what we used (before this session)
+| Data | Held? | Used? |
+|------|-------|-------|
+| `player_fixture_stats` — per-player goals, assists, shots, minutes, rating, cards, fouls | ✅ ~250k+ rows | ❌ **zero readers** — days of API quota, entirely unread |
+| Injuries (player_id, name, type, reason) | Fetched weekly | ❌ reduced to a **count**; `injuries` table **never written to**, so `features.py`'s `Home_InjuryCount`/`InjuryDiff` never even got created |
+| Lineups `startXI` (player ids, positions) | Fetched weekly | ❌ **discarded** — only the formation string kept, and even that is unused |
+| Injury effect on predictions | — | flat **±2% per player**, so a fringe defender and a 20-goal striker counted the same |
+
+Answer to "can we see if a top scorer is in or out": the data was all there, none of it was connected.
+
+### What now exists
+- **`player_impact.py`** — turns `player_fixture_stats` into goal-involvement share per player
+  (`goals + 0.5*assists`, normalised over the team's last 10 matches), then `missing_attack_share`
+  = the fraction of that output which is unavailable. Bounded 0–1 and directly interpretable.
+  Matches injuries to players on **player_id first**, then normalised name, then surname — with
+  character folding (Ø→o, æ→ae, ß→ss …) because the injuries feed says "M. Odegaard" while player
+  stats say "Martin Ødegaard", and NOR/SWE/DEN are full of these.
+  `availability_report()` returns `missing_share`, `top_out`, `top_scorers`, `key_player_out` (≥20%).
+- **`api_client.py`** — now **persists** injuries (table existed, was never written) and adds a new
+  **`lineups`** table storing startXI + subs with player ids. Keeps `home_injury_ids`/`away_injury_ids`
+  in the fixtures CSV. Indexes on both.
+- **`predict.py`** — `_add_missing_attack_share()` annotates fixtures with
+  `Home/Away_MissingAttackShare`, `Home/Away_KeyPlayerOut`, `Home/Away_KeyOutNames`, carried through
+  to `weekly_bets_full.csv`. `apply_injury_adjustments` now scales by missing share
+  (`injury_share_impact`, default 0.15) instead of headcount, falling back to the old ±2% only when
+  a team has no player data.
+- **`picks_page.py`** — **KEY OUT** badge on any fixture where a ≥20% contributor is unavailable,
+  hover shows who and their share. Legend entry added.
+
+### ⚠️ picks_page was showing uncalibrated numbers (fixed)
+`_pct()` read raw `P_*` columns, but `league_thresholds.json`, the accuracy tables and `best_bets`
+are all derived from `BLEND_*`. The page you actually read was therefore showing different
+probabilities from the ones the thresholds were validated against. `_pct()` now prefers `BLEND_*`
+and falls back to `P_*` for markets that have no blend (cards/corners, where alpha is 1.0 anyway).
+
+### Follow-up same session — the chain was broken, now closed
+The first pass would have **silently no-opped**: `download_upcoming_fixtures()` never wrote
+`home_team_id`/`away_team_id`, which is the join key from injuries to player stats, so
+`_add_missing_attack_share` would have hit its guard and printed "Fixtures lack team ids" every run.
+Fixed by emitting team ids, plus a **name→team_id fallback** resolved from the `fixtures` table for
+manually-supplied or CSV-fallback fixture files.
+
+Also added **availability weighting by injury type**: API-Football reports `player.type` as
+"Missing Fixture" (confirmed out) or "Questionable"/"Doubtful" (often starts). Treating both as
+definitely-out overstated the adjustment; doubts now count half. Types flow through as
+`home_injury_types`/`away_injury_types`. Duplicate id+name records for the same player no longer
+double-count.
+
+Verified end to end on synthetic data: striker with 67% of goal involvement ruled out →
+`Home_MissingAttackShare` 0.667, `KeyPlayerOut` True, `KeyOutNames` "Bukayo Saka (67%)", home win
+probability and Over 2.5 both move down. Doubtful player → exactly half weight.
+
+### ⚠️ The magnitude is a judgement call, the ranking is not
+*Which* players matter is now derived from data (goal involvement share). *How much* a given
+absence should move the price is `injury_share_impact` (default 0.15, capped at ±0.10 on 1X2) —
+an untuned constant, contrary to the usual no-hardcoded-values rule. It cannot be tuned yet:
+auto_tune scores against the backtest cache, and historical injury data does not exist, so there is
+nothing to fit it against. It is exposed in `TUNING_OVERRIDES` so it can be changed without a code
+edit, and becomes tunable once injuries accumulate.
+
+### 🔍 FULL DATA/FEATURE USAGE AUDIT (2026-09-06) — everything checked against a consumer
+
+| Source | Status |
+|--------|--------|
+| `fixtures`, `match_stats`, `fixture_odds` | ✅ used |
+| `player_fixture_stats` | ✅ now used (goals/assists) — **but the table was never CREATEd by any code**; it only existed because it had been made by hand. First run on a fresh DB crashed on INSERT. Now created + indexed in `fetch_player_stats.py`. |
+| `injuries` | ✅ now written + read |
+| `lineups` | ✅ now written **and read** — `load_confirmed_lineup()`; a confirmed XI overrides the injury list entirely (it captures rotation/suspension/late calls injuries miss). Falls back to injuries when no XI is published. |
+| `standings` | ⚠️ **partly used** — `features.py` reads it for *previous*-season standings only. `get_standings_from_db()` (live rank, PPG, and the `LeagueForm` "WWDLW" string) has **0 callers**. |
+| `get_injuries_from_db()`, `get_odds_coverage()` | ⚠️ 0 callers (superseded / helper) |
+
+**Feature columns silently dropped — third recurrence of the same bug.** `_pivot_back` keeps only its
+own `base_cols`, so everything built in steps 1/1a/1b/1c must be listed in a preserve prefix list.
+That list had again fallen behind: **`BothTopSix`, `RelegationClash`, `Home_NumTeams`** were computed
+and thrown away. Worse, `predict.py` *recomputes* BothTopSix/RelegationClash at serve time, so the
+model was being handed two columns it had never trained on. Fixed **structurally**: the column set is
+snapshotted before the pivot and anything the pivot drops is re-attached automatically, so a new
+feature can no longer be lost by forgetting to register it. Row count is asserted across the merge.
+
+That fix newly preserves `league_type` (a raw string) into the parquet, which `predict.py` cannot
+produce at serve time — the fitted preprocessor would then demand a missing column and
+`predict_proba` would skip **every** model with "preprocessor incompatible". Added to
+`feature_rules` exclusions along with the prediction-time-only availability/injury annotation
+columns.
+
+### ✅ Player-only stats now WIRED as features (2026-09-06)
+`player_impact.build_team_match_features()` aggregates the fields `match_stats` does **not** carry —
+aggregating shots/cards/possession/xG again would just duplicate what already exists. The seven
+player-only signals, per team per fixture:
+
+| Feature | Why it adds something |
+|---------|----------------------|
+| `PlayerRating` (minutes-weighted mean) | squad quality/performance — no team-level equivalent |
+| `PlayerRatingTop` | best individual performance on the day |
+| `KeyPasses` | chance creation (match_stats has total passes + accuracy, not key passes) |
+| `Tackles`, `Interceptions` | defensive activity |
+| `DuelWinPct` | physical dominance |
+| `DribbleSuccess` | carrying threat |
+
+Merged on `fixture_id` at new **step 1d**, then fed through the *existing* rolling machinery, so each
+gets `_ma3/5/10/20` + `_ewm3/_ewm` exactly like shots and cards. `Has_PlayerStats` marks coverage.
+
+⚠️ **The raw columns are excluded in `feature_rules`** (`SIDE_RAW_MATCH_STATS`) — `Home_PlayerRating`
+is *this* match's rating, so using it directly would leak the result precisely the way
+`Home_Corners` did. Only the rolling versions are features. Verified: match 4's rating 6.60 vs its
+`PlayerRating_ma5` 6.20 (prior matches only), first match NaN.
+
+### ⛔ Live `standings` must NOT be wired — it would leak
+`standings` is **one row per (league, season, team)** with only `fetched_at` — a single snapshot, no
+as-of date. Joining it to in-season matches puts the end-of-season table into October fixtures.
+`get_standings_from_db()` having 0 callers is therefore *correct*, not an oversight. The leak-free
+equivalent already exists: `_add_table_position_features` derives rank/points/PPG as-of each date
+from results. `features.py` uses the table only for the **previous** season, which is safe because
+that season is complete before the current one starts. The `form` string ("WWDLW") is the same
+snapshot and equally unusable.
+
+**Still unused:** per-player `yellow_cards`/`red_cards`/`fouls_committed`/`shots_on_target` — these
+*do* have team-level equivalents in `match_stats`, so the only extra signal is concentration (does
+one player carry the cards?). Worth revisiting for the cards markets once coverage improves;
+`player_fixture_stats` was ~24% of fixtures at last count.
+
+### Not yet possible / next
+- **Injury history does not exist** (table was never populated), so availability cannot be a *trained*
+  feature yet — it is a prediction-time adjustment and a picks-page signal. Backfilling would cost
+  ~1 API call per fixture (~34k ≈ 5 days of quota) and API-Football may not serve historical injuries
+  reliably (same dead end as historical odds). From now on it accumulates automatically each weekly run.
+- Once a season of injuries/lineups has built up: add `MissingAttackShare` to `features.py` and retrain.
+- `player_fixture_stats` also supports, unused so far: per-player cards/fouls (a much sharper cards
+  model than team rolling averages) and minutes-weighted lineup strength once lineups accumulate.
 
 ---
 
@@ -563,6 +752,13 @@ py -c "from blending import learn_blend_weights; learn_blend_weights()"
 
 # Backtest (last 4 weeks, 70% confidence floor)
 py market_backtest.py --weeks 4 --min-confidence 0.70
+
+# Picks + half-Kelly stakes (three steps; nothing is placed)
+py tools/best_bets.py                      # 1. picks, with break-even MinOdds
+py betfair/betfair_odds.py                 # 2. READ-ONLY Betfair price snapshot
+py tools/best_bets.py --bank 500           # 3. re-run with stakes attached
+# Defensive variant while calibration is still being established:
+py tools/best_bets.py --bank 500 --prob-shrink 0.3 --max-fraction 0.03
 
 # Autotune (overnight — delete cache first if models were retrained)
 del outputs\tuning_preds_cache.parquet

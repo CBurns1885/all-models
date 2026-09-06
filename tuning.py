@@ -11,6 +11,15 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
 warnings.filterwarnings("ignore")
 
+
+def _gpu(lib: str) -> dict:
+    """GPU kwargs for a boosting library, only if a probe fit succeeded."""
+    try:
+        from gpu_utils import gpu_params
+        return gpu_params(lib)
+    except Exception:
+        return {}
+
 try:
     from config import USE_GPU
 except ImportError:
@@ -136,7 +145,7 @@ def objective_factory(alg: str, cvd: CVData):
                 # FIX: Ensure consistent classes
                 enable_categorical=False,
                 use_label_encoder=False,
-                **({"device": "cuda"} if USE_GPU else {})
+                **_gpu("xgb")
             )
         elif alg == "lgb" and _HAS_LGB:
             return lgb.LGBMClassifier(
@@ -148,7 +157,7 @@ def objective_factory(alg: str, cvd: CVData):
                 min_child_samples=trial.suggest_int("min_child_samples", 10, 50),
                 objective="multiclass" if K>2 else "binary",
                 random_state=42, n_jobs=-1, verbose=-1,
-                **({"device": "gpu"} if USE_GPU else {})
+                **_gpu("lgb")
             )
         elif alg == "cat" and _HAS_CAT:
             return CatBoostClassifier(
@@ -159,7 +168,7 @@ def objective_factory(alg: str, cvd: CVData):
                 random_state=42,
                 loss_function="MultiClass" if K>2 else "Logloss",
                 verbose=False,
-                **({"task_type": "GPU", "devices": "0"} if USE_GPU else {})
+                **_gpu("cat")
             )
         elif alg == "coral":
             from ordinal import CORALOrdinal

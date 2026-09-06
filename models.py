@@ -547,14 +547,22 @@ class TrainedTarget:
     feature_names: List[str]
 
 
+# GPU params are probed at first use (gpu_utils) rather than passed on the
+# strength of the USE_GPU flag alone: a wheel without GPU support raises at
+# fit time, and the fold loop below turns a base-model failure into uniform
+# probabilities, so an unusable GPU config would silently drop that model
+# from the ensemble instead of failing loudly.
 def _xgb_gpu_params():
-    return {"device": "cuda"} if USE_GPU else {}
+    from gpu_utils import gpu_params
+    return gpu_params("xgb")
 
 def _lgb_gpu_params():
-    return {"device": "gpu"} if USE_GPU else {}
+    from gpu_utils import gpu_params
+    return gpu_params("lgb")
 
 def _cat_gpu_params():
-    return {"task_type": "GPU", "devices": "0"} if USE_GPU else {}
+    from gpu_utils import gpu_params
+    return gpu_params("cat")
 
 
 # --------------------------------------------------------------------------------------
