@@ -1240,22 +1240,50 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
     df = df.copy()
 
     # Maximum injury impact (per player out)
+    # Fallback weights, used only when no player-level data is available.
+    # A headcount treats a fringe defender and a 20-goal striker identically,
+    # so where player_fixture_stats can tell them apart we scale by the share
+    # of recent goal involvement that is actually missing instead (below).
     INJURY_IMPACT_PER_PLAYER = 0.02  # 2% adjustment per injury
     MAX_INJURY_IMPACT = 0.10  # Maximum 10% total adjustment
+
+    # Importance-weighted impact: missing_share is 0-1, so this converts
+    # "60% of the team's goal threat is out" into a 0.6 * scale adjustment.
+    IMPACT_PER_UNIT_SHARE = float(TUNING_OVERRIDES.get('injury_share_impact', 0.15))
+    share_cols_present = ('Home_MissingAttackShare' in fixtures_df.columns
+                          and 'Away_MissingAttackShare' in fixtures_df.columns)
+    if share_cols_present:
+        print("[INJURY] Using importance-weighted impact (share of goal involvement missing)")
 
     for idx in range(len(df)):
         if idx >= len(fixtures_df):
             break
 
-        home_inj = fixtures_df.iloc[idx].get('home_injuries', 0)
-        away_inj = fixtures_df.iloc[idx].get('away_injuries', 0)
+        fx_row = fixtures_df.iloc[idx]
+        home_inj = fx_row.get('home_injuries', 0)
+        away_inj = fx_row.get('away_injuries', 0)
 
-        if home_inj == 0 and away_inj == 0:
+        home_share = away_share = 0.0
+        if share_cols_present:
+            _hs = fx_row.get('Home_MissingAttackShare', 0.0)
+            _as = fx_row.get('Away_MissingAttackShare', 0.0)
+            home_share = float(_hs) if _hs == _hs else 0.0
+            away_share = float(_as) if _as == _as else 0.0
+
+        if home_inj == 0 and away_inj == 0 and home_share == 0.0 and away_share == 0.0:
             continue
 
-        # Calculate injury impact (capped)
-        home_impact = min(home_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
-        away_impact = min(away_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
+        # Prefer the importance-weighted signal; fall back to the headcount
+        # only for teams with no player-level data (missing_share is exactly
+        # 0.0 when player stats could not resolve the squad).
+        if home_share > 0:
+            home_impact = min(home_share * IMPACT_PER_UNIT_SHARE, MAX_INJURY_IMPACT)
+        else:
+            home_impact = min(home_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
+        if away_share > 0:
+            away_impact = min(away_share * IMPACT_PER_UNIT_SHARE, MAX_INJURY_IMPACT)
+        else:
+            away_impact = min(away_inj * INJURY_IMPACT_PER_PLAYER, MAX_INJURY_IMPACT)
 
         # Adjust 1X2 probabilities
         # More home injuries = reduce home win, increase away win
@@ -1280,11 +1308,16 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
                     df.at[idx, d_col] /= total
                     df.at[idx, a_col] /= total
 
-        # Adjust over/under based on total injuries (more injuries typically = fewer goals)
+        # Adjust over/under: missing attackers mean fewer expected goals.
+        # Scaled by the combined share of goal involvement that is absent
+        # where known, rather than by a headcount of any absent player.
+        total_share = home_share + away_share
         total_inj = home_inj + away_inj
-        if total_inj > 0:
-            goal_reduction = min(total_inj * 0.01, 0.05)  # Max 5% reduction in over probability
-
+        if total_share > 0:
+            goal_reduction = min(total_share * 0.05, 0.05)
+        else:
+            goal_reduction = min(total_inj * 0.01, 0.05)
+        if goal_reduction > 0:
             for line in ['0_5', '1_5', '2_5', '3_5', '4_5']:
                 for prefix in ['P_', 'BLEND_']:
                     o_col = f'{prefix}OU_{line}_O'
@@ -1296,6 +1329,13 @@ def apply_injury_adjustments(df: pd.DataFrame, fixtures_df: pd.DataFrame) -> pd.
 
     adjusted_count = len(fixtures_df[(fixtures_df['home_injuries'] > 0) | (fixtures_df['away_injuries'] > 0)])
     print(f"[INJURY] Adjusted {adjusted_count} fixtures based on injury data")
+    if share_cols_present:
+        _shares = pd.concat([
+            pd.to_numeric(fixtures_df['Home_MissingAttackShare'], errors='coerce'),
+            pd.to_numeric(fixtures_df['Away_MissingAttackShare'], errors='coerce'),
+        ]).fillna(0.0)
+        _key = int((_shares >= 0.20).sum())
+        print(f"[INJURY] Importance-weighted: {_key} team(s) missing >=20% of recent goal involvement")
 
     return df
 
@@ -2043,6 +2083,68 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
         secondary_out.write_text(html, encoding="utf-8")
         print(f"[OK] Wrote ULTIMATE HTML (copy) -> {secondary_out}")
 
+def _add_missing_attack_share(fx: pd.DataFrame) -> pd.DataFrame:
+    """Annotate fixtures with how much of each side's recent goal involvement
+    is unavailable, plus who is missing, using player_fixture_stats.
+
+    Adds Home/Away_MissingAttackShare (0-1), Home/Away_KeyPlayerOut (bool)
+    and Home/Away_KeyOutNames (display string). Degrades to no-op when player
+    stats or team ids are unavailable.
+    """
+    from player_impact import load_player_match_stats, availability_report
+
+    stats = load_player_match_stats()
+    if stats.empty:
+        print("[PLAYER] No player_fixture_stats yet — injury impact stays headcount-based")
+        return fx
+
+    id_cols = {"home_team_id", "away_team_id"}
+    if not id_cols.issubset(fx.columns):
+        print("[PLAYER] Fixtures lack team ids — cannot match players to teams")
+        return fx
+
+    def _ids(val):
+        if not val or str(val) in ("nan", "None"):
+            return []
+        return [int(x) for x in str(val).split(",") if x.strip().isdigit()]
+
+    def _names(val):
+        if not val or str(val) in ("nan", "None"):
+            return []
+        return [n.strip() for n in str(val).split(",") if n.strip()]
+
+    out = {c: [] for c in ("Home_MissingAttackShare", "Away_MissingAttackShare",
+                           "Home_KeyPlayerOut", "Away_KeyPlayerOut",
+                           "Home_KeyOutNames", "Away_KeyOutNames")}
+    for _, r in fx.iterrows():
+        for side, tid_col, id_col, name_col in (
+            ("Home", "home_team_id", "home_injury_ids", "home_injury_players"),
+            ("Away", "away_team_id", "away_injury_ids", "away_injury_players"),
+        ):
+            tid = r.get(tid_col)
+            if tid is None or tid != tid:
+                out[f"{side}_MissingAttackShare"].append(0.0)
+                out[f"{side}_KeyPlayerOut"].append(False)
+                out[f"{side}_KeyOutNames"].append("")
+                continue
+            rep = availability_report(
+                stats, int(tid), r["Date"],
+                out_player_ids=_ids(r.get(id_col)),
+                out_player_names=_names(r.get(name_col)),
+            )
+            out[f"{side}_MissingAttackShare"].append(rep["missing_share"])
+            out[f"{side}_KeyPlayerOut"].append(rep["key_player_out"])
+            out[f"{side}_KeyOutNames"].append(
+                ", ".join(f"{p['name']} ({p['share']:.0%})" for p in rep["top_out"]))
+
+    for col, vals in out.items():
+        fx[col] = vals
+
+    n_key = int(sum(fx["Home_KeyPlayerOut"]) + sum(fx["Away_KeyPlayerOut"]))
+    print(f"[PLAYER] Attacking availability computed — {n_key} team(s) missing a key contributor")
+    return fx
+
+
 def predict_week(fixtures_csv: Path) -> Path:
     """ULTIMATE prediction pipeline"""
 
@@ -2078,6 +2180,7 @@ def predict_week(fixtures_csv: Path) -> Path:
     if has_injury_data:
         total_injuries = fx['home_injuries'].sum() + fx['away_injuries'].sum()
         print(f"[LIVE] Injury data available: {total_injuries} total injuries across fixtures")
+        fx = _add_missing_attack_share(fx)
     else:
         print("[INFO] No injury data - run closer to match time for live data")
     
@@ -2123,6 +2226,18 @@ def predict_week(fixtures_csv: Path) -> Path:
     for _sg_col in ("Home_SeasonGames", "Away_SeasonGames"):
         if _sg_col in df_future.columns:
             df_out[_sg_col] = df_future[_sg_col].values[:len(df_out)]
+
+    # Attacking availability (who is out, and how much of the goal threat
+    # goes with them) — surfaced on the picks page and used by the injury
+    # adjustment. Merged on fixture keys since fx may be ordered differently.
+    _avail_cols = [c for c in ("Home_MissingAttackShare", "Away_MissingAttackShare",
+                               "Home_KeyPlayerOut", "Away_KeyPlayerOut",
+                               "Home_KeyOutNames", "Away_KeyOutNames")
+                   if c in fx.columns]
+    if _avail_cols:
+        df_out = df_out.merge(
+            fx[ID_COLS + _avail_cols].drop_duplicates(subset=ID_COLS),
+            on=ID_COLS, how="left")
     
     # Add DC predictions
     log_header("GENERATE DC PREDICTIONS")

@@ -68,6 +68,54 @@ gate logic itself, fetch resilience/unavailable tables, and the new DB indexes.
 
 ---
 
+## ⚡ INJURIES / LINEUPS / PLAYER DATA — audit + what changed (2026-09-06)
+
+### What we had vs what we used (before this session)
+| Data | Held? | Used? |
+|------|-------|-------|
+| `player_fixture_stats` — per-player goals, assists, shots, minutes, rating, cards, fouls | ✅ ~250k+ rows | ❌ **zero readers** — days of API quota, entirely unread |
+| Injuries (player_id, name, type, reason) | Fetched weekly | ❌ reduced to a **count**; `injuries` table **never written to**, so `features.py`'s `Home_InjuryCount`/`InjuryDiff` never even got created |
+| Lineups `startXI` (player ids, positions) | Fetched weekly | ❌ **discarded** — only the formation string kept, and even that is unused |
+| Injury effect on predictions | — | flat **±2% per player**, so a fringe defender and a 20-goal striker counted the same |
+
+Answer to "can we see if a top scorer is in or out": the data was all there, none of it was connected.
+
+### What now exists
+- **`player_impact.py`** — turns `player_fixture_stats` into goal-involvement share per player
+  (`goals + 0.5*assists`, normalised over the team's last 10 matches), then `missing_attack_share`
+  = the fraction of that output which is unavailable. Bounded 0–1 and directly interpretable.
+  Matches injuries to players on **player_id first**, then normalised name, then surname — with
+  character folding (Ø→o, æ→ae, ß→ss …) because the injuries feed says "M. Odegaard" while player
+  stats say "Martin Ødegaard", and NOR/SWE/DEN are full of these.
+  `availability_report()` returns `missing_share`, `top_out`, `top_scorers`, `key_player_out` (≥20%).
+- **`api_client.py`** — now **persists** injuries (table existed, was never written) and adds a new
+  **`lineups`** table storing startXI + subs with player ids. Keeps `home_injury_ids`/`away_injury_ids`
+  in the fixtures CSV. Indexes on both.
+- **`predict.py`** — `_add_missing_attack_share()` annotates fixtures with
+  `Home/Away_MissingAttackShare`, `Home/Away_KeyPlayerOut`, `Home/Away_KeyOutNames`, carried through
+  to `weekly_bets_full.csv`. `apply_injury_adjustments` now scales by missing share
+  (`injury_share_impact`, default 0.15) instead of headcount, falling back to the old ±2% only when
+  a team has no player data.
+- **`picks_page.py`** — **KEY OUT** badge on any fixture where a ≥20% contributor is unavailable,
+  hover shows who and their share. Legend entry added.
+
+### ⚠️ picks_page was showing uncalibrated numbers (fixed)
+`_pct()` read raw `P_*` columns, but `league_thresholds.json`, the accuracy tables and `best_bets`
+are all derived from `BLEND_*`. The page you actually read was therefore showing different
+probabilities from the ones the thresholds were validated against. `_pct()` now prefers `BLEND_*`
+and falls back to `P_*` for markets that have no blend (cards/corners, where alpha is 1.0 anyway).
+
+### Not yet possible / next
+- **Injury history does not exist** (table was never populated), so availability cannot be a *trained*
+  feature yet — it is a prediction-time adjustment and a picks-page signal. Backfilling would cost
+  ~1 API call per fixture (~34k ≈ 5 days of quota) and API-Football may not serve historical injuries
+  reliably (same dead end as historical odds). From now on it accumulates automatically each weekly run.
+- Once a season of injuries/lineups has built up: add `MissingAttackShare` to `features.py` and retrain.
+- `player_fixture_stats` also supports, unused so far: per-player cards/fouls (a much sharper cards
+  model than team rolling averages) and minutes-weighted lineup strength once lineups accumulate.
+
+---
+
 ## ⚡ TOMORROW'S PLAN (set 2026-07-28 end of session)
 
 1. **Resume data collection** (manual — user declined automation): `py fetch/fetch_season_data.py` then `py fetch/fetch_player_stats.py`. ~21,281 player-stat fixtures still remaining.

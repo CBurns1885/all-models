@@ -185,6 +185,29 @@ def _init_database():
         )
     """)
 
+    # Confirmed lineups. startXI player ids were previously fetched and
+    # discarded (only the formation string was kept), which threw away the
+    # single most decisive pre-match signal available: who is actually
+    # playing. Stored per fixture/team/player so availability can be
+    # reconstructed historically once enough has accumulated.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS lineups (
+            fixture_id INTEGER,
+            team_id INTEGER,
+            team_name TEXT,
+            formation TEXT,
+            player_id INTEGER,
+            player_name TEXT,
+            position TEXT,
+            is_starter INTEGER,
+            fetched_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (fixture_id, player_id),
+            FOREIGN KEY (fixture_id) REFERENCES fixtures(fixture_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_lineups_fixture ON lineups(fixture_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_injuries_fixture ON injuries(fixture_id)")
+
     # Statistics table
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS match_stats (
@@ -767,6 +790,48 @@ def fetch_lineups_for_fixture(fixture_id: int) -> Dict:
     return result
 
 
+def _persist_injuries(conn, fixture_id: int, injuries: List[Dict]) -> None:
+    """Write injury records to the injuries table (idempotent per fixture)."""
+    try:
+        conn.execute("DELETE FROM injuries WHERE fixture_id = ?", (fixture_id,))
+        conn.executemany("""
+            INSERT INTO injuries
+                (fixture_id, team_id, team_name, player_name, player_type,
+                 injury_reason, date)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        """, [(fixture_id, i.get('team_id'), i.get('team_name'),
+               i.get('player_name'), i.get('player_type'), i.get('injury_reason'))
+              for i in injuries])
+    except Exception as e:
+        print(f"  [WARN] Could not persist injuries for fixture {fixture_id}: {e}")
+
+
+def _persist_lineups(conn, fixture_id: int, lineups: Dict) -> None:
+    """Write confirmed startXI + substitutes to the lineups table."""
+    rows = []
+    for side in ('home', 'away'):
+        team = lineups.get(side) or {}
+        for is_starter, group in ((1, team.get('starters') or []),
+                                  (0, team.get('substitutes') or [])):
+            for p in group:
+                if p.get('id') is None:
+                    continue
+                rows.append((fixture_id, team.get('team_id'), team.get('team_name'),
+                             team.get('formation'), p.get('id'), p.get('name'),
+                             p.get('pos'), is_starter))
+    if not rows:
+        return
+    try:
+        conn.executemany("""
+            INSERT OR REPLACE INTO lineups
+                (fixture_id, team_id, team_name, formation, player_id,
+                 player_name, position, is_starter)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, rows)
+    except Exception as e:
+        print(f"  [WARN] Could not persist lineups for fixture {fixture_id}: {e}")
+
+
 def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
     """
     Fetch injuries and lineups for upcoming fixtures
@@ -789,9 +854,15 @@ def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
     df['away_injuries'] = 0
     df['home_injury_players'] = ''
     df['away_injury_players'] = ''
+    # Player IDs are what player_impact matches on (names differ between the
+    # injuries and player-stats endpoints); previously only names survived.
+    df['home_injury_ids'] = ''
+    df['away_injury_ids'] = ''
     df['home_formation'] = ''
     df['away_formation'] = ''
     df['lineups_confirmed'] = False
+
+    conn = sqlite3.connect(API_FOOTBALL_DB)
 
     for idx, row in df.iterrows():
         fixture_id = row['fixture_id']
@@ -809,6 +880,15 @@ def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, 'away_injuries'] = len(away_inj)
             df.at[idx, 'home_injury_players'] = ', '.join([i['player_name'] for i in home_inj[:5]])
             df.at[idx, 'away_injury_players'] = ', '.join([i['player_name'] for i in away_inj[:5]])
+            df.at[idx, 'home_injury_ids'] = ','.join(
+                str(i['player_id']) for i in home_inj if i.get('player_id'))
+            df.at[idx, 'away_injury_ids'] = ','.join(
+                str(i['player_id']) for i in away_inj if i.get('player_id'))
+
+            # Persist so injury history accumulates — the table existed but
+            # nothing ever wrote to it, so features.py's injury lookup always
+            # came back empty and Home_InjuryCount was never created.
+            _persist_injuries(conn, fixture_id, injuries)
 
         # Fetch lineups (if available)
         lineups = fetch_lineups_for_fixture(fixture_id)
@@ -817,10 +897,14 @@ def fetch_live_data_for_upcoming(fixtures_df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, 'home_formation'] = lineups['home'].get('formation', '')
             df.at[idx, 'away_formation'] = lineups['away'].get('formation', '')
             df.at[idx, 'lineups_confirmed'] = True
+            _persist_lineups(conn, fixture_id, lineups)
 
         # Progress indicator
         if (idx + 1) % 10 == 0:
             print(f"  Processed {idx + 1}/{len(df)} fixtures...")
+
+    conn.commit()
+    conn.close()
 
     # Summary
     total_home_inj = df['home_injuries'].sum()

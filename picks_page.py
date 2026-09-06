@@ -37,6 +37,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
 .legend-item{display:flex;align-items:center;gap:5px}
 .ldot{width:7px;height:7px;border-radius:50%}
 .fb-badge{font-size:10px;font-weight:700;color:var(--warn);background:var(--warn-bg);border-radius:3px;padding:1px 4px;margin-left:5px;letter-spacing:.04em;vertical-align:middle;display:inline-block}
+.inj-badge{font-size:10px;font-weight:700;color:#F0A21A;background:rgba(240,162,26,.14);border-radius:3px;padding:1px 4px;margin-left:5px;letter-spacing:.04em;vertical-align:middle;display:inline-block;cursor:help}
 .content{max-width:1120px;margin:0 auto;padding:22px}
 .mkt-section{margin-bottom:28px;scroll-margin-top:86px}
 .sec-hdr{display:flex;align-items:baseline;gap:10px;margin-bottom:8px}
@@ -85,6 +86,7 @@ body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,
   <div class="legend-item"><div class="ldot" style="background:var(--mid)"></div>70&ndash;84%</div>
   <div class="legend-item"><div class="ldot" style="background:var(--low)"></div>&lt;70%</div>
   <div class="legend-item"><span class="fb-badge">!DATA</span> Home-prior fallback &mdash; no ML training data for this club</div>
+  <div class="legend-item"><span class="inj-badge">KEY OUT</span> A player worth &ge;20% of the team's recent goals/assists is unavailable (hover for who)</div>
 </div>
 <nav class="market-nav" id="mktNav"></nav>
 <div class="content" id="mainContent"></div>
@@ -107,6 +109,14 @@ const MKTS=[
  {id:'tc9',label:'Corners O9.5',desc:'Over 9.5 corners ≥80%',filter:r=>r.tc9>=80,pick:r=>({pred:'Over 9.5 Corn',cls:'po',conf:r.tc9})},
  {id:'tc10',label:'Corners O10.5',desc:'Over 10.5 corners ≥78%',filter:r=>r.tc10>=78,pick:r=>({pred:'Over 10.5 Corn',cls:'po',conf:r.tc10})},
 ];
+function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c]))}
+function injBadge(r){
+ const out=[];
+ if(r.hko)out.push(r.ht+': '+r.hkn);
+ if(r.ako)out.push(r.at+': '+r.akn);
+ if(!out.length)return '';
+ return '<span class="inj-badge" title="'+esc(out.join(' | '))+'">KEY OUT</span>';
+}
 function cc(c){return c>=85?'h':c>=70?'m':'l'}
 function cn(c){return c>=85?'ch':c>=70?'cm':'cl'}
 function fd(d){const[,m,dy]=d.split('-');return parseInt(dy)+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][parseInt(m)-1]}
@@ -126,7 +136,7 @@ function buildSec(mk){
   const c=cc(p.conf);
   tr.innerHTML='<td class="cell-dt">'+fd(r.dt)+'</td>'
    +'<td><span class="cell-lg">'+r.lg+'</span></td>'
-   +'<td class="cell-m">'+r.ht+' <span class="aw">vs '+r.at+'</span>'+(p.fb||isFB?'<span class="fb-badge">!DATA</span>':'')+'</td>'
+   +'<td class="cell-m">'+r.ht+' <span class="aw">vs '+r.at+'</span>'+(p.fb||isFB?'<span class="fb-badge">!DATA</span>':'')+injBadge(r)+'</td>'
    +'<td><span class="pl '+p.cls+'">'+p.pred+'</span></td>'
    +'<td class="conf-cell"><div class="cw"><div class="cbw"><div class="cb '+c+'" style="width:'+Math.min(p.conf,100)+'%"></div></div>'
    +'<span class="cn '+cn(p.conf)+'">'+p.conf.toFixed(1)+'%</span></div></td>';
@@ -154,11 +164,38 @@ MKTS.forEach(mk=>{const s=buildSec(mk);mc.appendChild(s);obs.observe(s)});
 """
 
 
+def _flag(row, col):
+    """Truthy test that survives CSV round-tripping ('True'/'False' strings)."""
+    v = row.get(col)
+    if v is None or v != v:
+        return False
+    if isinstance(v, str):
+        return v.strip().lower() in ('true', '1', 'yes')
+    return bool(v)
+
+
 def _pct(row, col):
-    try:
-        return round(float(row.get(col) or 0) * 100, 1)
-    except (TypeError, ValueError):
-        return 0.0
+    """Percentage for a market column, preferring the BLEND_ (calibrated)
+    value over the raw P_ (ML-only) one.
+
+    Everything downstream — league_thresholds.json, the per-market accuracy
+    tables, best_bets — is derived from BLEND_*, so showing P_* here meant
+    this page displayed different (uncalibrated) numbers from the ones the
+    thresholds were validated against. Markets with no BLEND column
+    (cards/corners, where alpha is 1.0 anyway) fall back to P_ unchanged.
+    """
+    candidates = [col]
+    if col.startswith('P_'):
+        candidates.insert(0, 'BLEND_' + col[2:])
+    for c in candidates:
+        v = row.get(c)
+        if v is None or v != v:
+            continue
+        try:
+            return round(float(v) * 100, 1)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 def _build_record(row):
@@ -191,6 +228,10 @@ def _build_record(row):
     o45U = _pct(row, 'P_OU_4_5_U')
 
     return {
+        'hko': _flag(row, 'Home_KeyPlayerOut'),
+        'ako': _flag(row, 'Away_KeyPlayerOut'),
+        'hkn': str(row.get('Home_KeyOutNames', '') or ''),
+        'akn': str(row.get('Away_KeyOutNames', '') or ''),
         'ht':  str(row.get('HomeTeam', '') or '').strip(),
         'at':  str(row.get('AwayTeam', '') or '').strip(),
         'lg':  str(row.get('League', '') or '').strip(),
