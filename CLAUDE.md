@@ -155,14 +155,41 @@ produce at serve time — the fitted preprocessor would then demand a missing co
 `feature_rules` exclusions along with the prediction-time-only availability/injury annotation
 columns.
 
-**Still unused, ranked by value** (all present in `player_fixture_stats`, none wired):
-1. per-player **yellow_cards / red_cards / fouls_committed** — a far sharper cards model than the
-   current team rolling averages, and cards markets are the weakest area.
-2. per-player **rating** — squad quality / strength-of-XI once lineups accumulate.
-3. **shots_on_target, passes_key** — attacking process metrics, less noisy than goals.
-4. live `standings` **form string** and current rank/PPG.
-Not wired because coverage is still thin (`player_fixture_stats` was ~24% of fixtures at last count)
-and each needs a feature rebuild + retrain to evaluate honestly. Do these once the backfill completes.
+### ✅ Player-only stats now WIRED as features (2026-09-06)
+`player_impact.build_team_match_features()` aggregates the fields `match_stats` does **not** carry —
+aggregating shots/cards/possession/xG again would just duplicate what already exists. The seven
+player-only signals, per team per fixture:
+
+| Feature | Why it adds something |
+|---------|----------------------|
+| `PlayerRating` (minutes-weighted mean) | squad quality/performance — no team-level equivalent |
+| `PlayerRatingTop` | best individual performance on the day |
+| `KeyPasses` | chance creation (match_stats has total passes + accuracy, not key passes) |
+| `Tackles`, `Interceptions` | defensive activity |
+| `DuelWinPct` | physical dominance |
+| `DribbleSuccess` | carrying threat |
+
+Merged on `fixture_id` at new **step 1d**, then fed through the *existing* rolling machinery, so each
+gets `_ma3/5/10/20` + `_ewm3/_ewm` exactly like shots and cards. `Has_PlayerStats` marks coverage.
+
+⚠️ **The raw columns are excluded in `feature_rules`** (`SIDE_RAW_MATCH_STATS`) — `Home_PlayerRating`
+is *this* match's rating, so using it directly would leak the result precisely the way
+`Home_Corners` did. Only the rolling versions are features. Verified: match 4's rating 6.60 vs its
+`PlayerRating_ma5` 6.20 (prior matches only), first match NaN.
+
+### ⛔ Live `standings` must NOT be wired — it would leak
+`standings` is **one row per (league, season, team)** with only `fetched_at` — a single snapshot, no
+as-of date. Joining it to in-season matches puts the end-of-season table into October fixtures.
+`get_standings_from_db()` having 0 callers is therefore *correct*, not an oversight. The leak-free
+equivalent already exists: `_add_table_position_features` derives rank/points/PPG as-of each date
+from results. `features.py` uses the table only for the **previous** season, which is safe because
+that season is complete before the current one starts. The `form` string ("WWDLW") is the same
+snapshot and equally unusable.
+
+**Still unused:** per-player `yellow_cards`/`red_cards`/`fouls_committed`/`shots_on_target` — these
+*do* have team-level equivalents in `match_stats`, so the only extra signal is concentration (does
+one player carry the cards?). Worth revisiting for the cards markets once coverage improves;
+`player_fixture_stats` was ~24% of fixtures at last count.
 
 ### Not yet possible / next
 - **Injury history does not exist** (table was never populated), so availability cannot be a *trained*

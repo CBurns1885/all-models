@@ -62,6 +62,12 @@ _SIDE_STAT_BASES = [
     "xG", "Possession", "ShotsInBox", "BigChances", "PassAcc",
     "GoalsFor", "GoalsAgainst", "Win", "Draw", "Loss",
     "CleanSheet", "FailedToScore", "BTTS",
+    # Player-derived aggregates (player_impact.PLAYER_ONLY_FEATURES). These
+    # are THIS match's values — the team's rating, key passes and duels from
+    # the game being predicted — so they leak the result exactly like shots
+    # or cards would. Only the rolling/EWM versions are legitimate.
+    "PlayerRating", "PlayerRatingTop", "KeyPasses", "Tackles",
+    "Interceptions", "DuelWinPct", "DribbleSuccess",
 ]
 SIDE_RAW_MATCH_STATS = {f"{side}_{base}" for side in ("Home", "Away")
                         for base in _SIDE_STAT_BASES}

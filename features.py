@@ -151,6 +151,15 @@ def _elo_by_league(df: pd.DataFrame, cfg: EloConfig) -> pd.DataFrame:
 # Rolling team form & stats (enhanced)
 # -----------------------------
 
+# Player-derived per-match stats (see player_impact.PLAYER_ONLY_FEATURES).
+# Kept as a module-level list so the side-mapping, long-format column list and
+# rolling/EWM loops below all stay in step automatically.
+try:
+    from player_impact import PLAYER_ONLY_FEATURES as _PLAYER_FEATS
+except Exception:
+    _PLAYER_FEATS = []
+
+
 def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
     """Create unified columns for home/away perspective"""
     out = df.copy()
@@ -172,6 +181,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["HY"]
         out["CardsR"] = out["HR"]
         out["Fouls"] = out.get("Home_Fouls", np.nan)
+        for _pf in _PLAYER_FEATS:
+            out[_pf] = out.get(f"Home_{_pf}", np.nan)
 
         # Advanced stats (from API-Football)
         out = _ensure_cols(out, ["Home_xG", "Home_Possession", "Home_Shots_Inside_Box",
@@ -198,6 +209,8 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
         out["CardsY"] = out["AY"]
         out["CardsR"] = out["AR"]
         out["Fouls"] = out.get("Away_Fouls", np.nan)
+        for _pf in _PLAYER_FEATS:
+            out[_pf] = out.get(f"Away_{_pf}", np.nan)
 
         out = _ensure_cols(out, ["Away_xG", "Away_Possession", "Away_Shots_Inside_Box",
                                   "Away_Big_Chances", "Away_Pass_Accuracy"])
@@ -215,7 +228,7 @@ def _add_team_side(df: pd.DataFrame, side: str) -> pd.DataFrame:
     cols = ["League","Date","Team","Opp","Side","GoalsFor","GoalsAgainst",
             "Win","Draw","Loss","Shots","ShotsT","Corners","CardsY","CardsR","Fouls",
             "CleanSheet","FailedToScore","BTTS",
-            "xG","Possession","ShotsInBox","BigChances","PassAcc"]
+            "xG","Possession","ShotsInBox","BigChances","PassAcc"] + _PLAYER_FEATS
 
     return out[[c for c in cols if c in out.columns]]
 
@@ -250,7 +263,7 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         team_df[f"BTTS_rate{w}"] = rolled["BTTS"].mean()
 
         # Advanced stats (if available)
-        for col in ["xG", "Possession", "ShotsInBox", "BigChances", "PassAcc"]:
+        for col in ["xG", "Possession", "ShotsInBox", "BigChances", "PassAcc"] + _PLAYER_FEATS:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_ma{w}"] = rolled[col].mean()
     
@@ -264,7 +277,7 @@ def _rolling_stats(team_df: pd.DataFrame, windows: List[int] = None) -> pd.DataF
         team_df[f"CleanSheet_rate_{tag}"] = ew["CleanSheet"].mean()
         team_df[f"FTS_rate_{tag}"]        = ew["FailedToScore"].mean()
         team_df[f"BTTS_rate_{tag}"]       = ew["BTTS"].mean()
-        for col in ["Shots", "ShotsT", "Corners", "CardsY", "CardsR", "Fouls", "xG"]:
+        for col in ["Shots", "ShotsT", "Corners", "CardsY", "CardsR", "Fouls", "xG"] + _PLAYER_FEATS:
             if col in team_df.columns and team_df[col].notna().any():
                 team_df[f"{col}_{tag}"] = ew[col].mean()
 
@@ -1306,6 +1319,34 @@ def build_features(force: bool = False) -> Path:
     # 1c. Previous-season standings — needs FTHG/FTAG/FTR which survive only before pivot
     print("1c. Adding previous-season standings features...")
     df = _add_prev_season_standings(df)
+
+    # 1d. Player-derived team stats (rating, key passes, tackles, duels...)
+    # These are the fields match_stats does NOT carry, so they add signal
+    # rather than duplicating team aggregates. Merged as raw current-match
+    # values; the rolling machinery below turns them into pre-match features
+    # and feature_rules excludes the raw columns.
+    print("1d. Adding player-derived team stats...")
+    if 'fixture_id' in df.columns:
+        try:
+            from player_impact import build_team_match_features, PLAYER_ONLY_FEATURES
+            pl = build_team_match_features()
+            if not pl.empty:
+                n_before = len(df)
+                df = df.merge(pl, on='fixture_id', how='left')
+                if len(df) != n_before:
+                    raise RuntimeError(
+                        f"player feature merge changed row count "
+                        f"({n_before} -> {len(df)})")
+                df['Has_PlayerStats'] = df['Has_PlayerStats'].fillna(0.0)
+                cov = df['Has_PlayerStats'].mean()
+                print(f"   Added {2*len(PLAYER_ONLY_FEATURES)} player-derived cols "
+                      f"({cov:.1%} fixture coverage)")
+            else:
+                print("   [PLAYER] No player stats yet — skipping")
+        except Exception as e:
+            print(f"   [PLAYER] Skipping player-derived stats: {e}")
+    else:
+        print("   [PLAYER] No fixture_id column — skipping")
 
     # 2. Rolling form/stats
     print("2. Calculating rolling form...")

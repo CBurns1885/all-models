@@ -82,6 +82,104 @@ def load_player_match_stats(db_path=None) -> pd.DataFrame:
     return df.dropna(subset=["Date"])
 
 
+# ---------------------------------------------------------------------------
+# Team-level per-match aggregates from player data
+# ---------------------------------------------------------------------------
+
+# Only the fields match_stats does NOT already carry. match_stats has shots,
+# fouls, cards, corners, possession, passes, pass accuracy and xG at team
+# level, so aggregating those again adds nothing. These six are player-only:
+PLAYER_ONLY_FEATURES = [
+    "PlayerRating",      # minutes-weighted mean rating — squad quality/performance
+    "PlayerRatingTop",   # best individual performance
+    "KeyPasses",         # chance creation
+    "Tackles",
+    "Interceptions",
+    "DuelWinPct",        # physical dominance
+    "DribbleSuccess",
+]
+
+
+def build_team_match_features(db_path=None) -> pd.DataFrame:
+    """Per-fixture Home_*/Away_* aggregates of the player-only stats.
+
+    Returns one row per fixture_id with Home_<f>/Away_<f> for each name in
+    PLAYER_ONLY_FEATURES, plus Has_PlayerStats. Side is resolved by comparing
+    the player's team_id to the fixture's home_team_id, so the caller only
+    needs fixture_id to join.
+
+    These are CURRENT-match values — features.py feeds them through the same
+    rolling/EWM machinery as shots and cards, and feature_rules excludes the
+    raw columns so only the pre-match rolling versions become features.
+    """
+    import sqlite3
+    from config import API_FOOTBALL_DB
+    try:
+        conn = sqlite3.connect(db_path or API_FOOTBALL_DB)
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name='player_fixture_stats'")
+        if not cur.fetchone():
+            conn.close()
+            return pd.DataFrame()
+        df = pd.read_sql_query("""
+            SELECT p.fixture_id, p.team_id, f.home_team_id,
+                   p.minutes_played, p.rating, p.passes_key, p.tackles,
+                   p.interceptions, p.duels_total, p.duels_won,
+                   p.dribbles_success
+            FROM player_fixture_stats p
+            JOIN fixtures f ON f.fixture_id = p.fixture_id
+            WHERE f.home_team_id IS NOT NULL
+        """, conn)
+        conn.close()
+    except Exception as e:
+        print(f"   [PLAYER] Could not load player match features: {e}")
+        return pd.DataFrame()
+
+    if df.empty:
+        return pd.DataFrame()
+
+    num = ["minutes_played", "rating", "passes_key", "tackles",
+           "interceptions", "duels_total", "duels_won", "dribbles_success"]
+    for c in num:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Only players who actually appeared
+    df = df[df["minutes_played"].fillna(0) > 0]
+    if df.empty:
+        return pd.DataFrame()
+
+    df["_side"] = np.where(df["team_id"] == df["home_team_id"], "Home", "Away")
+    df["_w"] = df["minutes_played"].fillna(0)
+    df["_rw"] = df["rating"] * df["_w"]
+
+    grp = df.groupby(["fixture_id", "_side"])
+    agg = grp.agg(
+        _rating_num=("_rw", "sum"),
+        _rating_den=("_w", "sum"),
+        PlayerRatingTop=("rating", "max"),
+        KeyPasses=("passes_key", "sum"),
+        Tackles=("tackles", "sum"),
+        Interceptions=("interceptions", "sum"),
+        _duels_won=("duels_won", "sum"),
+        _duels_tot=("duels_total", "sum"),
+        DribbleSuccess=("dribbles_success", "sum"),
+    ).reset_index()
+
+    agg["PlayerRating"] = np.where(agg["_rating_den"] > 0,
+                                   agg["_rating_num"] / agg["_rating_den"], np.nan)
+    agg["DuelWinPct"] = np.where(agg["_duels_tot"] > 0,
+                                 agg["_duels_won"] / agg["_duels_tot"], np.nan)
+    agg = agg.drop(columns=["_rating_num", "_rating_den", "_duels_won", "_duels_tot"])
+
+    wide = agg.pivot(index="fixture_id", columns="_side",
+                     values=PLAYER_ONLY_FEATURES)
+    wide.columns = [f"{side}_{feat}" for feat, side in wide.columns]
+    wide = wide.reset_index()
+    wide["Has_PlayerStats"] = 1.0
+    return wide
+
+
 def resolve_team_ids(db_path=None) -> Dict[str, int]:
     """team name -> team_id, from the fixtures table.
 
