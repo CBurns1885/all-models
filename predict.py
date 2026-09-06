@@ -552,6 +552,51 @@ def apply_poisson_adjustment(row: pd.Series, home_xg: float = None, away_xg: flo
 _FUTURE_FRAME_CACHE_DIR = Path(__file__).parent / "outputs" / "future_frame_cache"
 
 
+def _season_start(date: pd.Timestamp, league: str) -> pd.Timestamp:
+    """First day of the season that `date` falls in, for this league.
+
+    European leagues run Aug-May (season starts 1 July); NOR/SWE run
+    spring-autumn within one calendar year (season starts 1 January).
+    """
+    from config import season_for_league
+    year = season_for_league(league, date)
+    from config import CALENDAR_YEAR_LEAGUES
+    if league in CALENDAR_YEAR_LEAGUES:
+        return pd.Timestamp(year=year, month=1, day=1)
+    return pd.Timestamp(year=year, month=7, day=1)
+
+
+def _add_season_games(result: pd.DataFrame, base: pd.DataFrame) -> pd.DataFrame:
+    """Set Home_SeasonGames / Away_SeasonGames to the exact number of matches
+    each team has completed this season before kickoff."""
+    if base.empty:
+        return result
+
+    appearances = pd.concat([
+        base[["Date", "HomeTeam"]].rename(columns={"HomeTeam": "Team"}),
+        base[["Date", "AwayTeam"]].rename(columns={"AwayTeam": "Team"}),
+    ], ignore_index=True)
+    appearances["Date"] = pd.to_datetime(appearances["Date"])
+
+    # Team -> sorted array of appearance dates, for vectorised counting
+    by_team = {t: np.sort(g["Date"].values)
+               for t, g in appearances.groupby("Team", sort=False)}
+
+    for side, col in (("HomeTeam", "Home_SeasonGames"), ("AwayTeam", "Away_SeasonGames")):
+        counts = []
+        for lg, dt, team in zip(result["League"], result["Date"], result[side]):
+            dates = by_team.get(team)
+            if dates is None:
+                counts.append(0.0)
+                continue
+            start = np.datetime64(_season_start(pd.Timestamp(dt), lg))
+            end = np.datetime64(pd.Timestamp(dt))
+            counts.append(float(np.searchsorted(dates, end, side="left")
+                                - np.searchsorted(dates, start, side="left")))
+        result[col] = counts
+    return result
+
+
 def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     """Enhanced feature building with time weighting.
 
@@ -606,13 +651,42 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     if "Elo_Away" in base.columns:
         away_feat_cols.append("Elo_Away")
 
+    # Split into FORM columns (rolling/EWM averages — a time-weighted mean over
+    # the last few matches is the right summary) and STATE columns (ratings,
+    # league position, season counters — these are point-in-time levels where
+    # the correct pre-match value is the LATEST one, not an average of the
+    # last five).
+    #
+    # Averaging state was actively wrong: Home_SeasonGames became the mean of
+    # the team's last five games-played counts, so mid-season a team on 7 real
+    # games reported ~4, and at a season boundary the window still contained
+    # last season's rows (~30 games) so a team in match 2 of a new season
+    # reported ~25 — which silently disabled best_bets' cold-start gate in
+    # exactly the situation it exists for. It also created train/serve skew:
+    # models are trained on exact pre-match Elo/Glicko/table position but were
+    # served a smoothed, lagged version of each.
+    def _is_state_col(c: str) -> bool:
+        base_name = c[5:] if c.startswith(("Home_", "Away_")) else c
+        if base_name.startswith(("Glicko", "PrevSeason", "Season", "TablePos",
+                                 "PPG_Season", "NumTeams")):
+            return True
+        if c.startswith("Elo_"):
+            return True
+        if c.startswith(("IsTopSix", "IsBottom3")):
+            return True
+        return False
+
+    home_state_cols = [c for c in home_feat_cols if _is_state_col(c)]
+    home_form_cols  = [c for c in home_feat_cols if c not in home_state_cols]
+    away_state_cols = [c for c in away_feat_cols if _is_state_col(c)]
+    away_form_cols  = [c for c in away_feat_cols if c not in away_state_cols]
+
     # ----------------------------------------------------------------
-    # Vectorized time-weighted form: last-5 appearances per fixture team
+    # Vectorized per-team lookup over the last N appearances before kickoff
     # ----------------------------------------------------------------
-    def _weighted_form(fx_df, base_df, team_col, feat_cols, n_games=5):
-        """Return one time-weighted-average row per (League, Date, team_col).
-        All feat_cols must be numeric.
-        """
+    def _team_history(fx_df, base_df, team_col, feat_cols, n_games=5):
+        """Rows for each fixture team's last n_games appearances before kickoff,
+        ranked most-recent-first in `_rank`, with time weights in `_w`."""
         hist = base_df[["League", "Date", team_col] + feat_cols].rename(
             columns={"Date": "HistDate"})
 
@@ -630,18 +704,41 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
         # Time weights
         merged["_days"] = (merged["Date"] - merged["HistDate"]).dt.days.clip(lower=0)
         merged["_w"]    = np.exp(-merged["_days"] / thl)
+        return merged
 
+    def _weighted_form(merged, team_col, feat_cols):
+        """Time-weighted average of feat_cols over the team's recent matches."""
         grp_keys = ["League", "Date", team_col]
-        wsum = merged.groupby(grp_keys)["_w"].sum()
-
-        # Multiply each col by weight then sum, then divide by wsum
+        if not feat_cols:
+            return merged[grp_keys].drop_duplicates()
+        m = merged.copy()
+        wsum = m.groupby(grp_keys)["_w"].sum()
         for col in feat_cols:
-            merged[col] = merged[col].fillna(0) * merged["_w"]
-        return (merged.groupby(grp_keys)[feat_cols].sum()
+            m[col] = m[col].fillna(0) * m["_w"]
+        return (m.groupby(grp_keys)[feat_cols].sum()
                 .div(wsum, axis=0).reset_index())
 
-    home_form = _weighted_form(fx, base, "HomeTeam", home_feat_cols)
-    away_form  = _weighted_form(fx, base, "AwayTeam",  away_feat_cols)
+    def _latest_state(merged, team_col, feat_cols):
+        """Most recent pre-fixture value of each state column."""
+        grp_keys = ["League", "Date", team_col]
+        if not feat_cols:
+            return merged[grp_keys].drop_duplicates()
+        latest = merged[merged["_rank"] == 1]
+        return latest[grp_keys + feat_cols].drop_duplicates(subset=grp_keys)
+
+    def _team_features(fx_df, base_df, team_col, form_cols, state_cols):
+        merged = _team_history(fx_df, base_df, team_col, form_cols + state_cols)
+        grp_keys = ["League", "Date", team_col]
+        form = _weighted_form(merged, team_col, form_cols)
+        state = _latest_state(merged, team_col, state_cols)
+        if not form_cols:
+            return state
+        if not state_cols:
+            return form
+        return form.merge(state, on=grp_keys, how="outer")
+
+    home_form = _team_features(fx, base, "HomeTeam", home_form_cols, home_state_cols)
+    away_form = _team_features(fx, base, "AwayTeam", away_form_cols, away_state_cols)
 
     # Merge into fixture frame
     result = fx[["League", "Date", "HomeTeam", "AwayTeam"]].copy()
@@ -657,6 +754,14 @@ def _build_future_frame(fixtures_csv: Path) -> pd.DataFrame:
     # (home_form/away_form may carry is_cup/is_european from base rolling stats)
     result["is_cup"] = result["League"].isin(ALL_CUPS).astype(int)
     result["is_european"] = result["League"].isin(EUROPEAN_CUPS).astype(int)
+
+    # Season games played: count directly rather than inheriting the stored
+    # counter. features.parquet stores the PRE-match count, so the latest
+    # historical row is always one behind, and if a team has not played yet
+    # this season the latest row belongs to the previous season and the stored
+    # value is meaningless (~34). best_bets' cards/corners cold-start gate
+    # keys off this, so it has to be exact.
+    result = _add_season_games(result, base)
 
     # Recompute cross-team derived features now that both home and away form are merged
     if "Elo_Home" in result.columns and "Elo_Away" in result.columns:
@@ -1341,9 +1446,16 @@ def _apply_blend(out: pd.DataFrame) -> pd.DataFrame:
             D = out.loc[idx, dc_cols].values.astype(np.float64)
 
             # Apply DC temperature scaling to reduce overconfidence (T > 1 softens, T < 1 sharpens)
-            # Per-market overrides take precedence over the global dc_temperature
-            global_temp = float(TUNING_OVERRIDES.get('dc_temperature', 1.0))
-            market_temp_key = f'dc_temperature_{target.replace("y_", "").lower()}'
+            # Per-market overrides take precedence over the global temperature.
+            # The second signal is DC for goals markets and NB for
+            # cards/corners; they get separate temperatures because
+            # `dc_temperature` was tuned against Dixon-Coles output and has no
+            # meaning for a negative-binomial count model. `nb_temperature`
+            # defaults to 1.0 (no scaling) until it is tuned in its own right.
+            is_nb = any(c.startswith("NB_") for c in dc_cols)
+            temp_prefix = 'nb_temperature' if is_nb else 'dc_temperature'
+            global_temp = float(TUNING_OVERRIDES.get(temp_prefix, 1.0))
+            market_temp_key = f'{temp_prefix}_{target.replace("y_", "").lower()}'
             dc_temp = float(TUNING_OVERRIDES.get(market_temp_key, global_temp))
             if dc_temp != 1.0 and len(D) > 0 and D.sum() > 0:
                 log_D = np.log(np.clip(D, 1e-10, None)) / dc_temp
@@ -1953,6 +2065,14 @@ def predict_week(fixtures_csv: Path) -> Path:
     fx = pd.read_csv(fixtures_csv)
     fx["Date"] = pd.to_datetime(fx["Date"])
 
+    # Duplicate fixtures would multiply rows on the DC/NB merges below and
+    # silently misalign every positionally-assigned column after them
+    # (Glicko RD, season games, NB prices).
+    _dupes = fx.duplicated(subset=ID_COLS).sum()
+    if _dupes:
+        print(f"[WARN] {_dupes} duplicate fixture row(s) in {fixtures_csv} — keeping first of each")
+        fx = fx.drop_duplicates(subset=ID_COLS).reset_index(drop=True)
+
     # Check for injury data
     has_injury_data = 'home_injuries' in fx.columns and 'away_injuries' in fx.columns
     if has_injury_data:
@@ -2018,9 +2138,17 @@ def predict_week(fixtures_csv: Path) -> Path:
         dc_cols = [c for c in dc_df.columns if c.startswith("DC_")]
         merge_keys = [k for k in ["League", "Date", "HomeTeam", "AwayTeam"] if k in dc_df.columns]
         df_out["Date"] = pd.to_datetime(df_out["Date"])
+        _n_before = len(df_out)
         df_out = df_out.merge(
-            dc_df[merge_keys + dc_cols], on=merge_keys, how="left", suffixes=("", "_dc")
+            dc_df[merge_keys + dc_cols].drop_duplicates(subset=merge_keys),
+            on=merge_keys, how="left", suffixes=("", "_dc")
         )
+        # Row count must be preserved: NB prices and the Glicko/season-games
+        # columns are assigned positionally against df_future further down.
+        if len(df_out) != _n_before:
+            raise RuntimeError(
+                f"DC merge changed row count ({_n_before} -> {len(df_out)}); "
+                "duplicate fixture keys would misalign downstream columns")
         print(f"[OK] Merged {len(dc_cols)} DC predictions")
     except Exception as e:
         print(f"[WARN] DC predictions failed: {e}")

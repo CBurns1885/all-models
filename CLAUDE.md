@@ -2,14 +2,69 @@
 
 ---
 
-## ⚠️ Betfair — NOT going live yet (user directive, 2026-07-28)
-Betfair execution (`betfair/betfair_ltd.py`, `betfair/betfair_placer.py`) stays **off** until the user has
-enough capital set aside to fund it — this is a deliberate business decision, not a technical blocker.
+## ⚠️ Betfair — execution still OFF; prices are READ-ONLY (updated 2026-09-06)
+Betfair **execution** (`betfair/betfair_ltd.py`, `betfair/betfair_placer.py`) stays **off** until the user has
+enough capital set aside to fund it — a deliberate business decision, not a technical blocker.
 Do not wire it up, dry-run it as a precursor to going live, or suggest going live with it until the user
 explicitly raises it again. Current focus is picks-only: maximise honest accuracy at high confidence
 thresholds, with **BTTS and 1X2 called out as priority markets** (the user's rationale: these traditionally
 carry higher odds than the more heavily-bet goals/corners markets, so a smaller number of high-confidence,
 well-calibrated picks there matters more than volume).
+
+**In scope since 2026-09-06 (user asked for Kelly stakes per row):** `betfair/betfair_odds.py` fetches
+**prices only**, defaults to the DELAYED app key (which cannot place bets), and contains no order-placement
+code. Stakes are printed as recommendations in `best_bets.csv`/`.html`. Sizing the bet is not placing it —
+the execution scripts remain untouched and unused.
+
+---
+
+## ⚡ SESSION STATE (2026-09-06) — review + Kelly staking
+
+### Added: half-Kelly stake per pick
+- **`staking.py`** — exchange Kelly maths. Net odds `b=(o-1)(1-commission)`, `f*=(p·b-(1-p))/b`;
+  half Kelly by default. Guards: min edge 2%, **stake capped at 5% of bank**, max/min stake,
+  optional `prob_shrink` toward market implied. `break_even_odds(p)` = price to beat.
+- **`betfair/betfair_odds.py`** — READ-ONLY price snapshot for the current `best_bets.csv`
+  → `betfair_odds.csv` (best back + lay). Delayed key by default; no placement code.
+- **`tools/best_bets.py`** — new columns `MinOdds` (always), `Odds`/`Edge`/`EV`/`Stake`/`StakeNote`
+  (when a price snapshot exists), plus a staking summary. New flags: `--bank` (0 = no stakes,
+  just break-even odds), `--kelly` (default 0.5), `--commission`, `--min-edge`, `--max-fraction`,
+  `--max-stake`, `--min-stake`, `--prob-shrink`, `--odds-file`.
+- Workflow: `py tools/best_bets.py` → `py betfair/betfair_odds.py` → `py tools/best_bets.py --bank 500`.
+- ⚠️ Kelly assumes the probability is *honest*. Until the calibration report is clean per market,
+  prefer `--prob-shrink 0.2–0.4` and keep the 5% cap. Overconfident p is the one input that makes
+  Kelly dangerous, and cards/corners are known to still be overconfident pre-gate.
+
+### Bugs found and fixed this session
+1. **State features were averaged instead of read (`predict.py:_build_future_frame`)** — HIGH.
+   Every numeric column went through the 5-match time-weighted mean, including point-in-time
+   *state*: `Elo_*`, `Home_Glicko*`, `Home_TablePos`, `Home_Season*`. Two consequences:
+   (a) **the new cards/corners cold-start gate never fired at a season boundary** — a team in match 2
+   of a new season had its last-5 window filled with *last* season's rows, so `Home_SeasonGames`
+   read ~25 instead of 2; mid-season it read ~4 when the true count was 7, so the gate was also
+   too strict; (b) **train/serve skew** — models are trained on exact pre-match Elo/Glicko/table
+   position but were served a lagged, smoothed version. Fixed: columns split into form (still
+   time-weighted averaged) vs state (**latest** pre-fixture value).
+2. **Season games now counted exactly** (`_add_season_games`) rather than inherited from the stored
+   counter, which is a *pre-match* value (always one behind) and stale across a season boundary.
+   Season start is league-aware (NOR/SWE calendar-year).
+3. **GPU flag had no actual fallback** — `USE_GPU=1` passed `device="gpu"`/`task_type="GPU"` blindly.
+   The standard pip lightgbm wheel has no GPU support and raises at fit time; the fold loop catches
+   base-model failures and substitutes **uniform probabilities**, so an unusable GPU config would
+   have silently dropped LGB/CatBoost from the ensemble on every fold while still producing
+   confident output. New **`gpu_utils.py`** probes each library once with a tiny fit and only passes
+   GPU params if it actually works.
+4. **NB probabilities were being scaled by the DC-tuned temperature** — `dc_temperature` (tuned to
+   1.25 against Dixon-Coles goals output) was applied to negative-binomial cards/corners output once
+   NB became the second blend signal. Split into `nb_temperature` (default 1.0 = no scaling).
+   Currently inert because alpha≈1.0 for these markets, but it would have bitten on re-tune.
+5. **Duplicate-fixture guard** — DC/NB prices and Glicko/season-games are assigned *positionally*
+   after a merge; a duplicated fixture key would multiply rows and silently misalign every one of
+   them. Now de-duplicated on input and the DC merge asserts the row count is unchanged.
+
+### Reviewed and found correct
+NB blending wiring (`nb_predict.py`, `blending.py` alpha=1.0 passthrough fix), the season cold-start
+gate logic itself, fetch resilience/unavailable tables, and the new DB indexes.
 
 ---
 
@@ -563,6 +618,13 @@ py -c "from blending import learn_blend_weights; learn_blend_weights()"
 
 # Backtest (last 4 weeks, 70% confidence floor)
 py market_backtest.py --weeks 4 --min-confidence 0.70
+
+# Picks + half-Kelly stakes (three steps; nothing is placed)
+py tools/best_bets.py                      # 1. picks, with break-even MinOdds
+py betfair/betfair_odds.py                 # 2. READ-ONLY Betfair price snapshot
+py tools/best_bets.py --bank 500           # 3. re-run with stakes attached
+# Defensive variant while calibration is still being established:
+py tools/best_bets.py --bank 500 --prob-shrink 0.3 --max-fraction 0.03
 
 # Autotune (overnight — delete cache first if models were retrained)
 del outputs\tuning_preds_cache.parquet
