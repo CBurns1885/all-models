@@ -59,13 +59,6 @@ try:
 except Exception:
     _HAS_CAT = False
 
-try:
-    import torch
-    import torch.nn as nn
-    _HAS_TORCH = True
-except Exception:
-    _HAS_TORCH = False
-
 import joblib
 
 from config import (
@@ -466,66 +459,6 @@ def _preprocessor(df: pd.DataFrame, num_cols=None, cat_cols=None) -> ColumnTrans
     ])
 
 
-# Bayesian Neural Network (optional - disabled due to PyTorch)
-try:
-    import torch
-    import torch.nn as nn
-    class SmallBNN(nn.Module):
-        def __init__(self, input_dim, output_dim):
-            super().__init__()
-            self.fc1 = nn.Linear(input_dim, 64)
-            self.fc2 = nn.Linear(64, 32)
-            self.fc3 = nn.Linear(32, output_dim)
-        def forward(self, x):
-            x = torch.relu(self.fc1(x))
-            x = torch.relu(self.fc2(x))
-            return self.fc3(x)
-except:
-    SmallBNN = None
-
-class BNNWrapper(BaseEstimator, ClassifierMixin):
-    def __init__(self, n_classes: int, epochs=20, lr=1e-3, dropout=0.2, mc=20, seed=42):
-        self.n_classes = n_classes
-        self.epochs = epochs
-        self.lr = lr
-        self.dropout = dropout
-        self.mc = mc
-        self.seed = seed
-        self.model = None
-        self.in_dim = None
-
-    def fit(self, X, y):
-        if not _HAS_TORCH:
-            raise RuntimeError("Torch not available")
-        torch.manual_seed(self.seed)
-        self.in_dim = X.shape[1]
-        self.model = SmallBNN(self.in_dim, self.n_classes)
-        opt = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        crit = nn.CrossEntropyLoss()
-        X_t = torch.tensor(X, dtype=torch.float32)
-        y_t = torch.tensor(y, dtype=torch.long)
-        self.model.train()
-        for _ in range(self.epochs):
-            opt.zero_grad()
-            logits = self.model(X_t)
-            loss = crit(logits, y_t)
-            loss.backward()
-            opt.step()
-        return self
-
-    def predict_proba(self, X):
-        if self.model is None:
-            raise RuntimeError("Unfitted BNN")
-        self.model.train()  # MC dropout
-        X_t = torch.tensor(X, dtype=torch.float32)
-        outs = []
-        for _ in range(self.mc):
-            with torch.no_grad():
-                logits = self.model(X_t).numpy()
-                probs = _softmax_np(logits)
-                outs.append(probs)
-        return np.mean(np.stack(outs, axis=0), axis=0)
-
 def _softmax_np(z):
     z = z - z.max(axis=1, keepdims=True)
     e = np.exp(z)
@@ -564,7 +497,7 @@ def _build_base_model(name: str, n_classes: int, feature_names: List[str], marke
     """Build a base model with pre-tuned or default parameters.
 
     Args:
-        name: Model name (rf, et, xgb, lgb, cat, lr, bnn)
+        name: Model name (rf, et, xgb, lgb, cat, lr)
         n_classes: Number of classes
         feature_names: Feature names (for compatibility)
         market_type: "binary", "multiclass", or "ordinal"
@@ -652,9 +585,6 @@ def _build_base_model(name: str, n_classes: int, feature_names: List[str], marke
             random_state=RANDOM_SEED,
             **_cat_gpu_params()
         )
-    if name == "bnn" and _HAS_TORCH:
-        epochs = 10 if n_est < 200 else 25
-        return BNNWrapper(n_classes=n_classes, epochs=epochs, lr=1e-3, dropout=0.2, mc=20, seed=RANDOM_SEED)
     raise RuntimeError(f"Unknown / unavailable base model: {name}")
 
 # --------------------------------------------------------------------------------------
@@ -1245,8 +1175,6 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                 base_names.append("lgb")
             elif m == "cat" and _HAS_CAT:
                 base_names.append("cat")
-            elif m == "bnn" and _HAS_TORCH:
-                base_names.append("bnn")
 
         speed_mode = get_speed_mode()
         print(f"  [SPEED] Speed mode: {speed_mode.value} -> Models: {base_names}")
@@ -1299,7 +1227,6 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
             if _HAS_XGB: base_names.append("xgb")
             if _HAS_LGB: base_names.append("lgb")
             if _HAS_CAT: base_names.append("cat")
-            if _HAS_TORCH: base_names.append("bnn")
             print(f"  [TARGET] Using FULL ENSEMBLE models")
 
     # Add specialized models to ensemble (not replacing!)
@@ -1404,8 +1331,6 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                         m = model.__class__(**model.get_params())
                     elif name == "coral":
                         m = CORALOrdinal(C=1.0, max_iter=2000)
-                    elif name == "bnn" and _HAS_TORCH:
-                        m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
                     m.fit(Xt, yt)
                     # Align columns by the model's own classes_, not position —
                     # a fold's training window can be missing a middle class.
@@ -1507,8 +1432,6 @@ def _fit_single_target(df: pd.DataFrame, target_col: str) -> TrainedTarget:
                     m = model.__class__(**model.get_params())
                 elif name == "coral":
                     m = CORALOrdinal(C=1.0, max_iter=2000)
-                elif name == "bnn" and _HAS_TORCH:
-                    m = BNNWrapper(n_classes=len(classes), epochs=model.epochs, lr=model.lr, dropout=model.dropout, mc=model.mc, seed=model.seed)
                 m.fit(X_all, y_int)
                 fitted_bases[name] = m
         except Exception as e:

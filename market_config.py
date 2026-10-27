@@ -19,7 +19,7 @@ class MarketType(Enum):
 
 class ModelStrategy(Enum):
     """Model strategy for different market characteristics."""
-    FULL_ENSEMBLE = "full_ensemble"     # All models: RF, ET, XGB, LGB, CAT, LR, BNN
+    FULL_ENSEMBLE = "full_ensemble"     # All models: RF, ET, XGB, LGB, CAT, LR
     TREE_ENSEMBLE = "tree_ensemble"     # Trees only: RF, ET, XGB, LGB
     BOOSTING = "boosting"               # Gradient boosting: XGB, LGB, CAT
     LIGHTWEIGHT = "lightweight"          # Fast: RF, LR only
