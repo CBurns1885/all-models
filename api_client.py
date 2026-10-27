@@ -70,6 +70,22 @@ def test_api_connection() -> bool:
                 if current >= limit_day - 100:
                     print("[WARN] Approaching daily limit!")
 
+                subscription = data['response'].get('subscription', {})
+                if subscription:
+                    if not subscription.get('active', True):
+                        print("[ERROR] API-Football subscription is INACTIVE — renew the key")
+                        return False
+                    end = subscription.get('end')
+                    if end:
+                        try:
+                            end_dt = datetime.fromisoformat(str(end).replace('Z', '+00:00'))
+                            days_left = (end_dt.date() - datetime.now(end_dt.tzinfo).date()).days
+                            print(f"   Subscription ends: {end_dt.date()} ({days_left} days)")
+                            if days_left <= 7:
+                                print(f"[WARN] API-Football subscription expires in {days_left} days — renew now!")
+                        except ValueError:
+                            print(f"   Subscription ends: {end}")
+
             return True
         else:
             print(f"[ERROR] API returned status {response.status_code}")

@@ -221,7 +221,7 @@ class MarketSplitter:
 
             # Add confidence column (max probability)
             if renamed_cols:
-                market_df['Confidence'] = market_df[renamed_cols].max(axis=1)
+                market_df['Confidence'] = pd.to_numeric(market_df[renamed_cols].max(axis=1), errors='coerce')
                 market_df['Confidence_%'] = (market_df['Confidence'] * 100).round(1)
 
             # Filter: Keep only predictions with confidence >= 90%

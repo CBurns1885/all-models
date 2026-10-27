@@ -1407,14 +1407,16 @@ def calculate_confidence_scores(df: pd.DataFrame) -> pd.DataFrame:
 
 def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     """
-    Create combined output for 1X2, OU2.5, OU1.5, and BTTS markets above 90% confidence.
+    Create combined output for 1X2, OU2.5, OU1.5, and BTTS markets above 70% confidence.
     Shows all four markets side-by-side for each match where any qualifies.
+    Uses raw P_* ML probabilities (pre-temperature-scaling) so values are comparable
+    to picks_page.html and not artificially inflated by the BLEND temperature parameter.
     """
-    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 + BTTS >= 90%)...")
+    print("\n[COMBINED] Creating high-confidence combined output (1X2 + OU2.5 + OU1.5 + BTTS >= 70%)...")
 
-    # One source per market, in preference order BLEND > DC > P. Taking the
-    # max across ALL sources (as before) cherry-picks whichever model happens
-    # to be most confident per row, systematically inflating "90%+" picks.
+    # Use P_* (raw ML) first, DC as fallback. BLEND is intentionally skipped here
+    # because temperature_binary scaling pushes BLEND values to 90-99%+ for any
+    # moderately confident prediction, making the reported percentages misleading.
     def _pick_source(df_cols, candidates_by_source):
         for source_cols in candidates_by_source:
             if all(c in df_cols for c in source_cols):
@@ -1423,29 +1425,25 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
 
     markets = {
         '1X2': _pick_source(df.columns, [
-            ['BLEND_1X2_H', 'BLEND_1X2_D', 'BLEND_1X2_A'],
-            ['DC_1X2_H', 'DC_1X2_D', 'DC_1X2_A'],
             ['P_1X2_H', 'P_1X2_D', 'P_1X2_A'],
+            ['DC_1X2_H', 'DC_1X2_D', 'DC_1X2_A'],
         ]),
         'OU_2_5': _pick_source(df.columns, [
-            ['BLEND_OU_2_5_O', 'BLEND_OU_2_5_U'],
-            ['DC_OU_2_5_O', 'DC_OU_2_5_U'],
             ['P_OU_2_5_O', 'P_OU_2_5_U'],
+            ['DC_OU_2_5_O', 'DC_OU_2_5_U'],
         ]),
         'OU_1_5': _pick_source(df.columns, [
-            ['BLEND_OU_1_5_O', 'BLEND_OU_1_5_U'],
-            ['DC_OU_1_5_O', 'DC_OU_1_5_U'],
             ['P_OU_1_5_O', 'P_OU_1_5_U'],
+            ['DC_OU_1_5_O', 'DC_OU_1_5_U'],
         ]),
         'BTTS': _pick_source(df.columns, [
-            ['BLEND_BTTS_Y', 'BLEND_BTTS_N'],
-            ['DC_BTTS_Y', 'DC_BTTS_N'],
             ['P_BTTS_Y', 'P_BTTS_N'],
+            ['DC_BTTS_Y', 'DC_BTTS_N'],
         ]),
     }
 
     rows = []
-    threshold = 0.90
+    threshold = 0.70
 
     for idx, row in df.iterrows():
         match_info = {
@@ -1552,7 +1550,7 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     html_content = f"""<!DOCTYPE html>
 <html>
 <head>
-    <title>High Confidence Picks (90%+) - 1X2, OU2.5, OU1.5, BTTS</title>
+    <title>High Confidence Picks (70%+) - 1X2, OU2.5, OU1.5, BTTS</title>
     <style>
         body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }}
         h1 {{ color: #00d4ff; text-align: center; }}
@@ -1568,8 +1566,8 @@ def _write_combined_high_confidence(df: pd.DataFrame, path: Path):
     </style>
 </head>
 <body>
-    <h1>High Confidence Combined Picks (90%+)</h1>
-    <p class='summary'>{len(combined_df)} matches with at least one market above 90% confidence</p>
+    <h1>High Confidence Combined Picks (70%+)</h1>
+    <p class='summary'>{len(combined_df)} matches with at least one market above 70% confidence</p>
     <table>
         <tr>
             <th>Date</th>
@@ -1632,9 +1630,12 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
                 return True
         return False
 
-    prob_cols = [c for c in df.columns
-                 if (c.startswith("BLEND_") or c.startswith("P_") or c.startswith("DC_"))
-                 and _is_core_col(c)]
+    # Use P_* only — raw ML probabilities, pre-temperature-scaling.
+    # Taking max across BLEND_/DC_/P_ systematically inflates to 90-99%+
+    # because temperature_binary scaling pushes any BLEND > 0.65 toward 1.0.
+    prob_cols = [c for c in df.columns if c.startswith("P_") and _is_core_col(c)]
+    if not prob_cols:
+        prob_cols = [c for c in df.columns if c.startswith("DC_") and _is_core_col(c)]
     if not prob_cols:
         print("Warning: No core probability columns found")
         return
@@ -1698,7 +1699,7 @@ def _write_enhanced_html(df: pd.DataFrame, path: Path, secondary_path: Path = No
 <head>
     <meta charset='utf-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
-    <title>[TARGET] ULTIMATE Predictions - {elite_count} Elite Picks</title>
+    <title>Elite Picks (70%+) - {elite_count} picks</title>
     <style>
         * {{box-sizing: border-box; margin: 0; padding: 0;}}
         body {{

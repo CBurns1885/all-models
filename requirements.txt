@@ -39,6 +39,9 @@ python-dotenv>=1.0.0
 matplotlib>=3.5.0
 seaborn>=0.12.0
 
+# PDF output (OPTIONAL - for picks_page.pdf)
+fpdf2>=2.7.0
+
 # Additional utilities (standard library, no install needed)
 # - sqlite3 (built-in)
 # - smtplib (built-in)

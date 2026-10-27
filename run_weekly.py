@@ -34,6 +34,39 @@ parser.add_argument('--clean', action='store_true', default=False,
 args, _ = parser.parse_known_args()
 
 # ============================================================================
+# RUN LOG — mirror all console output to logs/run_weekly_<timestamp>.log
+# ============================================================================
+
+class _Tee:
+    """Write to the original stream and a log file at the same time."""
+    def __init__(self, stream, log_file):
+        self._stream = stream
+        self._log = log_file
+
+    def write(self, data):
+        self._stream.write(data)
+        try:
+            self._log.write(data)
+            self._log.flush()
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+_LOG_DIR = Path(__file__).resolve().parent / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+RUN_LOG_PATH = _LOG_DIR / f"run_weekly_{datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S')}.log"
+_run_log = open(RUN_LOG_PATH, "w", encoding="utf-8")
+sys.stdout = _Tee(sys.stdout, _run_log)
+sys.stderr = _Tee(sys.stderr, _run_log)
+print(f"[LOG] Writing run log to {RUN_LOG_PATH}")
+
+# ============================================================================
 # CONFIGURATION
 # ============================================================================
 
@@ -133,27 +166,58 @@ fixtures_file = None
 try:
     from api_client import download_upcoming_fixtures, test_api_connection, fetch_live_data_for_upcoming
 
-    print("Testing API-Football connection...")
-    if test_api_connection():
-        print("\n[OK] API-Football connected!")
+    import time
+    import pandas as pd
 
-        # Download fixtures
-        import pandas as pd
-        fixtures_df = download_upcoming_fixtures(DEFAULT_LEAGUES, days_ahead=7)
+    # Retry the API before dropping to the (much thinner) fallback source.
+    API_ATTEMPTS = 3
+    api_connected = False
+    fixtures_df = pd.DataFrame()
+    for attempt in range(1, API_ATTEMPTS + 1):
+        print(f"Testing API-Football connection (attempt {attempt}/{API_ATTEMPTS})...")
+        try:
+            if test_api_connection():
+                api_connected = True
+                print("\n[OK] API-Football connected!")
+                fixtures_df = download_upcoming_fixtures(DEFAULT_LEAGUES, days_ahead=7)
+                if not fixtures_df.empty:
+                    break
+                print(f"[WARN] API returned 0 fixtures on attempt {attempt}")
+            else:
+                print(f"[WARN] API connection check failed on attempt {attempt} (see reason above)")
+        except Exception as _api_err:
+            print(f"[WARN] API error on attempt {attempt}: {type(_api_err).__name__}: {_api_err}")
+        if attempt < API_ATTEMPTS:
+            wait = 30 * attempt
+            print(f"   Retrying in {wait}s...")
+            time.sleep(wait)
 
+    if api_connected:
         if not fixtures_df.empty:
             # Fetch live data (injuries & lineups) for upcoming fixtures
             print("\n[LIVE] Fetching injuries and lineups...")
             fixtures_df = fetch_live_data_for_upcoming(fixtures_df)
+
+            # Fetch API-Football's own predictions for upcoming fixtures (benchmark + feature signal)
+            try:
+                import subprocess
+                _fix_csv = str(OUTPUT_DIR / "upcoming_fixtures.csv")
+                print("\n[PREDICTIONS] Fetching API-Football predictions for upcoming fixtures...")
+                subprocess.run(
+                    [sys.executable, "fetch/fetch_predictions.py", "--from-csv", _fix_csv],
+                    check=False, timeout=300
+                )
+            except Exception as _pred_err:
+                print(f"[WARN] Predictions fetch skipped: {_pred_err}")
 
             # Save to outputs
             fixtures_file = OUTPUT_DIR / "upcoming_fixtures.csv"
             fixtures_df.to_csv(fixtures_file, index=False)
             print(f"[OK] Downloaded {len(fixtures_df)} fixtures via API (with live data)")
         else:
-            print("[WARN] No fixtures from API, trying fallback...")
+            print(f"[WARN] No fixtures from API after {API_ATTEMPTS} attempts, trying fallback...")
     else:
-        print("[WARN] API connection failed, trying fallback...")
+        print(f"[WARN] API connection failed after {API_ATTEMPTS} attempts, trying fallback...")
         
 except ImportError:
     print("[WARN] api_client.py not found, using fallback...")
@@ -261,7 +325,16 @@ try:
         if not NON_INTERACTIVE:
             input("Press Enter to exit...")
         sys.exit(1)
-    
+
+    if df.empty:
+        # An empty fixtures file means every downstream step runs on 0 matches
+        # and still reports SUCCESS — fail hard instead.
+        print(f"[ERROR] Fixtures file has 0 matches: {fixtures_file}")
+        print("[INFO] API-Football returned nothing (check key/connection) and the fallback was empty.")
+        if not NON_INTERACTIVE:
+            input("Press Enter to exit...")
+        sys.exit(1)
+
     print(f"[OK] Validated: {len(df)} matches found")
     print(f"   Leagues: {df['League'].unique().tolist()}")
 
@@ -373,6 +446,44 @@ try:
             print(f"  Deleted {MODEL_ARTIFACTS_DIR}")
         os.environ["FORCE_RETRAIN"] = "1"
         print("[CLEAN] All artifacts removed — will rebuild from scratch\n")
+
+    # Staleness check: the historical/features parquets are cached and were
+    # never refreshed between runs, so models silently trained on old data.
+    # If the API DB holds FT results newer than the parquet, rebuild everything.
+    def _check_data_freshness():
+        import sqlite3
+        import pandas as pd
+        from config import HISTORICAL_PARQUET, API_FOOTBALL_DB, LEAGUE_CODES
+
+        if not HISTORICAL_PARQUET.exists() or not API_FOOTBALL_DB.exists():
+            return
+        try:
+            parquet_max = pd.to_datetime(
+                pd.read_parquet(HISTORICAL_PARQUET, columns=["Date"])["Date"]
+            ).max()
+            placeholders = ",".join("?" * len(LEAGUE_CODES))
+            with sqlite3.connect(API_FOOTBALL_DB) as conn:
+                db_max = conn.execute(
+                    f"SELECT MAX(date) FROM fixtures WHERE status = 'FT' "
+                    f"AND league_code IN ({placeholders})",
+                    list(LEAGUE_CODES),
+                ).fetchone()[0]
+            db_max = pd.to_datetime(db_max) if db_max else None
+        except Exception as e:
+            print(f"[WARN] Data freshness check failed: {e}")
+            return
+
+        print(f"[DATA] Latest result in DB: {db_max.date() if db_max is not None else 'none'} | "
+              f"in training data: {parquet_max.date()}")
+        if db_max is not None and db_max.normalize() > parquet_max.normalize():
+            print("[REFRESH] DB has newer results — rebuilding historical data, features and models")
+            os.environ["FORCE_RETRAIN"] = "1"
+        elif (pd.Timestamp.now() - parquet_max).days > 14:
+            print(f"[WARN] Training data is {(pd.Timestamp.now() - parquet_max).days} days old "
+                  f"and the DB has nothing newer — run fetch/fetch_season_data.py")
+
+    if not args.clean:
+        _check_data_freshness()
 
     # Step 1: Build historical database (uses shared API-Football DB)
     def step1():
@@ -591,10 +702,36 @@ try:
     # SUCCESS SUMMARY
     # ========================================================================
     
+    # Verify the key outputs actually contain predictions before claiming success
+    output_problems = []
+    _full_csv = OUTPUT_DIR / "weekly_bets_full.csv"
+    if not _full_csv.exists():
+        output_problems.append("weekly_bets_full.csv missing")
+    else:
+        try:
+            if pd.read_csv(_full_csv).empty:
+                output_problems.append("weekly_bets_full.csv has 0 predictions")
+        except Exception as _csv_err:
+            output_problems.append(f"weekly_bets_full.csv unreadable: {_csv_err}")
+    if not (OUTPUT_DIR / "picks_page.html").exists():
+        output_problems.append("picks_page.html not generated")
+
+    if output_problems:
+        print("\n" + "="*60)
+        print("[FAILED] PIPELINE DID NOT PRODUCE USABLE OUTPUTS")
+        print("="*60)
+        for problem in output_problems:
+            print(f"   * {problem}")
+        for error in errors:
+            print(f"   * {error}")
+        print(f"\n[INFO] Full log: {RUN_LOG_PATH}")
+        print("[INFO] Nothing from this run should be bet.")
+        sys.exit(1)
+
     print("\n" + "="*60)
     print("[SUCCESS] PIPELINE COMPLETE!")
     print("="*60)
-    
+
     if errors:
         print(f"\n[WARN] {len(errors)} step(s) had errors:")
         for error in errors:

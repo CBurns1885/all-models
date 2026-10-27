@@ -31,7 +31,7 @@ from api_client import (
 
 _TIER_RANK = {"elite": 0, "high": 1, "medium": 2}
 
-SEASON = 2025
+SEASON = 2026
 
 
 def fetch_all_fixtures():
@@ -139,6 +139,12 @@ def print_db_summary():
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--season", type=int, default=SEASON, help="Season start year (e.g. 2026 for 2026/27)")
+    args = ap.parse_args()
+    SEASON = args.season
+
     print("=" * 60)
     print(f"SEASON DATA FETCH — season {SEASON}")
     print("=" * 60)

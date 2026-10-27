@@ -1243,6 +1243,219 @@ def _add_prev_season_standings(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# -----------------------------
+# Event-derived rolling features
+# -----------------------------
+
+def _add_event_features(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:
+    """Add rolling event-based features from the fixture_events DB table.
+
+    For each team, computes rolling means over the last `window` matches (leakage-
+    safe via shift(1) before rolling):
+      Home/Away_EarlyGoalRate   — scored in first 15 min
+      Home/Away_EarlyConcededRate — conceded in first 15 min
+      Home/Away_LateGoalRate    — scored after 75 min
+      Home/Away_FirstGoalRate   — team scored the match's first goal
+      Home/Away_EarlyCardRate   — received a card before min 30
+      Home/Away_CardsPerGame    — average cards per match
+
+    Requires fixture_id column in df (present before step 9 drops it).
+    Silently skips if the fixture_events table is missing or empty.
+    """
+    if 'fixture_id' not in df.columns:
+        print("   [EVENTS] No fixture_id in df — skipping")
+        return df
+
+    try:
+        import sqlite3
+        from config import API_FOOTBALL_DB
+        conn = sqlite3.connect(API_FOOTBALL_DB, timeout=30)
+        tables = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()}
+        if 'fixture_events' not in tables:
+            print("   [EVENTS] fixture_events table missing — skipping")
+            conn.close()
+            return df
+        n_ev = conn.execute("SELECT COUNT(*) FROM fixture_events").fetchone()[0]
+        if n_ev == 0:
+            print("   [EVENTS] fixture_events table empty — skipping")
+            conn.close()
+            return df
+
+        ev = pd.read_sql_query("""
+            SELECT e.fixture_id,
+                   e.elapsed,
+                   e.type,
+                   e.detail,
+                   e.team_id,
+                   f.home_team_id,
+                   f.away_team_id
+            FROM fixture_events e
+            JOIN fixtures f ON e.fixture_id = f.fixture_id
+            WHERE e.type IN ('Goal', 'Card')
+              AND e.elapsed IS NOT NULL
+        """, conn)
+        conn.close()
+    except Exception as e:
+        print(f"   [EVENTS] DB error: {e} — skipping")
+        return df
+
+    if ev.empty:
+        print("   [EVENTS] No goal/card events in DB — skipping")
+        return df
+
+    ev['is_home'] = ev['team_id'] == ev['home_team_id']
+    goals = ev[(ev['type'] == 'Goal') & (ev['detail'] != 'Own Goal')].copy()
+    cards = ev[ev['type'] == 'Card'].copy()
+
+    # --- Per-fixture aggregates ---
+    def _goal_agg(g):
+        hg = g[g['is_home']]
+        ag = g[~g['is_home']]
+        return pd.Series({
+            'home_early_goal': int((hg['elapsed'] <= 15).any()),
+            'away_early_goal': int((ag['elapsed'] <= 15).any()),
+            'home_late_goal':  int((hg['elapsed'] >= 75).any()),
+            'away_late_goal':  int((ag['elapsed'] >= 75).any()),
+            'home_goals':      len(hg),
+            'away_goals':      len(ag),
+        })
+
+    fix_goals = goals.groupby('fixture_id').apply(_goal_agg, include_groups=False).reset_index() if not goals.empty \
+        else pd.DataFrame(columns=['fixture_id','home_early_goal','away_early_goal',
+                                   'home_late_goal','away_late_goal','home_goals','away_goals'])
+
+    # First goal scorer
+    if not goals.empty:
+        first = (goals.sort_values('elapsed')
+                 .groupby('fixture_id').first()
+                 .reset_index()[['fixture_id', 'is_home']]
+                 .rename(columns={'is_home': 'home_scored_first'}))
+        fix_goals = fix_goals.merge(first, on='fixture_id', how='left')
+        fix_goals['home_scored_first'] = fix_goals['home_scored_first'].astype(float)
+        no_goal_mask = (fix_goals['home_goals'] + fix_goals['away_goals']) == 0
+        fix_goals.loc[no_goal_mask, 'home_scored_first'] = np.nan
+    else:
+        fix_goals['home_scored_first'] = np.nan
+
+    def _card_agg(g):
+        hc = g[g['is_home']]
+        ac = g[~g['is_home']]
+        return pd.Series({
+            'home_cards':      len(hc),
+            'away_cards':      len(ac),
+            'home_early_card': int((hc['elapsed'] <= 30).any()),
+            'away_early_card': int((ac['elapsed'] <= 30).any()),
+        })
+
+    fix_cards = cards.groupby('fixture_id').apply(_card_agg, include_groups=False).reset_index() if not cards.empty \
+        else pd.DataFrame(columns=['fixture_id','home_cards','away_cards',
+                                   'home_early_card','away_early_card'])
+
+    fix_sum = fix_goals.merge(fix_cards, on='fixture_id', how='outer')
+    # Fill binary/count columns but leave home_scored_first NaN for goalless fixtures
+    _fill_cols = [c for c in fix_sum.columns if c != 'home_scored_first' and c != 'fixture_id']
+    fix_sum[_fill_cols] = fix_sum[_fill_cols].fillna(0)
+
+    # Bridge fixture_id → team names + date from main df
+    bridge = (df[['fixture_id', 'HomeTeam', 'AwayTeam', 'Date']]
+              .dropna(subset=['fixture_id'])
+              .copy())
+    bridge['fixture_id'] = bridge['fixture_id'].astype(int)
+    fix_sum['fixture_id'] = fix_sum['fixture_id'].astype(int)
+
+    matched = bridge.merge(fix_sum, on='fixture_id', how='inner')
+    if matched.empty:
+        print("   [EVENTS] No event data matched to training fixtures — skipping")
+        return df
+
+    n_fix = bridge['fixture_id'].nunique()
+    print(f"   [EVENTS] Matched {len(matched):,}/{n_fix:,} fixtures to event data")
+
+    # Build long-form: one row per (fixture, team) from each side's perspective
+    feat_raw = ['ev_early_goal', 'ev_conceded_early', 'ev_late_goal',
+                'ev_first_goal', 'ev_early_card', 'ev_cards']
+    key_cols = ['fixture_id', 'team', 'Date']
+
+    home_long = matched.assign(
+        team             = matched['HomeTeam'],
+        ev_early_goal    = matched['home_early_goal'].astype(float),
+        ev_conceded_early= matched['away_early_goal'].astype(float),
+        ev_late_goal     = matched['home_late_goal'].astype(float),
+        ev_first_goal    = matched['home_scored_first'].astype(float),
+        ev_early_card    = matched['home_early_card'].astype(float),
+        ev_cards         = matched['home_cards'].astype(float),
+    )[key_cols + feat_raw]
+
+    away_long = matched.assign(
+        team             = matched['AwayTeam'],
+        ev_early_goal    = matched['away_early_goal'].astype(float),
+        ev_conceded_early= matched['home_early_goal'].astype(float),
+        ev_late_goal     = matched['away_late_goal'].astype(float),
+        ev_first_goal    = (1 - matched['home_scored_first']).astype(float),
+        ev_early_card    = matched['away_early_card'].astype(float),
+        ev_cards         = matched['away_cards'].astype(float),
+    )[key_cols + feat_raw]
+
+    long = pd.concat([home_long, away_long], ignore_index=True)
+    long = long.sort_values(['team', 'Date']).reset_index(drop=True)
+
+    # Rolling with shift(1) so current match is excluded from its own features
+    rolled = (long.groupby('team')[feat_raw]
+              .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean()))
+    roll_cols = [f'r_{c}' for c in feat_raw]
+    long[roll_cols] = rolled
+
+    # Rejoin rolled stats back — one join for home side, one for away side
+    home_join = (bridge[['fixture_id', 'HomeTeam']]
+                 .merge(long[['fixture_id', 'team'] + roll_cols],
+                        left_on=['fixture_id', 'HomeTeam'],
+                        right_on=['fixture_id', 'team'], how='left')
+                 .drop(columns=['team', 'HomeTeam'])
+                 .rename(columns={
+                     'r_ev_early_goal':     'Home_EarlyGoalRate',
+                     'r_ev_conceded_early': 'Home_EarlyConcededRate',
+                     'r_ev_late_goal':      'Home_LateGoalRate',
+                     'r_ev_first_goal':     'Home_FirstGoalRate',
+                     'r_ev_early_card':     'Home_EarlyCardRate',
+                     'r_ev_cards':          'Home_CardsPerGame',
+                 })
+                 .set_index('fixture_id'))
+
+    away_join = (bridge[['fixture_id', 'AwayTeam']]
+                 .merge(long[['fixture_id', 'team'] + roll_cols],
+                        left_on=['fixture_id', 'AwayTeam'],
+                        right_on=['fixture_id', 'team'], how='left')
+                 .drop(columns=['team', 'AwayTeam'])
+                 .rename(columns={
+                     'r_ev_early_goal':     'Away_EarlyGoalRate',
+                     'r_ev_conceded_early': 'Away_EarlyConcededRate',
+                     'r_ev_late_goal':      'Away_LateGoalRate',
+                     'r_ev_first_goal':     'Away_FirstGoalRate',
+                     'r_ev_early_card':     'Away_EarlyCardRate',
+                     'r_ev_cards':          'Away_CardsPerGame',
+                 })
+                 .set_index('fixture_id'))
+
+    new_cols = list(home_join.columns) + list(away_join.columns)
+
+    # Map rolled stats onto main df via fixture_id
+    df = df.copy()
+    fid = df['fixture_id'].where(df['fixture_id'].notna(), other=np.nan)
+    fid_int = pd.to_numeric(fid, errors='coerce').astype('Int64')
+
+    home_dict = {col: home_join[col].to_dict() for col in home_join.columns}
+    away_dict = {col: away_join[col].to_dict() for col in away_join.columns}
+
+    for col, d in {**home_dict, **away_dict}.items():
+        df[col] = fid_int.map(d)
+
+    n_covered = df['Home_EarlyGoalRate'].notna().sum()
+    print(f"   Added {len(new_cols)} event features ({n_covered:,}/{len(df):,} rows covered)")
+    return df
+
+
 # Main build function
 # -----------------------------
 
@@ -1390,6 +1603,10 @@ def build_features(force: bool = False) -> Path:
     df = _add_h2h_features(df, n_matches=5)
     h2h_cols = [c for c in df.columns if c.startswith('H2H_')]
     print(f"   Added H2H features: {h2h_cols}")
+
+    # 7b. Event-derived rolling features
+    print("7b. Adding event features...")
+    df = _add_event_features(df)
 
     # 8. Targets (note: _add_all_targets requires FTR in df)
     print("8. Creating target variables...")
